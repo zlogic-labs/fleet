@@ -1,0 +1,22 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# local config / secrets
+.env
+.env.local
+/config/local.yaml
+*.local.yaml
+
+# editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# tool caches
+.zlogic/
