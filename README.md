@@ -3,6 +3,8 @@
 An open-source platform for self-hosting open models: an OpenAI-compatible
 gateway with metering, and Kubernetes-native model deployment on GPU.
 
+Repository: <https://github.com/zlogic-labs/fleet>
+
 **Status: early development.** The design is settled and documented; the
 implementation is being built module by module against it.
 
@@ -62,7 +64,10 @@ on bare Linux.
 
 ## License
 
-Apache 2.0. The `LICENSE` file has not been added yet.
+Apache 2.0 — see [LICENSE](LICENSE). Third-party dependency licenses are
+recorded in [NOTICE](NOTICE).
+
+Copyright 2026 Zlogic Labs.
 
 ## Contributing
 

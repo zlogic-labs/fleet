@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zlogic/fleet/core/pkg/tokenizer"
+	"github.com/zlogic-labs/fleet/core/pkg/tokenizer"
 )
 
 func TestResolvePicksLongestMatchingPrefix(t *testing.T) {

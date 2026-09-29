@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/zlogic/fleet/core/pkg/errs"
-	"github.com/zlogic/fleet/core/pkg/openai"
+	"github.com/zlogic-labs/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // maxErrorBody bounds how much of a failing response we read before deciding

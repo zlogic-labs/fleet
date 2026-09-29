@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zlogic/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
 // errNotSupported means the endpoint is up but does not implement the probed

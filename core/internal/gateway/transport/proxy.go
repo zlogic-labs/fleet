@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zlogic/fleet/core/internal/engine"
-	"github.com/zlogic/fleet/core/pkg/errs"
-	"github.com/zlogic/fleet/core/pkg/openai"
+	"github.com/zlogic-labs/fleet/core/internal/engine"
+	"github.com/zlogic-labs/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // Authorize sets the credential the engine expects. It is a callback rather

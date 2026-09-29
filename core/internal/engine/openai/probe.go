@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/zlogic/fleet/core/internal/engine"
-	"github.com/zlogic/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/internal/engine"
+	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
 // Name identifies the adapter. It matches the engine family a FleetDeployment

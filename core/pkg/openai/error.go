@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/zlogic/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
 // ErrorEnvelope is the error shape every OpenAI-compatible client expects.

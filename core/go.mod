@@ -1,4 +1,4 @@
-module github.com/zlogic/fleet/core
+module github.com/zlogic-labs/fleet/core
 
 go 1.26.4
 

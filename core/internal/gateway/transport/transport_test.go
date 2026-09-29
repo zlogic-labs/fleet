@@ -9,9 +9,9 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/zlogic/fleet/core/internal/engine"
-	"github.com/zlogic/fleet/core/internal/gateway/transport"
-	"github.com/zlogic/fleet/core/pkg/openai"
+	"github.com/zlogic-labs/fleet/core/internal/engine"
+	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
+	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 const usageFrame = `data: {"id":"1","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`

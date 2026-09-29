@@ -107,7 +107,7 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 
 依赖方向严格单向：`pkg` ← `core/internal` ← `cmd`。`operator` 单向依赖 `core`。
 
-### `core`（module `github.com/zlogic/fleet`，零 k8s 依赖）
+### `core`（module `github.com/zlogic-labs/fleet`，零 k8s 依赖）
 
 | 包 | 职责 | 关键类型 |
 |---|---|---|

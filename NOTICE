@@ -1,0 +1,22 @@
+Fleet
+Copyright 2026 Zlogic Labs
+
+This product includes software developed at Zlogic Labs.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full terms.
+
+--------------------------------------------------------------------------------
+Third-party dependencies
+--------------------------------------------------------------------------------
+
+Fleet vendors no third-party source. Dependencies are resolved through the Go
+module system and carry their own licenses, recorded in each module's go.mod
+within go.sum alongside its version. The direct dependencies of the `core`
+module as of this commit:
+
+    github.com/pkoukk/tiktoken-go         MIT
+    github.com/pkoukk/tiktoken-go-loader  MIT
+
+Add any newly introduced direct dependency to this list in the same commit that
+introduces it.

@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/zlogic/fleet/core/pkg/openai"
+	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // usageMarker is the cheap gate that keeps the tap off the JSON parser for

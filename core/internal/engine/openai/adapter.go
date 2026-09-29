@@ -1,6 +1,6 @@
 package openai
 
-import "github.com/zlogic/fleet/core/internal/engine"
+import "github.com/zlogic-labs/fleet/core/internal/engine"
 
 // Adapter probes endpoints that speak the OpenAI-compatible protocol. Every
 // runtime Fleet supports today does, so this is the default and the only
