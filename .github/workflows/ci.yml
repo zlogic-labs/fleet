@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The build matrix is the check that Fleet stays portable. A dependency that
+  # only builds on one architecture fails here rather than in a customer's
+  # cluster, so this is not optional decoration.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   arch: amd64 }
+          - { os: linux,   arch: arm64 }
+          - { os: darwin,  arch: arm64 }
+          - { os: windows, arch: amd64 }
+    runs-on: ${{ matrix.os == 'darwin' && 'macos-14' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Build
+        working-directory: core
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: Build a linked binary
+        working-directory: core
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build -o /tmp/fleet-linkcheck ./cmd/fleet-gateway
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: No cgo anywhere in the graph
+        working-directory: core
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          found=$(go list -deps -f '{{if .CgoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$')
+          if [ -n "$found" ]; then
+            echo "::error::cgo dependencies found: $found"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: core
+        run: go vet ./...
+
+      - name: Tests
+        working-directory: core
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l core)
+          if [ -n "$out" ]; then
+            echo "::error::unformatted files: $out"
+            exit 1
+          fi

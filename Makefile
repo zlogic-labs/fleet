@@ -1,42 +1,67 @@
 # Fleet build entry points.
 #
-# GOARCH is pinned because the local toolchain is a 32-bit Windows build; a
-# gateway that holds thousands of streaming connections needs the full address
-# space. Remove the override once a 64-bit toolchain is installed.
+# Fleet is pure Go: no cgo, no C toolchain, no architecture-specific code. Every
+# release binary below is statically linked and cross-compiles from any host.
+# If a target ever needs CGO_ENABLED=1, something has taken a native dependency
+# and should not have.
 
-GOARCH ?= amd64
-GOBIN  := $(CURDIR)/bin
-CMDS   := fleet-gateway fleet-apiserver
+CGO_ENABLED ?= 0
+GOBIN       := $(CURDIR)/bin
+CMDS        := fleet-gateway fleet-apiserver
 # Only the modules that exist right now; operator/ is added when it lands.
-MODS   := $(wildcard core operator)
-PKGS   := $(MODS:%=%/...)
+MODS        := $(wildcard core operator)
+PKGS        := $(MODS:%=%/...)
+
+# Release targets. linux/amd64 covers NVIDIA and the mainstream domestic GPU
+# cards; linux/arm64 covers Ascend 910B on Kunpeng and Apple Silicon hosts;
+# darwin/arm64 is for local development.
+RELEASE_TARGETS := linux/amd64 linux/arm64 darwin/arm64
 
 .DEFAULT_GOAL := build
 
 .PHONY: build
-build: ## Compile every command into ./bin
+build: ## Compile every command for the host platform into ./bin
 	@mkdir -p $(GOBIN)
 	@for cmd in $(CMDS); do \
 		echo "  build $$cmd"; \
-		GOOS= GOARCH=$(GOARCH) go build -o $(GOBIN)/$$cmd ./core/cmd/$$cmd || exit 1; \
+		CGO_ENABLED=$(CGO_ENABLED) go build -o $(GOBIN)/$$cmd ./core/cmd/$$cmd || exit 1; \
+	done
+
+.PHONY: build-release
+build-release: ## Cross-compile for every supported platform
+	@for target in $(RELEASE_TARGETS); do \
+		os=$${target%/*}; arch=$${target#*/}; \
+		for cmd in $(CMDS); do \
+			echo "  build $$cmd for $$target"; \
+			CGO_ENABLED=$(CGO_ENABLED) GOOS=$$os GOARCH=$$arch \
+				go build -o $(GOBIN)/$$os-$$arch/$$cmd ./core/cmd/$$cmd || exit 1; \
+		done; \
 	done
 
 .PHONY: test
 test: ## Run the unit tests
-	GOARCH=$(GOARCH) go test $(PKGS)
+	CGO_ENABLED=$(CGO_ENABLED) go test $(PKGS)
 
 .PHONY: test-race
-test-race: ## Run the unit tests under the race detector
-	GOARCH=$(GOARCH) go test -race $(PKGS)
+test-race: ## Run the unit tests under the race detector (needs a C toolchain)
+	CGO_ENABLED=1 go test -race $(PKGS)
 
 .PHONY: cover
 cover: ## Report coverage per package
-	GOARCH=$(GOARCH) go test -coverprofile=coverage.out $(PKGS)
-	GOARCH=$(GOARCH) go tool cover -func=coverage.out | tail -1
+	CGO_ENABLED=$(CGO_ENABLED) go test -coverprofile=coverage.out $(PKGS)
+	go tool cover -func=coverage.out | tail -1
 
 .PHONY: vet
 vet: ## Run go vet
-	GOARCH=$(GOARCH) go vet $(PKGS)
+	CGO_ENABLED=$(CGO_ENABLED) go vet $(PKGS)
+
+.PHONY: check-cgo
+check-cgo: ## Fail if anything in the dependency graph needs a C toolchain
+	@found=$$(go list -deps -f '{{if .CgoFiles}}{{.ImportPath}}{{end}}' $(PKGS) | grep -v '^$$'); \
+	if [ -n "$$found" ]; then \
+		echo "cgo dependencies found:"; echo "$$found"; exit 1; \
+	fi; \
+	echo "  no cgo dependencies"
 
 .PHONY: fmt
 fmt: ## Format every package
@@ -55,7 +80,7 @@ tidy: ## Tidy every module
 	done
 
 .PHONY: check
-check: fmt-check vet test ## Everything CI runs
+check: fmt-check vet check-cgo test ## Everything CI runs
 
 .PHONY: clean
 clean:
@@ -64,4 +89,4 @@ clean:
 .PHONY: help
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
-		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
