@@ -84,3 +84,76 @@ jobs:
             echo "::error::unformatted files: $out"
             exit 1
           fi
+
+      - name: Check that the embedded console is not committed
+        run: |
+          out=$(git ls-files core/internal/gateway/webui/dist | grep -v '\.gitkeep$' || true)
+          if [ -n "$out" ]; then
+            echo "::error::built console is tracked; run 'make web' locally instead: $out"
+            exit 1
+          fi
+
+  # The console is a separate toolchain with its own failure modes: a type
+  # error that `go build` cannot see, or a bundle that stops resolving against
+  # the gateway's asset routes. The second is only caught by actually
+  # embedding the output and checking the routes.
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc -b --noEmit
+
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+      - name: Stage for embedding
+        run: |
+          rm -rf core/internal/gateway/webui/dist
+          mkdir -p core/internal/gateway/webui/dist
+          cp -R web/dist/. core/internal/gateway/webui/dist/
+
+      - name: The gateway embeds it
+        working-directory: core
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o /tmp/fleet-web ./cmd/fleet-gateway
+
+      - name: Every asset the bundle references is served
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          /tmp/fleet-web --demo --listen 127.0.0.1:8080 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/healthz >/dev/null && break
+            sleep 0.5
+          done
+
+          fail=0
+          for path in $(curl -sf http://127.0.0.1:8080/ | grep -o '/assets/[A-Za-z0-9._-]*' | sort -u); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080$path")
+            echo "$code $path"
+            [ "$code" = "200" ] || fail=1
+          done
+
+          # A deep link must return the app shell, not a 404: the console owns
+          # client-side routing and the gateway has no rewrite rules.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/models)
+          echo "$code /models (deep link)"
+          [ "$code" = "200" ] || fail=1
+          exit $fail

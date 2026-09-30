@@ -12,12 +12,35 @@ CMDS        := fleet-gateway fleet-apiserver
 MODS        := $(wildcard core operator)
 PKGS        := $(MODS:%=%/...)
 
+# The operator console is an npm project whose output is embedded into
+# core/internal/gateway/webui/assets. Keeping the two in one repository means
+# the Go build has a single checkout to depend on, and `make build` can embed a
+# current console without a second repository to pin.
+WEB_DIR    := web
+WEB_OUT    := $(WEB_DIR)/dist
+WEB_DIST   := core/internal/gateway/webui/dist
+
 # Release targets. linux/amd64 covers NVIDIA and the mainstream domestic GPU
 # cards; linux/arm64 covers Ascend 910B on Kunpeng and Apple Silicon hosts;
 # darwin/arm64 is for local development.
 RELEASE_TARGETS := linux/amd64 linux/arm64 darwin/arm64
 
 .DEFAULT_GOAL := build
+
+.PHONY: web-deps
+web-deps: ## Install the console's npm dependencies
+	cd $(WEB_DIR) && npm ci --no-audit --no-fund
+
+.PHONY: web
+web: web-deps ## Build the console and stage it for embedding into the gateway
+	cd $(WEB_DIR) && npm run build
+	@rm -rf $(WEB_DIST) && mkdir -p $(WEB_DIST) && touch $(WEB_DIST)/.gitkeep
+	cp -R $(WEB_OUT)/. $(WEB_DIST)/
+	@echo "  staged $$(find $(WEB_DIST) -type f ! -name .gitkeep | wc -l) files into $(WEB_DIST)"
+
+.PHONY: web-dev
+web-dev: web-deps ## Run the console dev server against a local gateway
+	cd $(WEB_DIR) && npm run dev
 
 .PHONY: build
 build: ## Compile every command for the host platform into ./bin
@@ -28,7 +51,7 @@ build: ## Compile every command for the host platform into ./bin
 	done
 
 .PHONY: build-release
-build-release: ## Cross-compile for every supported platform
+build-release: web ## Cross-compile for every supported platform
 	@for target in $(RELEASE_TARGETS); do \
 		os=$${target%/*}; arch=$${target#*/}; \
 		for cmd in $(CMDS); do \
@@ -80,11 +103,15 @@ tidy: ## Tidy every module
 	done
 
 .PHONY: check
-check: fmt-check vet check-cgo test ## Everything CI runs
+check: fmt-check vet check-cgo test web-typecheck ## Everything CI runs
+
+.PHONY: web-typecheck
+web-typecheck: ## Typecheck the console
+	cd $(WEB_DIR) && npx tsc -b --noEmit
 
 .PHONY: clean
 clean:
-	rm -rf $(GOBIN) coverage.out
+	rm -rf $(GOBIN) coverage.out $(WEB_OUT)
 
 .PHONY: help
 help: ## List targets

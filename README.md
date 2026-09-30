@@ -39,19 +39,26 @@ These are the rules the code is written against. Changing one requires an ADR.
 Two Go modules, split so that P7 is a compile error rather than a convention.
 
 ```
-core/      gateway, billing, storage, engine abstraction   no k8s dependency
-operator/  CRDs, reconcilers, GPU scheduling                depends on core
+core/      gateway, control plane, billing, storage        no k8s dependency
+operator/  CRDs, reconcilers, GPU scheduling               depends on core
+web/       operator console (React + antd)                 builds into core
 docs/      architecture and ADRs
 ```
+
+Neither `core` nor the console reads Kubernetes. Node and GPU inventory
+arrives from the operator running inside the cluster and is reported to the
+control plane, which is why the cluster page can be empty on a fresh checkout
+and that is the correct state rather than a missing feature.
 
 ## Try it
 
 ```sh
+make web                        # build the console once
 go run ./core/cmd/fleet-gateway --demo
 ```
 
-Then open <http://127.0.0.1:8080>. The console has a chat playground and a
-fleet view showing endpoints, entitlements and per-request latency.
+Then open <http://127.0.0.1:8080>. Four pages: a chat playground, live fleet
+state, the model registry, and cluster inventory.
 
 `--demo` starts a built-in stub engine in the same process, so nothing needs
 to be installed and no GPU is involved. The replies are canned — the point is
@@ -79,13 +86,20 @@ upstreams:
 ## Development
 
 ```sh
-make check          # gofmt + go vet + no-cgo check + tests
+make check          # gofmt + go vet + no-cgo check + tests + console types
 make build          # host binaries into ./bin
+make web            # build the console and stage it for embedding
+make web-dev        # console dev server on :5173, proxying to a local gateway
 make build-release  # linux/amd64, linux/arm64, darwin/arm64
 make help           # all targets
 ```
 
-Requires Go 1.26+.
+Requires Go 1.26+ and Node 20+.
+
+The console bundle is built by `web/` and embedded into the gateway binary; it
+is not committed. A fresh clone still compiles — the binary serves a
+placeholder telling you to run `make web` — and `build-release` depends on it
+so a release never ships a binary with the placeholder in it.
 
 Fleet is pure Go. There is no cgo anywhere in the dependency graph and no
 architecture-specific code, so every release binary is statically linked and

@@ -1,0 +1,40 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+/* The streaming cursor. A blinking block rather than a caret so it reads as
+   "this is being written" rather than "this is a text field". */
+.fleet-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: #1677ff;
+  animation: fleet-blink 1s steps(2, start) infinite;
+}
+
+@keyframes fleet-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fleet-cursor {
+    animation: none;
+  }
+}
