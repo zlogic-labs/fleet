@@ -121,6 +121,7 @@ export interface ClusterReport {
   nodeCount: number;
   readyNodes: number;
   gpuCount: number;
+  readyGpus: number;
   cpuMillicores: number;
   memoryMiB: number;
   nodes: ClusterNode[];
@@ -139,7 +140,7 @@ export interface Deployment {
   gpuPerReplica: number;
   state: 'Pending' | 'Scheduling' | 'Progressing' | 'Available' | 'Degraded' | 'Failed';
   reason?: string;
-  age: string;
+  updatedAt: string;
 }
 
 export const CAPABILITIES: Record<string, string> = {

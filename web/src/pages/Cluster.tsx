@@ -144,7 +144,18 @@ export function Cluster() {
                   </Tooltip>
                 ),
               },
-              { title: 'Age', dataIndex: 'age', width: 80 },
+              {
+                title: 'Age',
+                width: 80,
+                // The control plane sends a timestamp, not a duration: a
+                // server-rendered "5m" goes stale between reports, and a
+                // client-rendered one is wrong whenever the two clocks differ.
+                render: (_, r) => (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {humanAge(r.updatedAt, Date.now())}
+                  </Text>
+                ),
+              },
             ]}
           />
         )}
@@ -154,10 +165,10 @@ export function Cluster() {
 }
 
 function Report({ report }: { report: ClusterReport }) {
-  const totalGpu = report.nodes.reduce((a, n) => a + n.gpu.count, 0);
-  const readyGpu = report.nodes
-    .filter((n) => n.ready)
-    .reduce((a, n) => a + n.gpu.count, 0);
+  // The totals come from the server, which recomputes them from the node list
+  // on every report. Deriving them here as well would give the summary and the
+  // table two chances to disagree.
+  const { gpuCount: totalGpu, readyGpus: readyGpu } = report;
   const gpuMem = report.nodes.reduce((a, n) => a + n.gpu.totalMemoryMiB, 0);
   const mem = report.memoryMiB;
 
@@ -195,13 +206,23 @@ function Report({ report }: { report: ClusterReport }) {
           />
         </Col>
         <Col xs={12} sm={6} lg={5}>
+          {/* Cluster memoryMiB is the whole cluster's total. The per-node
+              Allocatable column below is the schedulable part; labelling this
+              one "Allocatable" would show a bigger number than the sum of the
+              column, which is exactly the kind of thing that wastes an
+              afternoon. */}
           <Statistic
-            title="Allocatable memory"
+            title="Cluster memory"
             value={mem ? `${Math.round(mem / 1024)} GiB` : '—'}
           />
         </Col>
         <Col xs={12} sm={12} lg={6}>
-          <Statistic title="CPU" value={report.cpuMillicores ? `${report.cpuMillicores} m` : '—'} />
+          {/* Millicores are the wire unit; a capacity card showing
+              "32256000 m" is unreadable. */}
+          <Statistic
+            title="CPU"
+            value={report.cpuMillicores ? `${(report.cpuMillicores / 1000).toFixed(1)} cores` : '—'}
+          />
         </Col>
       </Row>
 

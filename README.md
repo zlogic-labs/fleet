@@ -52,22 +52,44 @@ and that is the correct state rather than a missing feature.
 
 ## Try it
 
+One command. It builds the console if it is not built, starts the gateway and
+the control plane, and needs no GPU, no S3, and no network:
+
 ```sh
-make web                        # build the console once
-go run ./core/cmd/fleet-gateway --demo
+./scripts/dev.sh
 ```
 
 Then open <http://127.0.0.1:8080>. Four pages: a chat playground, live fleet
-state, the model registry, and cluster inventory.
+state, the model registry, and cluster inventory. To fill them with data:
 
-`--demo` starts a built-in stub engine in the same process, so nothing needs
-to be installed and no GPU is involved. The replies are canned — the point is
-to exercise streaming, usage accounting and routing, all of which behave the
-same against a real engine. The stub honours `stream_options.include_usage`
-exactly as vLLM does, including *omitting* the final usage frame when the
-client did not ask for one, so the metering path is genuinely covered.
+```sh
+./scripts/seed.sh
+```
 
-To point at a real engine instead:
+`dev.sh --real` does the same but pulls from huggingface.co instead of a
+synthetic repository. Everything lands in `.dev/`, which is gitignored.
+
+### What each page does in the default run
+
+| Page | Backed by | Needs |
+|---|---|---|
+| Playground | an in-process stub engine (`--demo`) | nothing |
+| Fleet | the gateway's own request log | nothing |
+| Models | `fleet-apiserver` + a directory as the object store | `dev.sh` |
+| Cluster | an operator inventory report | `seed.sh`, or a real operator |
+
+The stub engine's replies are canned. The point is to exercise streaming,
+usage accounting and routing, all of which behave the same against a real
+engine. The stub honours `stream_options.include_usage` exactly as vLLM does,
+including *omitting* the final usage frame when the client did not ask for
+one, so the metering path is genuinely covered.
+
+The synthetic hub serves a few kilobytes of plausible filenames for three
+repositories — including one that fails mid-pull and one slow enough to cancel.
+That is enough to exercise the whole pull path, progress reporting and
+cancellation, without anyone downloading 15 GiB to test a progress bar.
+
+### Against a real engine
 
 ```sh
 fleet-gateway --config fleet.yaml
@@ -78,10 +100,27 @@ listen: ":8080"
 upstreams:
   - id: llama-7b
     model: Qwen/Qwen2.5-7B-Instruct
-    base_url: http://127.0.0.1:8081   # llama-server, or a vLLM Service
+    base_url: http://127.0.0.1:8001   # llama-server, or a vLLM Service
     replicas: 1
     api_key: ""                       # the engine's key, not a tenant's
 ```
+
+### Against MinIO or S3
+
+The control plane uses a directory when `FLEET_S3_ENDPOINT` is unset, and any
+S3-compatible endpoint when it is set:
+
+```sh
+export FLEET_S3_ENDPOINT=127.0.0.1:9000
+export FLEET_S3_BUCKET=fleet
+export FLEET_S3_ACCESS_KEY=minioadmin
+export FLEET_S3_SECRET_KEY=minioadmin
+export FLEET_S3_USE_SSL=false
+fleet-apiserver --listen :8081
+```
+
+The `FLEET_S3_` prefix deliberately shadows the `AWS_` names: a process that
+also talks to AWS must not pick up Fleet's bucket by accident.
 
 ## Development
 
@@ -89,12 +128,17 @@ upstreams:
 make check          # gofmt + go vet + no-cgo check + tests + console types
 make build          # host binaries into ./bin
 make web            # build the console and stage it for embedding
+make dev            # the same as ./scripts/dev.sh
+make seed           # fill the dev control plane with data
 make web-dev        # console dev server on :5173, proxying to a local gateway
 make build-release  # linux/amd64, linux/arm64, darwin/arm64
 make help           # all targets
 ```
 
 Requires Go 1.26+ and Node 20+.
+
+`scripts/dev.sh` and `scripts/seed.sh` do not need make — the Makefile targets
+are aliases so the sequences are discoverable.
 
 The console bundle is built by `web/` and embedded into the gateway binary; it
 is not committed. A fresh clone still compiles — the binary serves a

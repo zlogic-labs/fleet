@@ -6,6 +6,12 @@
 *.out
 coverage.*
 
+# Local development state: the control plane's default object store when
+# scripts/dev.sh is used, and a stray fleet-data/ from running the binary
+# directly without --data.
+/.dev/
+fleet-data/
+
 # The console bundle is embedded by the Go build, not committed. Only the
 # directory marker is tracked, so a fresh clone still compiles; `make web`
 # stages the real output here.

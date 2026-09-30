@@ -42,6 +42,21 @@ web: web-deps ## Build the console and stage it for embedding into the gateway
 web-dev: web-deps ## Run the console dev server against a local gateway
 	cd $(WEB_DIR) && npm run dev
 
+# Running the whole product locally, not just building it. dev.sh is the
+# primary entry point and works without make; these targets exist so the common
+# sequences are discoverable.
+.PHONY: dev
+dev: ## Start the gateway and the control plane with a synthetic model hub
+	./scripts/dev.sh
+
+.PHONY: dev-real
+dev-real: ## Same, but pulls come from huggingface.co
+	./scripts/dev.sh --real
+
+.PHONY: seed
+seed: ## Fill the dev control plane with models, pulls and a cluster report
+	./scripts/seed.sh
+
 .PHONY: build
 build: ## Compile every command for the host platform into ./bin
 	@mkdir -p $(GOBIN)

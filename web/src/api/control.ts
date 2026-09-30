@@ -11,6 +11,11 @@ export const models = {
     request<RegistryModel>(`${BASE}/models/${encodeURIComponent(name)}`, { signal }),
   remove: (name: string) =>
     request<void>(`${BASE}/models/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  verify: (name: string) =>
+    request<{ objects: number; missing: string[]; ok: boolean }>(
+      `${BASE}/verify/${encodeURIComponent(name)}`,
+      { method: 'POST' },
+    ),
 };
 
 export interface PullRequest {
