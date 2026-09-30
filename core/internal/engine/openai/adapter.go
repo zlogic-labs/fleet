@@ -15,16 +15,10 @@ func NewAdapter(c *ProbeClient) *Adapter {
 
 var _ engine.Adapter = (*Adapter)(nil)
 
-// defaultRegistry maps every engine family to the OpenAI-compatible adapter.
-// A deployment naming an engine with no dedicated adapter must still work —
-// that is the whole point of P1 — so the lookup never fails.
-type defaultRegistry struct{ adapter engine.Adapter }
-
-func (r defaultRegistry) AdapterFor(string) engine.Adapter { return r.adapter }
-
-// NewRegistry returns a Registry backed by a single OpenAI-compatible adapter.
-// Registering a specialised adapter later means embedding this and overriding
-// AdapterFor for that one engine name, not rewriting call sites.
-func NewRegistry(c *ProbeClient) engine.Registry {
-	return defaultRegistry{adapter: NewAdapter(c)}
-}
+// NewProfiles returns the profile registry Fleet ships with.
+//
+// There is no adapter registry any more, and that removal is the point. Under
+// the old shape a second engine tempted a second Adapter, which is exactly the
+// vendor coupling P1 forbids. Now a second engine is a second Profile, which is
+// a literal, and the Adapter count stays at one per protocol.
+func NewProfiles() *engine.Profiles { return engine.BuiltinProfiles() }

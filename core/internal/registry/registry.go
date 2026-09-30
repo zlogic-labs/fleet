@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/zlogic-labs/fleet/core/pkg/weights"
 )
 
 // ErrNotFound is returned for a name that is not registered.
@@ -32,21 +34,28 @@ const (
 
 // Model is one entry in the registry.
 type Model struct {
-	Name       string     `json:"name"`
-	Source     string     `json:"source"`
-	SourceRef  string     `json:"sourceRef"`
-	Revision   string     `json:"revision"`
-	Commit     string     `json:"commit"`
-	Prefix     string     `json:"storagePrefix"`
-	SizeBytes  int64      `json:"sizeBytes"`
-	Files      int        `json:"files"`
-	State      ModelState `json:"state"`
-	Tokenizer  string     `json:"tokenizerId"`
-	Context    int        `json:"contextLimit"`
-	Message    string     `json:"message,omitempty"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	UpdatedAt  time.Time  `json:"updatedAt"`
-	ReportedAt time.Time  `json:"reportedAt,omitempty"`
+	Name      string     `json:"name"`
+	Source    string     `json:"source"`
+	SourceRef string     `json:"sourceRef"`
+	Revision  string     `json:"revision"`
+	Commit    string     `json:"commit"`
+	Prefix    string     `json:"storagePrefix"`
+	SizeBytes int64      `json:"sizeBytes"`
+	Files     int        `json:"files"`
+	State     ModelState `json:"state"`
+	// Format is how the bytes are laid out: safetensors or gguf. It decides
+	// which engines can load the model, so it is part of the entry's identity
+	// rather than a detail of how it was fetched.
+	Format weights.Format `json:"format"`
+	// Tokenizer names the tokenizer to use for local token counting. It is
+	// empty for GGUF, where the tokenizer is embedded in the weights and a
+	// separate id would be a fiction.
+	Tokenizer  string    `json:"tokenizerId"`
+	Context    int       `json:"contextLimit"`
+	Message    string    `json:"message,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	ReportedAt time.Time `json:"reportedAt,omitempty"`
 }
 
 // PullState is a job's lifecycle.
@@ -65,14 +74,17 @@ func (s PullState) Running() bool { return s == PullQueued || s == PullRunning }
 
 // Pull is one download job.
 type Pull struct {
-	ID        string    `json:"id"`
-	Model     string    `json:"model"`
-	Source    string    `json:"source"`
-	SourceRef string    `json:"sourceRef"`
-	Revision  string    `json:"revision"`
-	Commit    string    `json:"commit"`
-	Prefix    string    `json:"storagePrefix"`
-	State     PullState `json:"state"`
+	ID        string `json:"id"`
+	Model     string `json:"model"`
+	Source    string `json:"source"`
+	SourceRef string `json:"sourceRef"`
+	Revision  string `json:"revision"`
+	Commit    string `json:"commit"`
+	Prefix    string `json:"storagePrefix"`
+	// Format is the weight layout the repository turned out to be, resolved
+	// from the files rather than requested.
+	Format string    `json:"format"`
+	State  PullState `json:"state"`
 
 	// Progress is a fraction in [0,1] over bytes, computed from the Hub's
 	// declared total rather than from a running total that starts at zero and
@@ -262,6 +274,7 @@ func (m *Memory) UpsertModel(_ context.Context, in Model) (Model, error) {
 		inherit(&out.Commit, prev.Commit)
 		inherit(&out.Tokenizer, prev.Tokenizer)
 		inherit(&out.Context, prev.Context)
+		inherit(&out.Format, prev.Format)
 	}
 	out.UpdatedAt = now
 	if out.CreatedAt.IsZero() {

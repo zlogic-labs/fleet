@@ -1,7 +1,14 @@
 /** Calls against the control plane (fleet-apiserver). */
 
 import { request } from './client';
-import type { ClusterStatus, Deployment, PullJob, RegistryModel, StorageInfo } from '../types';
+import type {
+  ClusterStatus,
+  Deployment,
+  EngineProfile,
+  PullJob,
+  RegistryModel,
+  StorageInfo,
+} from '../types';
 
 const BASE = '/api/v1';
 
@@ -11,11 +18,19 @@ export const models = {
     request<RegistryModel>(`${BASE}/models/${encodeURIComponent(name)}`, { signal }),
   remove: (name: string) =>
     request<void>(`${BASE}/models/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-  verify: (name: string) =>
-    request<{ objects: number; missing: string[]; ok: boolean }>(
-      `${BASE}/verify/${encodeURIComponent(name)}`,
-      { method: 'POST' },
+  /**
+   * Check that the stored objects satisfy a named engine. The engine is part
+   * of the question, not a detail: a GGUF repository is complete for
+   * llama-cpp and broken for vLLM, and the answer without it is meaningless.
+   */
+  verify: (name: string, engine: string) =>
+    request<{ engine: string; objects: number; missing: string[]; ok: boolean }>(
+      `${BASE}/verify/${encodeURIComponent(name)}?engine=${encodeURIComponent(engine)}`,
     ),
+};
+
+export const engines = {
+  list: (signal?: AbortSignal) => request<EngineProfile[]>(`${BASE}/engines`, { signal }),
 };
 
 export interface PullRequest {
@@ -26,6 +41,8 @@ export interface PullRequest {
   tokenizerId?: string;
   contextLimit?: number;
   hfToken?: string;
+  /** Records the intent. The format itself is inferred from the files. */
+  engine?: string;
 }
 
 export const pulls = {

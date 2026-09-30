@@ -56,11 +56,36 @@ export interface RegistryModel {
   sizeBytes: number;
   files: number;
   state: 'pending' | 'pulling' | 'ready' | 'failed';
+  /**
+   * How the weights are laid out, inferred from the files the repository
+   * actually had. It decides which engines can load the model, so it is shown
+   * next to the name rather than buried in a details panel.
+   */
+  format: 'safetensors' | 'gguf' | 'unknown';
+  /** Empty for GGUF, where the tokenizer is inside the weights file. */
   tokenizerId: string;
   contextLimit: number;
   createdAt: string;
   updatedAt: string;
   message?: string;
+}
+
+/**
+ * One engine family Fleet knows how to serve a model with. This is a
+ * projection of a server-side profile, not something the browser decides:
+ * whether llama-cpp can load a GGUF model is answered by the control plane
+ * and merely displayed here.
+ */
+export interface EngineProfile {
+  name: string;
+  format: string;
+  minCompute: number;
+  minComputeLabel: string;
+  requiresGpu: boolean;
+  metrics: boolean;
+  tokenize: boolean;
+  knownModels: string[];
+  notes: string;
 }
 
 export interface PullJob {
@@ -69,6 +94,7 @@ export interface PullJob {
   source: 'huggingface' | 'url';
   sourceRef: string;
   revision: string;
+  format: string;
   state: 'queued' | 'running' | 'done' | 'failed' | 'canceled';
   progress: number;
   bytesDone: number;

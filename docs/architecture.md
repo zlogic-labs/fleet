@@ -24,7 +24,25 @@
 
 `fleet-gateway` 与任何推理引擎之间只有 OpenAI 兼容 HTTP 协议。**代码里不 import 任何 vLLM/SGLang 的东西。**
 
-推论：新增引擎 = 新增一个 `engine.Adapter` 实现，其余代码零改动。vLLM 挂掉、SGLang 上线、插一个自研引擎，都是配置变更。
+推论：**新增引擎 = 新增一个 `engine.Profile` 字面量，不改任何接口。**（不是新增一个 Adapter —— 见 §5.1。）
+
+### P1bis · 引擎多样性分三根轴，不分叉协议
+
+这是 P1 被真正执行后的形状，也是本项目最容易被做错的一处设计。三根轴：
+
+| 轴 | 是什么 | 数量 | 落在哪 |
+|---|---|---|---|
+| 怎么说话 | `engine.Adapter` | **1 个** | `core/internal/engine/openai` |
+| 找什么 | `engine.Profile` | N 个，纯数据 | `core/internal/engine/profile.go` |
+| 渲染成什么 | renderer | N 个 | operator 模块（尚未实现） |
+
+`Adapter` **按协议**分，不按厂商分。引擎差异全部是 `Profile` 里的字面量：能加载什么权重格式、健康检查端点候选、要额外探测哪些扩展、指标路径与 series 名、最低 compute capability。
+
+`Profile` 里的端点路径是**候选列表**而非单值，探测时逐个试。这是 P4 从"版本"推广到"端点名"的直接结论：把 `/health` 写死成一个字符串，上游改个名就变成"永远 not ready"，而这个故障从外面看像镜像拉不下来。写错一个候选的代价是一个 404，不是错的 `Capability`。
+
+**硬门只有一个**：健康检查。其余全部软失败——`/tokenize`、`/version` 缺失只记录，不阻断。一个能 chat 但没有 `/tokenize` 的引擎完全可用，让整个探测失败等于把它踢出轮转。`llama-cpp` 的 `Tokenize` 候选列表**故意为空**，不做无用往返，也不谎称能精确计数。
+
+`FleetDeploymentSpec` 里**不允许**出现 `if engine == "vllm"`。只有 `Engine` 字段 + 不透明的 `EngineOptions`。
 
 ### P2 · 横向扩副本 > 纵向堆卡
 
@@ -116,7 +134,8 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 | `pkg/tokenizer` | 预检计数，三级回退 | `Tokenizer` |
 | `pkg/log` | slog 上下文封装 | `Logger` |
 | `internal/config` | 配置加载（env + yaml） | `Config` |
-| `internal/engine` | 引擎抽象与能力探测 | `Endpoint`, `Capability`, `Adapter` |
+| `internal/engine` | 引擎抽象：Adapter（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Profile`, `Adapter` |
+| `pkg/weights` | 权重格式分类，决定谁能加载 | `Format`, `Of` |
 | `internal/gateway/routing` | endpoint 选择（一致性哈希 + 健康） | `Picker`, `HealthTracker` |
 | `internal/gateway/transport` | SSE 透传 + usage tap | `Proxy`, `Tap` |
 | `internal/gateway/auth` | 鉴权与配额上下文 | `Resolver`, `Principal` |
@@ -139,13 +158,33 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 
 ## 5. 核心数据模型
 
+### 5.1 引擎能力：Adapter 只有一个，Profile 是数据
+
+```
+core/internal/engine/engine.go      Adapter 接口（按协议）· Capability · Endpoint
+core/internal/engine/profile.go     Profile · ProfileRegistry · vllm / llama-cpp 两个字面量
+core/internal/engine/openai/        唯一实现：probe 走 Profile 的候选列表
+core/pkg/weights/                   Format 分类（safetensors / gguf / unknown）
+```
+
+`engine.Profiles.For(name)` 永不失败：没登记的引擎拿到 `DefaultProfile()`，它**只**假设 OpenAI 兼容面，不声明格式、不声明指标。少假设是重点——对未知引擎的猜测会变成错的 readiness 判定，而 readiness 决定流量往哪走。查找带家族前缀回退（`vllm-0.9.1` 仍命中 vLLM），因为拼写差异静默丢掉格式检查会放 GGUF 进 vLLM。
+
+`pkg/weights` 独立成包是因为两个无关层需要同一个答案而都不拥有它：registry 记录拉到了什么，engine 判断谁能加载。放任何一边都会造出反向依赖。
+
+**权重格式必须存进 registry 条目。** safetensors 和 GGUF 不是同一模型的两种文件，是任何给定引擎只能读其中一种的两种模型。GGUF 仓库没有 `config.json`，只检查 `config.json` 会把 llama.cpp 模型报成 ready 然后加载失败。
+
+`RequiredFiles` 是**候选组**不是扁平列表：每组至少命中一个。safetensors 仓库要么是单个 `model.safetensors`，要么是 index + 若干 shard，二者互斥，扁平"全部必需"会把正确的仓库报成不完整。
+
+`MinCompute` 让不可能的组合在 admission 阶段几秒内被拒，而不是永远 pending。vLLM 官方要求 compute capability 7.5+，GT 720（CC 3.5）和 1060（CC 6.1）都在门外；llama.cpp 的 `MinCompute` 是 0，因为它仍支持 Pascal。这些数字会漂移，用途是快速失败常见情况，不是权威——权威是模型能不能加载，只有真跑一次能回答。
+
 ### CRD
 
 ```go
 // FleetModel — 逻辑模型，与部署解耦
 type FleetModelSpec struct {
     Source       string   // HF repo 或本地路径
-    TokenizerID  string   // tiktoken 编码名；空则走估算
+    Format       string   // safetensors | gguf；由拉取时看到的文件推断，不要求人填
+    TokenizerID  string   // tiktoken 编码名；空则走估算。GGUF 恒为空
     ContextLimit int32
     PricingRef   string   // 指向 PriceBook
 }
@@ -156,7 +195,7 @@ type FleetDeploymentSpec struct {
     Replicas   int32                    // 横向副本数（P2）
     TensorParallelSize int32            // ≤ 单节点卡数
     PipelineParallelSize int32
-    Engine     string                   // vllm | sglang
+    Engine     string                   // 查 engine.Profiles，不是 switch 的分支
     EngineOptions map[string]string     // 版本无关的声明式覆盖
     Resources  GPURequest              // {count, model, vramGB, interconnect}
     Autoscaling AutoscalingSpec
@@ -167,6 +206,8 @@ type FleetClusterSpec struct {
     Endpoint, KubeconfigRef, Scheduler string  // scheduler: default | kai
 }
 ```
+
+`admission` 阶段用 `engine.Compatible(model.Format, spec.Engine)` 拒绝格式不匹配的组合，并给出可读原因。控制台用同一个函数的反方向（`engine.EnginesFor`）把不能用的引擎置灰，而不是接受组合后在 admission 失败——那时候调度往返已经花掉了。
 
 ### PostgreSQL
 
@@ -301,8 +342,20 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 ## 11. 待定
 
 - `[待定]` 是否第一版就支持 Anthropic 原生协议，还是只做 OpenAI 兼容 + 一个转换层
-- `[待定]` 部署时模型权重的分发方式：共享存储（GPFS/Lustre）vs 节点本地 NVMe + 预热。影响 P/D 分离和 autoscaler 的冷启动时间
 - `[待定]` 成本池的计价周期（自然月 vs 滚动窗口）与跨周期欠款处理
+
+### 11.1 权重的分发策略不是一个全局开关
+
+原来这条是"共享存储（GPFS/Lustre）vs 节点本地 NVMe + 预热"二选一。引入 `weights.Format` 之后**问题变了**：策略随格式走，所以不该是一个全局选择。
+
+| 格式 | 典型体积 | 合理分发 |
+|---|---|---|
+| safetensors | DeepSeek-R1 671B = 1.3 TB | **只能**共享存储。复制到节点在物理上不成立。 |
+| GGUF（Q4） | 0.5B–70B = 0.4–45 GB | 复制到节点本地 NVMe + 预热可行，冷启动从分钟级降到秒级。 |
+
+也就是说：GGUF 部署的 autoscaler 冷启动可以做到可接受，safetensors 671B 部署的冷启动本质上是"加载 1.3 TB"的时间，扩缩容策略必须承认这个事实而不是假装可以预热。
+
+这直接影响 P/D 分离是否可行，也影响 `FleetDeploymentSpec` 要不要显式声明 `WeightDelivery: shared | nodeLocal`。**倾向**：显式声明，operator 据此选 init container 还是直接挂载——但两条路径都还在 operator 里，尚未实现。
 
 ## 12. 社区版与企业版
 

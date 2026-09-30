@@ -29,12 +29,13 @@ import {
   DatabaseOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 
-import { models as modelsApi, pulls, storage } from '../api/control';
+import { models as modelsApi, engines as enginesApi, pulls, storage } from '../api/control';
 import { errorText } from '../api/client';
 import { usePoll, humanBytes, humanAge } from '../hooks';
-import type { PullJob, RegistryModel } from '../types';
+import type { EngineProfile, PullJob, RegistryModel } from '../types';
 
 const { Text, Paragraph } = Typography;
 
@@ -53,6 +54,34 @@ const JOB_COLOR: Record<PullJob['state'], string> = {
   canceled: 'default',
 };
 
+const FORMAT_COLOR: Record<RegistryModel['format'], string> = {
+  safetensors: 'geekblue',
+  gguf: 'purple',
+  unknown: 'default',
+};
+
+/**
+ * The weight layout, next to the model name because it decides what can serve
+ * it. An operator picking an engine needs to see this before the deployment
+ * fails, not after.
+ */
+function FormatTag({ format }: { format: RegistryModel['format'] }) {
+  if (format === 'unknown') {
+    return (
+      <Tooltip title="No config.json and no .gguf file were found. Nothing can load this yet.">
+        <Tag color={FORMAT_COLOR.unknown} style={{ fontSize: 11 }}>
+          no weights
+        </Tag>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tag color={FORMAT_COLOR[format]} style={{ fontSize: 11 }}>
+      {format}
+    </Tag>
+  );
+}
+
 export function Models() {
   const { message } = App.useApp();
   const [drawer, setDrawer] = useState(false);
@@ -60,8 +89,36 @@ export function Models() {
   const storage$ = usePoll((signal) => storage.get(signal), 10000);
   const models = usePoll((signal) => modelsApi.list(signal), 5000);
   const jobs = usePoll((signal) => pulls.list(signal), 2000);
+  const engines$ = usePoll((signal) => enginesApi.list(signal), 30000);
 
   const reachable = storage$.data !== undefined;
+
+  /**
+   * Ask the control plane whether the stored objects satisfy an engine.
+   *
+   * The engine is chosen from the server's own profile list rather than
+   * hard-coded here, so a new engine in the control plane becomes checkable
+   * without a frontend change. Choosing the first compatible engine is not a
+   * guess: the format decides it, and the control plane has already said
+   * which engines that is.
+   */
+  const check = async (m: RegistryModel) => {
+    const target = engines$.data?.find((e) => e.knownModels.includes(m.format));
+    if (!target) {
+      message.warning(`no registered engine can load ${m.format} weights`);
+      return;
+    }
+    try {
+      const r = await modelsApi.verify(m.name, target.name);
+      if (r.ok) {
+        message.success(`${m.name}: ${r.objects} objects satisfy ${r.engine}`);
+      } else {
+        message.error(`${m.name} is incomplete for ${r.engine}: ${r.missing.join(', ')}`);
+      }
+    } catch (err) {
+      message.error(errorText(err));
+    }
+  };
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -188,8 +245,11 @@ export function Models() {
                 width: 220,
                 render: (v: number, r) => (
                   <Space size={8} style={{ width: '100%' }}>
+                    {/* The wire format is a fraction in [0,1]; the component
+                        wants 0-100. Passing it through unchanged renders a
+                        finished download as 1%. */}
                     <Progress
-                      percent={Math.round(v)}
+                      percent={Math.round(v * 100)}
                       size="small"
                       status={r.state === 'failed' ? 'exception' : undefined}
                       style={{ flex: 1, margin: 0 }}
@@ -243,7 +303,12 @@ export function Models() {
                 title: 'Name',
                 dataIndex: 'name',
                 ellipsis: true,
-                render: (v: string) => <Text strong>{v}</Text>,
+                render: (v: string, r) => (
+                  <Space direction="vertical" size={0}>
+                    <Text strong>{v}</Text>
+                    <FormatTag format={r.format} />
+                  </Space>
+                ),
               },
               {
                 title: 'Source',
@@ -282,26 +347,45 @@ export function Models() {
                 ),
               },
               { title: 'Context', dataIndex: 'contextLimit', width: 110, render: (v: number) => (v ? `${v.toLocaleString()}` : '—') },
-              { title: 'Tokenizer', dataIndex: 'tokenizerId', width: 140, ellipsis: true },
+              {
+                title: 'Tokenizer',
+                dataIndex: 'tokenizerId',
+                width: 140,
+                ellipsis: true,
+                // GGUF carries its tokenizer inside the weights file, so an
+                // empty id is the correct value rather than a missing one.
+                render: (v: string, r) => v || (r.format === 'gguf' ? <Text type="secondary">embedded</Text> : '—'),
+              },
               {
                 title: '',
-                width: 50,
+                width: 96,
                 render: (_, r) => (
-                  <Popconfirm
-                    title="Remove from the registry?"
-                    description="Stored objects are kept; only the registration is deleted."
-                    onConfirm={async () => {
-                      try {
-                        await modelsApi.remove(r.name);
-                        message.success(`${r.name} removed`);
-                        models.refresh();
-                      } catch (err) {
-                        message.error(errorText(err));
-                      }
-                    }}
-                  >
-                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
-                  </Popconfirm>
+                  <Space size={0}>
+                    <Tooltip title="Check the stored objects against an engine that can load this format">
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<SafetyCertificateOutlined />}
+                        disabled={r.state !== 'ready' || r.format === 'unknown'}
+                        onClick={() => void check(r)}
+                      />
+                    </Tooltip>
+                    <Popconfirm
+                      title="Remove from the registry?"
+                      description="Stored objects are kept; only the registration is deleted."
+                      onConfirm={async () => {
+                        try {
+                          await modelsApi.remove(r.name);
+                          message.success(`${r.name} removed`);
+                          models.refresh();
+                        } catch (err) {
+                          message.error(errorText(err));
+                        }
+                      }}
+                    >
+                      <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
                 ),
               },
             ]}
@@ -323,11 +407,89 @@ export function Models() {
         )}
       </Card>
 
+      <EngineCard engines={engines$.data} />
+
       <PullDrawer open={drawer} onClose={() => setDrawer(false)} onStarted={() => {
         setDrawer(false);
         jobs.refresh();
       }} />
     </Space>
+  );
+}
+
+/**
+ * The engine catalogue, straight from the control plane.
+ *
+ * It is here because the two questions an operator asks about a model — what
+ * can load this, and what will it refuse — are both answered by these
+ * profiles. Hiding that behind a failed deployment would make the platform look
+ * unpredictable when it is merely explicit.
+ */
+function EngineCard({ engines }: { engines?: EngineProfile[] }) {
+  if (!engines || engines.length === 0) return null;
+  return (
+    <Card size="small" title="Engines">
+      <Table<EngineProfile>
+        size="small"
+        rowKey="name"
+        pagination={false}
+        scroll={{ x: 820 }}
+        dataSource={engines}
+        columns={[
+          {
+            title: 'Engine',
+            dataIndex: 'name',
+            width: 120,
+            render: (v: string) => <Text strong>{v}</Text>,
+          },
+          {
+            title: 'Loads',
+            dataIndex: 'format',
+            width: 120,
+            render: (v: string) => <Tag color={v === 'gguf' ? 'purple' : 'geekblue'}>{v}</Tag>,
+          },
+          {
+            title: 'Hardware',
+            dataIndex: 'minComputeLabel',
+            width: 210,
+            render: (v: string) =>
+              v ? <Text style={{ fontSize: 12 }}>{v}</Text> : <Text type="secondary">CPU is fine</Text>,
+          },
+          {
+            title: 'Autoscaling',
+            dataIndex: 'metrics',
+            width: 120,
+            render: (v: boolean) =>
+              v ? (
+                <Tag color="green">metrics</Tag>
+              ) : (
+                <Tooltip title="No usable metric set, so replicas are set by hand.">
+                  <Tag>manual</Tag>
+                </Tooltip>
+              ),
+          },
+          {
+            title: 'Exact token counts',
+            dataIndex: 'tokenize',
+            width: 150,
+            render: (v: boolean) => (
+              <Tooltip title={v ? 'Serves /tokenize, so prompt counts are reconciled against the engine.' : 'No /tokenize: the gateway counts locally and estimates.'}>
+                <Tag color={v ? 'green' : 'default'}>{v ? 'engine /tokenize' : 'local only'}</Tag>
+              </Tooltip>
+            ),
+          },
+          {
+            title: 'Notes',
+            dataIndex: 'notes',
+            render: (v: string) => (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {v}
+              </Text>
+            ),
+          },
+        ]}
+      />
+    </Card>
   );
 }
 
@@ -343,6 +505,14 @@ function PullDrawer({
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
+  // The engine list is a server fact, so the dropdown is built from the same
+  // endpoint the catalogue card uses. A hard-coded list here would be a second
+  // place to forget an engine.
+  const engines$ = usePoll((signal) => enginesApi.list(signal), 30000);
+  const engineOptions = (engines$.data ?? []).map((e) => ({
+    value: e.name,
+    label: `${e.name} — ${e.format}`,
+  }));
 
   const submit = async () => {
     let values: Record<string, unknown>;
@@ -362,6 +532,7 @@ function PullDrawer({
         contextLimit: Number(values.contextLimit || 0),
         tokenizerId: String(values.tokenizerId || ''),
         hfToken: values.hfToken ? String(values.hfToken) : undefined,
+        engine: values.engine ? String(values.engine) : undefined,
       });
       message.success(`queued pull ${job.id}`);
       form.resetFields();
@@ -424,6 +595,14 @@ function PullDrawer({
 
         <Form.Item name="contextLimit" label="Context limit" extra="0 means take it from the engine's own metadata.">
           <InputNumber min={0} step={1024} style={{ width: '100%' }} />
+        </Form.Item>
+
+        <Form.Item
+          name="engine"
+          label="Intended engine"
+          extra="Optional, and does not change what is downloaded: the format is read from the repository's own files. Naming one lets the console check the result against it."
+        >
+          <Select allowClear placeholder="decide later" options={engineOptions} />
         </Form.Item>
 
         <Form.Item

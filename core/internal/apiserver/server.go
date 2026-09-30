@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zlogic-labs/fleet/core/internal/blobstore"
+	"github.com/zlogic-labs/fleet/core/internal/engine"
 	"github.com/zlogic-labs/fleet/core/internal/hub"
 	"github.com/zlogic-labs/fleet/core/internal/registry"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
@@ -46,13 +47,14 @@ type Config struct {
 
 // Server owns the control plane's dependencies.
 type Server struct {
-	cfg    Config
-	store  registry.Store
-	blobs  blobstore.Store
-	hub    hub.Hub
-	puller *Puller
-	worker *registry.Worker
-	log    *slog.Logger
+	cfg      Config
+	store    registry.Store
+	blobs    blobstore.Store
+	hub      hub.Hub
+	profiles *engine.Profiles
+	puller   *Puller
+	worker   *registry.Worker
+	log      *slog.Logger
 }
 
 func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, error) {
@@ -70,14 +72,15 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	if h == nil {
 		h = hub.NewStub()
 	}
+	profiles := engine.BuiltinProfiles()
 
-	puller := NewPuller(store, blobs, h, log)
+	puller := NewPuller(store, blobs, h, profiles, log)
 	puller.FileConcurrency = cfg.FileConcurrency
 	worker := registry.NewWorker(store, cfg.PullConcurrency)
 	worker.Start(puller.Run)
 
 	return &Server{
-		cfg: cfg, store: store, blobs: blobs, hub: h,
+		cfg: cfg, store: store, blobs: blobs, hub: h, profiles: profiles,
 		puller: puller, worker: worker, log: log,
 	}, nil
 }
@@ -111,6 +114,10 @@ func (s *Server) Handler() http.Handler {
 		// Verify lives under its own prefix rather than as /models/*/verify:
 		// a wildcard cannot be followed by a fixed segment, and
 		// /models/owner/verify would be ambiguous with a model named verify.
+		// GET is the real method — the check only lists objects — and the
+		// engine it targets arrives as a query parameter, which a link and a
+		// curl can carry and a body cannot.
+		r.Get("/verify/*", s.verifyModel)
 		r.Post("/verify/*", s.verifyModel)
 
 		r.Post("/pulls", s.startPull)
@@ -119,6 +126,11 @@ func (s *Server) Handler() http.Handler {
 		r.Delete("/pulls/{id}", s.cancelPull)
 
 		r.Get("/storage", s.storageInfo)
+
+		// The engine catalogue. It is data, and exposing it lets the console
+		// show which engines can load which model instead of offering a
+		// combination that will be refused at admission.
+		r.Get("/engines", s.listEngines)
 
 		// The operator reports here. Neither this nor the read side knows
 		// what Kubernetes is; the operator is the only component that does.
@@ -187,7 +199,15 @@ func (s *Server) verifyModel(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
-	found, missing, err := s.puller.Verify(r.Context(), name)
+	// The caller states the engine rather than having one assumed, and the
+	// response echoes it back so the console shows which check actually ran.
+	// The default is vllm only because it is the common case, not because it
+	// is a good default for a GGUF model.
+	engineName := r.URL.Query().Get("engine")
+	if engineName == "" {
+		engineName = "vllm"
+	}
+	found, missing, err := s.puller.Verify(r.Context(), name, engineName)
 	if err != nil {
 		openai.WriteError(w, errs.InvalidArgument("%s", err))
 		return
@@ -198,6 +218,7 @@ func (s *Server) verifyModel(w http.ResponseWriter, r *http.Request) {
 		missing = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"engine":  engineName,
 		"objects": found,
 		"missing": missing,
 		"ok":      len(missing) == 0,
@@ -235,6 +256,11 @@ type startPullRequest struct {
 	TokenizerID  string `json:"tokenizerId"`
 	ContextLimit int    `json:"contextLimit"`
 	HFToken      string `json:"hfToken"`
+	// Engine is optional. It does not change what gets pulled — the
+	// repository's format is inferred from its files — but it is recorded so
+	// that Verify has a target and the console can say which engines will be
+	// able to load the result.
+	Engine string `json:"engine"`
 }
 
 func (s *Server) startPull(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +370,56 @@ func (s *Server) cancelPull(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) storageInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.blobs.Info(r.Context()))
+}
+
+// engineView is the console's view of one profile. It is a projection, not the
+// profile itself: the probes and required-file globs are internal detail, and
+// what an operator needs is what this engine can run and what it will cost
+// them to be wrong.
+type engineView struct {
+	Name            string   `json:"name"`
+	Format          string   `json:"format"`
+	MinCompute      int      `json:"minCompute"`
+	Metrics         bool     `json:"metrics"`
+	Tokenize        bool     `json:"tokenize"`
+	KnownModels     []string `json:"knownModels"`
+	RequiresGPU     bool     `json:"requiresGpu"`
+	MinComputeLabel string   `json:"minComputeLabel"`
+	Notes           string   `json:"notes"`
+}
+
+func (s *Server) listEngines(w http.ResponseWriter, _ *http.Request) {
+	out := make([]engineView, 0, 4)
+	for _, p := range s.profiles.All() {
+		out = append(out, engineView{
+			Name:            p.Name,
+			Format:          p.Format.String(),
+			MinCompute:      p.MinCompute,
+			Metrics:         p.Metrics.Available(),
+			Tokenize:        len(p.Tokenize) > 0,
+			KnownModels:     engine.EnginesFor(p.Format),
+			RequiresGPU:     p.MinCompute > 0,
+			MinComputeLabel: computeLabel(p.MinCompute),
+			Notes:           p.Notes,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// computeLabel renders a compute capability the way the vendor names it, so an
+// operator can match it against a card without translating 75 to "Turing".
+func computeLabel(cc int) string {
+	if cc == 0 {
+		return ""
+	}
+	name := map[int]string{
+		50: "Maxwell", 61: "Pascal", 70: "Volta", 75: "Turing",
+		80: "Ampere", 86: "Ampere", 89: "Ada", 90: "Hopper", 100: "Blackwell",
+	}[cc]
+	if name == "" {
+		return "compute capability " + strconv.Itoa(cc) + "+"
+	}
+	return "compute capability " + strconv.Itoa(cc) + " (" + name + ")+"
 }
 
 // ── operator reports ───────────────────────────────────────────

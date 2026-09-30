@@ -2,15 +2,15 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
-// Name identifies the adapter. It matches the engine family a FleetDeployment
-// would name, so a deployment declaring an engine with no dedicated adapter
-// falls through to this one.
+// Name identifies the protocol, not the engine family. Every runtime Fleet
+// supports speaks this, which is why there is one Adapter and several Profiles.
 func (a *Adapter) Name() string { return "openai-compatible" }
 
 // Probe reports what the endpoint can do.
@@ -20,23 +20,35 @@ func (a *Adapter) Name() string { return "openai-compatible" }
 // which is what the controller publishes as a status condition. That split
 // matters: an engine that serves chat but not /tokenize is fully usable, and
 // failing the whole probe would make the platform look broken.
-func (a *Adapter) Probe(ctx context.Context, ep engine.Endpoint) (engine.Capability, error) {
+//
+// The profile decides which optional endpoints are worth asking about. This is
+// what keeps engine diversity as data: llama-cpp has no tokenize candidates, so
+// it is never probed for one, and a new engine is a new Profile rather than a
+// new Adapter.
+func (a *Adapter) Probe(ctx context.Context, ep engine.Endpoint, p engine.Profile) (engine.Capability, error) {
 	cap := engine.Capability{
-		Engine:   a.Name(),
-		ProbedAt: time.Now(),
+		Engine:           ep.Model,
+		Profile:          p.Name,
+		WeightFormat:     p.Format,
+		MetricsAvailable: p.Metrics.Available(),
+		ProbedAt:         time.Now(),
 	}
 
-	if err := a.probeHealth(ctx, ep); err != nil {
+	if err := a.probeHealth(ctx, ep, p); err != nil {
 		return cap, err
 	}
 
-	// Soft checks.
+	// Soft checks. A nil result leaves the field false, which is a fact about
+	// the engine rather than a failure of the platform.
 	if models, err := a.Models(ctx, ep); err == nil {
 		cap.ServedModels = models
 	}
-	a.probeTokenize(ctx, ep, &cap)
-	a.probeVersion(ctx, ep, &cap)
-
+	if cap.MaxModelLen, cap.Tokenize = a.probeTokenize(ctx, ep, p); cap.Tokenize {
+		cap.Engine = ep.Model
+	}
+	if v, ok := a.probeVersion(ctx, ep, p); ok {
+		cap.Version = v
+	}
 	return cap, nil
 }
 
@@ -66,52 +78,89 @@ func (a *Adapter) Models(ctx context.Context, ep engine.Endpoint) ([]string, err
 // probeHealth is the only hard gate. Engines use 503 while the model is still
 // loading, so a non-200 here means "not ready", which is a fact the scheduler
 // acts on rather than an error the platform surfaces.
-func (a *Adapter) probeHealth(ctx context.Context, ep engine.Endpoint) error {
-	u, err := resolve(ep.BaseURL, "/health")
-	if err != nil {
-		return err
+//
+// It tries each candidate in the profile and passes when any of them answers.
+// One path per engine would make a rename look like a stuck image pull, and
+// that failure is very hard to diagnose from the outside.
+func (a *Adapter) probeHealth(ctx context.Context, ep engine.Endpoint, p engine.Profile) error {
+	if len(p.Health) == 0 {
+		return errs.Internal(nil)
 	}
-	if err := a.client.Do(ctx, "GET", u, nil, nil); err != nil {
-		return errs.Upstream(err, "health check failed for %s", ep)
+	var lastErr error
+	for _, path := range p.Health {
+		u, err := resolve(ep.BaseURL, path)
+		if err != nil {
+			return err
+		}
+		// An engine mid-load answers 503, which must be reported as not-ready
+		// rather than skipped: trying the next candidate would let a 503 on
+		// the real path be masked by a 404 on a wrong one.
+		if err := a.client.Do(ctx, "GET", u, nil, nil); err == nil {
+			return nil
+		} else if !isNotSupported(err) {
+			return errs.Upstream(err, "health check failed for %s", ep)
+		}
+		lastErr = err
 	}
-	return nil
+	return errs.Upstream(lastErr, "no health endpoint answered for %s (tried %v)", ep, p.Health)
 }
 
-// probeTokenize detects the /tokenize extension. It is the cheap route to
-// exact prompt counts and to reconciling our own estimates, so a deployment
-// that lacks it needs a note in its status.
-func (a *Adapter) probeTokenize(ctx context.Context, ep engine.Endpoint, cap *engine.Capability) {
-	u, err := resolve(ep.BaseURL, "/tokenize")
-	if err != nil {
-		return
+// probeTokenize detects a /tokenize extension, which is the cheap route to
+// exact prompt counts and to reconciling our own estimates.
+//
+// Returns the engine's configured context window, which is the value actually
+// wanted: a deployment's window is a scheduling decision, not a property of
+// the weights.
+func (a *Adapter) probeTokenize(ctx context.Context, ep engine.Endpoint, p engine.Profile) (int, bool) {
+	for _, path := range p.Tokenize {
+		u, err := resolve(ep.BaseURL, path)
+		if err != nil {
+			continue
+		}
+		var resp struct {
+			Count       int   `json:"count"`
+			MaxModelLen int   `json:"max_model_len"`
+			Tokens      []int `json:"tokens"`
+		}
+		// A deliberately trivial prompt: the response carries the configured
+		// context window, which is what the caller needs from it.
+		in := map[string]string{"prompt": "ping"}
+		if err := a.client.Do(ctx, "POST", u, in, &resp); err != nil {
+			continue
+		}
+		return resp.MaxModelLen, true
 	}
-	var resp struct {
-		Count       int   `json:"count"`
-		MaxModelLen int   `json:"max_model_len"`
-		Tokens      []int `json:"tokens"`
-	}
-	// A deliberately trivial prompt: the response carries the engine's
-	// configured context window, which is the value we actually need.
-	in := map[string]string{"prompt": "ping"}
-	if err := a.client.Do(ctx, "POST", u, in, &resp); err != nil {
-		return
-	}
-	cap.Tokenize = true
-	cap.MaxModelLen = resp.MaxModelLen
+	return 0, false
 }
 
-// probeVersion reads the engine build. vLLM serves /version; the check is
-// skipped silently for runtimes that do not, since a missing version string
-// must not block a deployment.
-func (a *Adapter) probeVersion(ctx context.Context, ep engine.Endpoint, cap *engine.Capability) {
-	u, err := resolve(ep.BaseURL, "/version")
-	if err != nil {
-		return
+// probeVersion reads the engine build, from whichever candidate answers.
+// Optional throughout: a missing version string must not block a deployment,
+// and an unknown build is better than a permanently unready one.
+func (a *Adapter) probeVersion(ctx context.Context, ep engine.Endpoint, p engine.Profile) (string, bool) {
+	for _, path := range p.Version {
+		u, err := resolve(ep.BaseURL, path)
+		if err != nil {
+			continue
+		}
+		var resp struct {
+			Version string `json:"version"`
+			Build   string `json:"build"`
+		}
+		if err := a.client.Do(ctx, "GET", u, nil, &resp); err != nil {
+			continue
+		}
+		if resp.Version != "" {
+			return resp.Version, true
+		}
+		// llama-server's /props answers with a nested object rather than a
+		// flat version, and the generic decode leaves it empty. Absence is
+		// still a successful probe; the field simply stays unset.
+		return "", true
 	}
-	var resp struct {
-		Version string `json:"version"`
-	}
-	if err := a.client.Do(ctx, "GET", u, nil, &resp); err == nil {
-		cap.Version = resp.Version
-	}
+	return "", false
 }
+
+// isNotSupported distinguishes "this path does not exist" from "this endpoint
+// is unhealthy". Only the first justifies trying the next candidate; a 503
+// means the engine is mid-load and must be reported as not ready.
+func isNotSupported(err error) bool { return errors.Is(err, errNotSupported) }

@@ -75,6 +75,17 @@ func NewStub() *Stub {
 					"merges.txt":                       16 * 1024,
 				},
 			},
+			// A GGUF repository, the layout llama.cpp reads and vLLM cannot.
+			// It is here because the two formats must be distinguishable from
+			// the files alone, and the only way to prove that is to have both
+			// shapes in the catalogue.
+			"bartowski/Qwen2.5-0.5B-Instruct-GGUF": {
+				Files: map[string]int64{
+					"Qwen2.5-0.5B-Instruct-Q4_K_M.gguf": 1 << 20,
+					"Qwen2.5-0.5B-Instruct-Q8_0.gguf":   2 << 20,
+					"README.md":                         4096,
+				},
+			},
 			// A repository that fails mid-pull, so the error path and the
 			// registry's failed state are reachable without unplugging a cable.
 			"fleet/broken-model": {

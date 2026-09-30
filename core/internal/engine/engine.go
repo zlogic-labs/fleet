@@ -10,6 +10,8 @@ package engine
 import (
 	"context"
 	"time"
+
+	"github.com/zlogic-labs/fleet/core/pkg/weights"
 )
 
 // Endpoint is one addressable replica group serving a model over the
@@ -63,33 +65,42 @@ type Capability struct {
 	// MaxModelLen is the engine's context window as configured for this
 	// deployment, which can be lower than the model's own limit.
 	MaxModelLen int
-	// Tokenize reports whether /tokenize is served. It is the cheap path to
-	// exact prompt counts and to reconciling our own estimates.
+	// Tokenize reports whether a /tokenize extension is served. It is the
+	// cheap path to exact prompt counts and to reconciling our own estimates.
+	// Its absence is normal, not a fault: llama-server has no such endpoint.
 	Tokenize bool
 	Tools    bool
 	JSONMode bool
 	// ServedModels is what /v1/models reports, which may be more than one
 	// when several checkpoints share a process.
 	ServedModels []string
-	ProbedAt     time.Time
+	// Profile is the engine family the endpoint was identified as, and Format
+	// what weights it was found to serve. Both are echoed into status so the
+	// console can explain a deployment instead of just colouring it.
+	Profile      string
+	WeightFormat weights.Format
+	// MetricsAvailable records whether autoscaling can be driven from this
+	// engine. False is a normal, supported state: llama-server publishes no
+	// vLLM metric set, and a deployment using it scales by replica count.
+	MetricsAvailable bool
+	ProbedAt         time.Time
 }
 
-// Adapter probes a running engine. Probing is the only place that needs to
-// know about engine-specific URLs, and each capability is fetched
-// independently so a partial failure still yields a usable Capability.
+// Adapter probes a running engine.
+//
+// There is one implementation of this interface per protocol, not per vendor,
+// because there is exactly one protocol (P1). Engine diversity lives in
+// Profile, which is data. Anyone tempted to add a second Adapter to
+// accommodate a second engine is about to re-create the vendor coupling P1
+// exists to prevent — the answer is a Profile, or a new probe on this one.
 type Adapter interface {
-	// Name is the engine family this adapter handles, e.g. "vllm".
+	// Name identifies the protocol, not the engine family.
 	Name() string
 	// Probe reports capabilities. It must not fail hard when an optional
 	// capability is missing; only an unreachable engine is a hard failure.
-	Probe(ctx context.Context, ep Endpoint) (Capability, error)
+	// The profile says which optional endpoints to look for; the adapter says
+	// how to ask.
+	Probe(ctx context.Context, ep Endpoint, p Profile) (Capability, error)
 	// Models lists the model identifiers the endpoint serves.
 	Models(ctx context.Context, ep Endpoint) ([]string, error)
-}
-
-// Registry resolves an adapter by engine family. A deployment whose engine
-// has no registered adapter still works: the OpenAI-compatible adapter is
-// registered as the default.
-type Registry interface {
-	AdapterFor(engine string) Adapter
 }
