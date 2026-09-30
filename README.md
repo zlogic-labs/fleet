@@ -69,6 +69,33 @@ state, the model registry, and cluster inventory. To fill them with data:
 `dev.sh --real` does the same but pulls from huggingface.co instead of a
 synthetic repository. Everything lands in `.dev/`, which is gitignored.
 
+### Proving it works
+
+`seed.sh` fills the pages; it does not check anything. To check:
+
+```sh
+./scripts/smoke.sh        # in a second terminal, with dev.sh running
+```
+
+45 assertions, and it exits non-zero on the first failure. It is safe to re-run.
+What it covers, and why each check exists:
+
+| Area | Checks |
+|---|---|
+| OpenAI compatibility | a real completion, a 54-frame stream, a `usage` object on both, `[DONE]`, error envelopes instead of a router's 404 page |
+| Console | the app shell, a deep link, and that each `/assets/*.js` is served as JavaScript **and is not the app shell** — a 200 that is really `index.html` is the failure that hides |
+| CORS | a loopback origin is allowed and a foreign one is not, because the console is on :8080 and the control plane answers on :8081 |
+| Engine profiles | vLLM demands compute 7.5+ and llama.cpp demands none; llama-cpp claims no autoscaling metrics and no engine tokenizer |
+| Weight formats | a safetensors and a GGUF repository side by side, each passing its own engine and each refused by the other's, with the reason in the message |
+| Operator inventory | counts recomputed from the node list, and `Scheduling` with a reason kept distinct from `Pending` |
+
+That last row is the one to read twice. A `Ready` model that cannot be loaded
+is a claim the platform cannot back up, and the pull is where that claim is
+made.
+
+`make check` runs what CI runs and needs no server. `smoke.sh` is separate
+because it needs both processes up, so it cannot be part of `check`.
+
 ### What each page does in the default run
 
 | Page | Backed by | Needs |
@@ -126,6 +153,7 @@ also talks to AWS must not pick up Fleet's bucket by accident.
 
 ```sh
 make check          # gofmt + go vet + no-cgo check + tests + console types
+make smoke          # end-to-end assertions; needs ./scripts/dev.sh running
 make build          # host binaries into ./bin
 make web            # build the console and stage it for embedding
 make dev            # the same as ./scripts/dev.sh
@@ -137,8 +165,8 @@ make help           # all targets
 
 Requires Go 1.26+ and Node 20+.
 
-`scripts/dev.sh` and `scripts/seed.sh` do not need make — the Makefile targets
-are aliases so the sequences are discoverable.
+`scripts/dev.sh`, `scripts/seed.sh` and `scripts/smoke.sh` do not need make —
+the Makefile targets are aliases so the sequences are discoverable.
 
 The console bundle is built by `web/` and embedded into the gateway binary; it
 is not committed. A fresh clone still compiles — the binary serves a

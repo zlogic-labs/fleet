@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# End-to-end checks against a running dev stack.
+#
+#   ./scripts/dev.sh          # in one terminal
+#   ./scripts/smoke.sh        # in another
+#
+# Exits non-zero on the first failure, so it is usable as a gate and not only as
+# something to read. Every check here is an assertion about behaviour that used
+# to be wrong, not a liveness ping: a server that answers 200 while rendering
+# a finished download as 1% passes a ping and fails this.
+#
+# Nothing here needs a GPU, network access or object storage.
+
+set -uo pipefail
+
+GATEWAY=${GATEWAY:-http://127.0.0.1:8080}
+CONTROL=${CONTROL:-http://127.0.0.1:8081}
+API=$CONTROL/api/v1
+
+pass=0
+fail=0
+
+green() { printf '\033[32m%s\033[0m' "$1"; }
+red()   { printf '\033[31m%s\033[0m' "$1"; }
+
+section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# check NAME EXPECTED ACTUAL
+check() {
+  if [ "$2" = "$3" ]; then
+    pass=$((pass + 1))
+    printf '  %s %s\n' "$(green 'ok  ')" "$1"
+  else
+    fail=$((fail + 1))
+    printf '  %s %s\n        expected: %s\n        actual:   %s\n' \
+      "$(red 'FAIL')" "$1" "$2" "$3"
+  fi
+}
+
+# Fails loudly rather than printing an empty string. An expression that
+# indexes past the end of a list raises, and a bare "" would compare equal to
+# an expected "" — so a missing entry would silently pass the check that was
+# supposed to prove it exists.
+jqp() {
+  python -c "
+import json,sys
+d=json.load(sys.stdin)
+try:
+    print(eval(sys.argv[1],{'d':d}))
+except Exception as e:
+    print('<<error: %s>>' % e)
+" "$1"
+}
+
+section "waiting for both processes"
+for _ in $(seq 1 60); do
+  if curl -fsS "$GATEWAY/healthz" >/dev/null 2>&1 &&
+     curl -fsS "$CONTROL/healthz" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+if ! curl -fsS "$GATEWAY/healthz" >/dev/null 2>&1; then
+  red "no gateway at $GATEWAY — start ./scripts/dev.sh" >&2
+  exit 1
+fi
+if ! curl -fsS "$CONTROL/healthz" >/dev/null 2>&1; then
+  red "no control plane at $CONTROL — start ./scripts/dev.sh" >&2
+  exit 1
+fi
+echo "  gateway $GATEWAY, control plane $CONTROL"
+
+# ── the gateway is a real OpenAI-compatible endpoint ────────────────
+section "gateway: OpenAI compatibility"
+
+BODY='{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hello"}],"stream":false,"stream_options":{"include_usage":true}}'
+R=$(curl -sS -X POST "$GATEWAY/v1/chat/completions" -H 'Content-Type: application/json' -d "$BODY")
+check "non-stream returns choices[0].message.content" "True" \
+  "$(printf '%s' "$R" | jqp "bool(d['choices'][0]['message'].get('content'))")"
+# P6: the gateway must trust the engine's usage, not invent it. Zero means
+# the tap missed the usage frame, which is the bug that makes everything
+# unbillable.
+check "non-stream reports a nonzero usage" "True" \
+  "$(printf '%s' "$R" | jqp "d['usage']['total_tokens'] > 0")"
+check "usage total equals prompt + completion" "True" \
+  "$(printf '%s' "$R" | jqp "d['usage']['total_tokens'] == d['usage']['prompt_tokens'] + d['usage']['completion_tokens']")"
+
+SBODY='{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}'
+S=$(curl -sS -N -X POST "$GATEWAY/v1/chat/completions" -H 'Content-Type: application/json' -d "$SBODY")
+check "stream emits more than one data frame" "True" \
+  "$(printf '%s\n' "$S" | grep -c '^data: ' | python -c 'import sys;print(int(sys.stdin.read()) > 1)')"
+check "stream ends with [DONE]" "True" \
+  "$(printf '%s\n' "$S" | grep -q 'data: \[DONE\]' && echo True || echo False)"
+check "stream carries a usage frame" "True" \
+  "$(printf '%s\n' "$S" | grep '^data: ' | sed 's/^data: //' \
+     | python -c "
+import sys,json
+for line in sys.stdin:
+    line=line.strip()
+    if not line or line=='[DONE]': continue
+    try: d=json.loads(line)
+    except ValueError: continue
+    if d.get('usage'): print('True'); break
+else: print('False')")"
+
+check "GET /v1/models lists a model" "True" \
+  "$(curl -sS "$GATEWAY/v1/models" | jqp "len(d['data']) > 0")"
+check "GET /fleet/status reports the edition" "community" \
+  "$(curl -sS "$GATEWAY/fleet/status" | jqp "d['edition']")"
+
+# A 4xx from the engine must reach the client as an OpenAI error envelope,
+# not as chi's plain-text 404 page.
+check "an unknown model returns an error envelope" "True" \
+  "$(curl -sS -X POST "$GATEWAY/v1/chat/completions" -H 'Content-Type: application/json' \
+     -d '{"model":"nope","messages":[]}' \
+     | jqp "'error' in d and 'type' in d['error']")"
+
+# ── the console is embedded and its assets resolve ──────────────────
+section "console"
+
+check "GET / returns the app shell" "True" \
+  "$(curl -sS "$GATEWAY/" | grep -q '<div id="root">' && echo True || echo False)"
+# A deep link must serve the shell too, or a refresh on /models 404s.
+check "a deep link returns the app shell" "True" \
+  "$(curl -sS "$GATEWAY/models" | grep -q '<div id="root">' && echo True || echo False)"
+
+# Every asset the shell references must actually be served, with the right
+# content type. A 200 that is really index.html is the failure that hides.
+ASSET=$(curl -sS "$GATEWAY/" | grep -o '/assets/[^"]*\.js' | head -1)
+if [ -n "$ASSET" ]; then
+  check "asset $ASSET is served as javascript" "True" \
+    "$(curl -sS -o /dev/null -w '%{content_type}' "$GATEWAY$ASSET" \
+       | grep -q 'javascript' && echo True || echo False)"
+  check "asset $ASSET is not the app shell" "True" \
+    "$(curl -sS "$GATEWAY$ASSET" | grep -q '<div id="root">' && echo False || echo True)"
+else
+  fail=$((fail + 1))
+  printf '  %s the shell references no /assets/*.js — the console was not built (make web)\n' "$(red 'FAIL')"
+fi
+
+# ── the control plane ──────────────────────────────────────────────
+section "control plane: routes"
+
+for route in models pulls storage engines cluster deployments; do
+  check "GET /api/v1/$route" "200" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' "$API/$route")"
+done
+# CORS: the console is served from :8080 and the control plane answers on
+# :8081, so without this every request is a browser error.
+check "a loopback origin is allowed" "True" \
+  "$(curl -sS -o /dev/null -D - -H 'Origin: http://127.0.0.1:8080' \
+     "$API/models" | grep -qi 'access-control-allow-origin: http://127.0.0.1:8080' \
+     && echo True || echo False)"
+# Substring matching would let a hostile origin through.
+check "a foreign origin is not allowed" "False" \
+  "$(curl -sS -o /dev/null -D - -H 'Origin: https://evil.example.com' \
+     "$API/models" | grep -qi 'access-control-allow-origin' \
+     && echo True || echo False)"
+check "an unknown model returns an error envelope" "True" \
+  "$(curl -sS "$API/models/definitely%2Fnot-here" \
+     | jqp "'error' in d and 'type' in d['error']")"
+
+# ── engine profiles: the thing this change was about ────────────────
+section "engine profiles"
+
+E=$(curl -sS "$API/engines")
+check "vllm is a known engine" "True" \
+  "$(printf '%s' "$E" | jqp "any(e['name']=='vllm' for e in d)")"
+check "llama-cpp is a known engine" "True" \
+  "$(printf '%s' "$E" | jqp "any(e['name']=='llama-cpp' for e in d)")"
+# The whole design rests on this: vLLM refuses an older card, llama.cpp does not.
+check "vllm requires compute 7.5+" "75" \
+  "$(printf '%s' "$E" | jqp "[e['minCompute'] for e in d if e['name']=='vllm'][0]")"
+check "llama-cpp claims no compute floor" "0" \
+  "$(printf '%s' "$E" | jqp "[e['minCompute'] for e in d if e['name']=='llama-cpp'][0]")"
+# An autoscaler reading a series the engine does not publish sees zero and
+# adds replicas forever. Declaring none is the honest answer.
+check "llama-cpp claims no autoscaling metrics" "False" \
+  "$(printf '%s' "$E" | jqp "[e['metrics'] for e in d if e['name']=='llama-cpp'][0]")"
+check "vllm declares autoscaling metrics" "True" \
+  "$(printf '%s' "$E" | jqp "[e['metrics'] for e in d if e['name']=='vllm'][0]")"
+check "llama-cpp declares no engine tokenizer" "False" \
+  "$(printf '%s' "$E" | jqp "[e['tokenize'] for e in d if e['name']=='llama-cpp'][0]")"
+
+# ── weight formats ─────────────────────────────────────────────────
+section "weight formats"
+
+pull() {
+  curl -sS -o /dev/null -X POST "$API/pulls" -H 'Content-Type: application/json' -d "$1"
+}
+# The registry key comes from sourceRef, not from the model field, so each of
+# these needs its own repository to be a distinct entry.
+pull '{"model":"Qwen/Qwen2.5-1.5B-Instruct","source":"huggingface","sourceRef":"Qwen/Qwen2.5-1.5B-Instruct","engine":"vllm"}'
+pull '{"model":"bartowski/Qwen2.5-0.5B-Instruct-GGUF","source":"huggingface","sourceRef":"bartowski/Qwen2.5-0.5B-Instruct-GGUF","engine":"llama-cpp"}'
+# A repository whose name matches no encoding prefix, where the only way to get
+# an exact count is for the operator to pin the encoding by hand.
+pull '{"model":"fleet/pinned-encoding","source":"huggingface","sourceRef":"fleet/pinned-encoding","engine":"vllm","tokenizerId":"o200k_base"}'
+
+echo "  waiting for pulls to settle"
+for _ in $(seq 1 80); do
+  n=$(curl -sS "$API/pulls" | grep -c '"state":"\(queued\|running\)"' || true)
+  [ "$n" = "0" ] && break
+  sleep 0.25
+done
+
+M=$(curl -sS "$API/models")
+ST=$(curl -sS "$API/pulls")
+
+check "the safetensors repository is detected as safetensors" "safetensors" \
+  "$(printf '%s' "$M" | jqp "[m['format'] for m in d if m['name']=='Qwen/Qwen2.5-1.5B-Instruct'][0]")"
+check "the GGUF repository is detected as gguf" "gguf" \
+  "$(printf '%s' "$M" | jqp "[m['format'] for m in d if m['name'].endswith('GGUF')][0]")"
+# GGUF carries its tokenizer inside the weights file. An empty id is the correct
+# value; a repository name here is a claim the engine will ignore.
+check "a GGUF model records no external tokenizer" "" \
+  "$(printf '%s' "$M" | jqp "[m['tokenizerId'] for m in d if m['name'].endswith('GGUF')][0]")"
+# The tokenizer field is a tiktoken encoding name, not a model name. The
+# gateway's resolver returns a non-empty hint verbatim and skips prefix
+# matching, so a guess stored here suppresses the exact table — and the token
+# count is what billing settles on (P5, P6).
+check "Fleet does not invent a tokenizer id" "" \
+  "$(printf '%s' "$M" | jqp "[m['tokenizerId'] for m in d if m['name']=='Qwen/Qwen2.5-1.5B-Instruct'][0]")"
+check "an operator-pinned encoding survives the pull" "o200k_base" \
+  "$(printf '%s' "$M" | jqp "[m['tokenizerId'] for m in d if m['name']=='fleet/pinned-encoding'][0]")"
+# The invariant, checked across every entry rather than one model: a tokenizer
+# id is either empty (let the resolver infer from the model name) or a name
+# tiktoken actually has a table for. Anything else fails to load and silently
+# degrades to the estimator, which is a billing error, not a display one.
+check "every tokenizer id is a real encoding name" "True" \
+  "$(printf '%s' "$M" | jqp "all(t in {'o200k_base','cl100k_base','p50k_base','r50k_base','gpt2'} or t == '' for t in [m['tokenizerId'] for m in d])")"
+# Progress is a fraction in [0,1] on the wire. A finished job is 1.0, and a
+# console that passes it through unscaled renders it as 1%.
+check "a finished pull reports progress 1.0" "True" \
+  "$(printf '%s' "$ST" | jqp "all(p['progress']==1 for p in d if p['state']=='done')")"
+
+v() { curl -sS "$API/verify/$1?engine=$2"; }
+
+check "the safetensors model satisfies vllm" "True" \
+  "$(v 'Qwen%2FQwen2.5-1.5B-Instruct' vllm | jqp "d['ok']")"
+check "the GGUF model satisfies llama-cpp" "True" \
+  "$(v 'bartowski%2FQwen2.5-0.5B-Instruct-GGUF' llama-cpp | jqp "d['ok']")"
+# A safetensors repository has no config.json, so the old hardcoded check
+# called it incomplete and an operator would re-download what was already fine.
+check "the GGUF model is refused by vllm, with a reason" "True" \
+  "$(v 'bartowski%2FQwen2.5-0.5B-Instruct-GGUF' vllm \
+     | jqp "'error' in d and 'safetensors' in d['error']['message'] and 'gguf' in d['error']['message']")"
+check "the safetensors model is refused by llama-cpp" "True" \
+  "$(v 'Qwen%2FQwen2.5-1.5B-Instruct' llama-cpp | jqp "'error' in d")"
+# An engine nobody has described must refuse rather than guess, because a
+# wrong guess becomes a wrong readiness verdict.
+check "an unprofiled engine refuses rather than guessing" "True" \
+  "$(v 'Qwen%2FQwen2.5-1.5B-Instruct' tensorrt-llm | jqp "'error' in d")"
+
+# ── operator reports ───────────────────────────────────────────────
+section "operator inventory"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/operator/inventory" \
+  -H 'Content-Type: application/json' -d '{
+  "cluster":{"name":"k3s-dev","reachable":true,"version":"v1.36.4+k3s1",
+    "cpuMillicores":32256,"memoryMiB":32768,
+    "nodes":[
+      {"name":"desktop-jkf1khq","ready":true,"roles":["control-plane","worker"],
+       "gpu":{"model":"NVIDIA GeForce GT 720","count":1,"totalMemoryMiB":2048},
+       "allocatableMemoryMiB":31800,"kubeletVersion":"v1.36.4","osImage":"Ubuntu 24.04"},
+      {"name":"gpu-node-a","ready":true,"roles":["worker"],
+       "gpu":{"model":"NVIDIA A100-SXM4-80GB","count":8,"totalMemoryMiB":655360},
+       "allocatableMemoryMiB":980000,"kubeletVersion":"v1.36.4","osImage":"Ubuntu 24.04"}]},
+  "deployments":[
+    {"name":"qwen-7b","namespace":"fleet","model":"Qwen/Qwen2.5-7B-Instruct",
+     "desiredReplicas":3,"readyReplicas":3,"tensorParallelSize":1,"pipelineParallelSize":0,
+     "gpuPerReplica":1,"state":"Available"},
+    {"name":"llama-70b","namespace":"fleet","model":"bartowski/Llama-3.3-70B-GGUF",
+     "desiredReplicas":2,"readyReplicas":0,"tensorParallelSize":8,"pipelineParallelSize":2,
+     "gpuPerReplica":16,"state":"Scheduling","reason":"InsufficientCapacity"}]
+}')
+check "POST /operator/inventory" "204" "$code"
+
+C=$(curl -sS "$API/cluster")
+# The counts are recomputed on report, so the summary can never disagree with
+# the node list the operator actually sent.
+check "the cluster summary counts the nodes" "2" "$(printf '%s' "$C" | jqp "d['clusters'][0]['nodeCount']")"
+check "the cluster summary counts the GPUs" "9" "$(printf '%s' "$C" | jqp "d['clusters'][0]['gpuCount']")"
+check "the cluster summary counts ready GPUs" "9" "$(printf '%s' "$C" | jqp "d['clusters'][0]['readyGpus']")"
+
+D=$(curl -sS "$API/deployments")
+# Pending:InsufficientCapacity and Pending:Scheduling are different states and
+# a scheduler that cannot tell them apart either retries forever or gives up.
+# Assert on the two just reported rather than on a count: this script is
+# re-runnable, and earlier reports under other namespaces are still in the store.
+check "the available deployment was recorded" "Available 3/3 TP=1 PP=0" \
+  "$(printf '%s' "$D" | jqp "[f\"{x['state']} {x['readyReplicas']}/{x['desiredReplicas']} TP={x['tensorParallelSize']} PP={x['pipelineParallelSize']}\" for x in d if x['name']=='qwen-7b' and x['namespace']=='fleet'][0]")"
+check "the capacity-starved deployment keeps its reason" "InsufficientCapacity" \
+  "$(printf '%s' "$D" | jqp "[x['reason'] for x in d if x['name']=='llama-70b' and x['namespace']=='fleet'][0]")"
+check "the capacity-starved deployment is Scheduling, not Pending" "Scheduling" \
+  "$(printf '%s' "$D" | jqp "[x['state'] for x in d if x['name']=='llama-70b' and x['namespace']=='fleet'][0]")"
+
+# ── summary ────────────────────────────────────────────────────────
+printf '\n'
+if [ "$fail" -eq 0 ]; then
+  printf '%s %d checks passed\n\n' "$(green 'PASS')" "$pass"
+  exit 0
+fi
+printf '%s %d passed, %d failed\n\n' "$(red 'FAIL')" "$pass" "$fail"
+exit 1

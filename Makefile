@@ -57,6 +57,13 @@ dev-real: ## Same, but pulls come from huggingface.co
 seed: ## Fill the dev control plane with models, pulls and a cluster report
 	./scripts/seed.sh
 
+# End-to-end assertions against a running stack. Separate from `test`, which
+# runs without a server, because this one needs both processes up and therefore
+# cannot be part of `make check`.
+.PHONY: smoke
+smoke: ## Assert end-to-end behaviour against a running ./scripts/dev.sh
+	./scripts/smoke.sh
+
 .PHONY: build
 build: ## Compile every command for the host platform into ./bin
 	@mkdir -p $(GOBIN)

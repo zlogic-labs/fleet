@@ -75,6 +75,14 @@ func NewStub() *Stub {
 					"merges.txt":                       16 * 1024,
 				},
 			},
+			// A name that matches no encoding prefix at all, so the only way to
+			// count its tokens exactly is for the operator to pin the encoding.
+			"fleet/pinned-encoding": {
+				Files: map[string]int64{
+					"config.json":       1161,
+					"model.safetensors": 1 << 20,
+				},
+			},
 			// A GGUF repository, the layout llama.cpp reads and vLLM cannot.
 			// It is here because the two formats must be distinguishable from
 			// the files alone, and the only way to prove that is to have both

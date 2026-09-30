@@ -26,10 +26,17 @@ pull() {
 }
 
 # Two that succeed, so the Registry card has ready rows.
-pull '{"model":"Qwen/Qwen2.5-1.5B-Instruct","contextLimit":32768,"tokenizerId":"qwen2"}' \
-  'Qwen/Qwen2.5-1.5B-Instruct'
-pull '{"model":"Qwen/Qwen2.5-7B-Instruct","contextLimit":32768,"tokenizerId":"qwen2"}' \
-  'Qwen/Qwen2.5-7B-Instruct'
+# No tokenizerId on purpose. The field is a tiktoken encoding name, not a model
+# name: the gateway's resolver returns a non-empty hint verbatim and skips its
+# own prefix matching, so a guess here suppresses the exact table. Leave it
+# empty and the resolver picks by model name, which is correct.
+pull '{"model":"Qwen/Qwen2.5-1.5B-Instruct","source":"huggingface","sourceRef":"Qwen/Qwen2.5-1.5B-Instruct","engine":"vllm","contextLimit":32768}' \
+  'Qwen/Qwen2.5-1.5B-Instruct (safetensors, for vLLM)'
+# A GGUF repository, so the two weight formats sit side by side. It is the case
+# that a hardcoded config.json check got wrong: the repository has no
+# config.json, only .gguf files, and llama.cpp reads it while vLLM cannot.
+pull '{"model":"bartowski/Qwen2.5-0.5B-Instruct-GGUF","source":"huggingface","sourceRef":"bartowski/Qwen2.5-0.5B-Instruct-GGUF","engine":"llama-cpp"}' \
+  'bartowski/Qwen2.5-0.5B-Instruct-GGUF (gguf, for llama.cpp)'
 # One that fails, so the failure path is visible in the console.
 pull '{"model":"fleet/broken-model"}' 'fleet/broken-model (fails on purpose)'
 
@@ -91,7 +98,13 @@ echo "state:"
 curl -sS "$API/models" | python -c "
 import json,sys
 for m in json.load(sys.stdin):
-    print(f\"  {m['name']:32} {m['state']:8} {m['files']:>3} files  ctx={m['contextLimit']}\")" 2>/dev/null || true
+    # The tokenizer is empty for GGUF by design: it is inside the weights file.
+    tok = m['tokenizerId'] or ('embedded' if m['format']=='gguf' else '—')
+    print(f\"  {m['name']:38} {m['format']:12} {m['state']:8} {m['files']:>3} files  tokenizer={tok}\")" 2>/dev/null || true
+curl -sS "$API/engines" | python -c "
+import json,sys
+for e in json.load(sys.stdin):
+    print(f\"  engine {e['name']:10} loads={e['format']:12} minCompute={e['minCompute']:<4} metrics={str(e['metrics']):5} tokenize={e['tokenize']}\")" 2>/dev/null || true
 curl -sS "$API/storage" | python -c "
 import json,sys
 s=json.load(sys.stdin)

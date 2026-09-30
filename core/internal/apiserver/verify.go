@@ -48,16 +48,19 @@ func (p *Puller) Verify(ctx context.Context, name, engineName string) (found int
 
 // tokenizerFor returns the tokenizer id to record for a model.
 //
-// A GGUF carries its tokenizer inside the weights, so naming an external one
-// is a claim Fleet cannot check and the engine will ignore. Returning the model
-// name is the same claim with an extra step. The honest answer is empty: the
-// gateway's own resolver finds the closest matching encoding, and the console
-// shows that as "embedded".
-func tokenizerFor(f weights.Format, fallback string) string {
+// Fleet does not invent one. The gateway's resolver treats a non-empty hint as
+// the encoding name verbatim and skips its own prefix matching, so putting a
+// model name here would suppress the exact table that a self-hosted model
+// named after an OpenAI one would otherwise resolve to — and it would not
+// resolve at all, because a repository name is not a tiktoken encoding.
+//
+// A GGUF gets nothing even when the operator named one: the tokenizer is
+// inside the weights file and the engine reads it from there.
+func tokenizerFor(f weights.Format, requested string) string {
 	if f == weights.GGUF {
 		return ""
 	}
-	return fallback
+	return requested
 }
 
 func paths(repo hub.Repo) []string {

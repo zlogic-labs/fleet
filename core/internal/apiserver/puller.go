@@ -88,7 +88,12 @@ func (p *Puller) Run(ctx context.Context, job *registry.Pull) error {
 	// pins to it.
 	prefix := blobstore.Prefix(owner, name, repo.Resolved)
 	format := weights.Of(paths(repo))
-	tokenizer := tokenizerFor(format, job.Model)
+	// Whatever the operator asked for at queue time, and nothing else. The
+	// entry written when the pull was queued is the only place a real
+	// encoding name can come from; inventing one here would override it with
+	// a guess that the gateway cannot use.
+	prev, _ := p.Store.GetModel(ctx, name)
+	tokenizer := tokenizerFor(format, prev.Tokenizer)
 	job.Commit = repo.Resolved
 	job.Prefix = prefix.String()
 	job.Format = string(format)
