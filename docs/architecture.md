@@ -270,16 +270,19 @@ KubeRay / AIBrix 的 CRD **用 `unstructured` 消费**，不引它们的 Go clie
 
 ## 9. 本地开发环境
 
-k3s + WSL2，**仅用于控制面开发**：
+k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup.sh`，约束与验证边界见 `deploy/k3s-dev/README.md`。
 
-- WSL2 必须开 systemd（`/etc/wsl.conf` → `[boot] systemd=true`）
-- **NVIDIA GPU Operator 在 WSL2 不可用**（它要装内核模块，WSL2 用的是 paravirtualized 驱动）。本地直接跑 `nvidia/k8s-device-plugin` DaemonSet
+- WSL2 必须开 systemd（`/etc/wsl.conf` → `[boot] systemd=true`），k3s 装不上 WSL1
+- **NVIDIA GPU Operator 在 WSL2 不可用**。它要装 `nvidia.ko` 内核模块，而 WSL2 用的是 Windows 驱动的 paravirtualized 实现，这条路是堵死的。本地直接跑 `nvidia/k8s-device-plugin` DaemonSet
 - **MIG 在 WSL2 不支持**——MIG 逻辑只能靠 CI 上的真 Linux 机器验证
+- **NVML 在容器内经常枚举不到 GPU**。即使宿主 `nvidia-smi` 正常，插件也会注册 socket 但报告 0 个设备，节点不上报 `nvidia.com/gpu`。这是环境限制，不是代码问题
+- device plugin 的 Pod 必须显式指定 `spec.runtimeClassName: nvidia`。上游静态清单把它放在默认 runtime 上，容器内没有 NVML，于是"注册成功但 0 设备"——这个坑排查起来很费时间
+- containerd 2.x 下 `nvidia-ctk runtime configure` 写的是 `/etc/containerd/conf.d/99-nvidia.toml`，不是传入的 `--config` 路径。k3s 的 config 有 `imports = [... "/etc/containerd/conf.d/*.toml"]`，所以能生效，且 `runc` 仍是默认 runtime
 - CNI 用默认 flannel，不要 Cilium（WSL2 内核 eBPF 支持不全）
-- 模型权重必须放在 WSL 文件系统内，**不能放 `/mnt/c`**（9p 协议，safetensors 加载慢一个数量级）
+- 模型权重必须放在 WSL 文件系统内，**不能放 `/mnt/c`**（9p 协议，safetensors 加载慢一个数量级）。从 `/mnt/d` 构建源码是可以的——Go 的 build cache 在 ext4 上，真正耗时在那里，当前 tree 冷构建约 20 秒
 - k3s 默认 Traefik 保留作南北向入口
 
-**测试边界**：控制面逻辑（CRD 生命周期、rollout、扩缩容决策、网关全链路）本地全覆盖；GPU 特有逻辑（MIG、拓扑感知放置、多节点 TP）只在 CI 真机验证。
+**测试边界**：控制面逻辑（CRD 生命周期、rollout、扩缩容决策、网关全链路）本地全覆盖；GPU 特有逻辑（MIG、拓扑感知放置、多节点 TP、NVML 枚举）只在 CI 真机验证。
 
 ## 10. 实施顺序
 
