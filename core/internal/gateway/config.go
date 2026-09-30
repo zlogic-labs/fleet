@@ -1,0 +1,195 @@
+// Package gateway wires the OpenAI-compatible surface: middleware chain, route
+// table, and the handlers that turn a client request into a proxied one.
+package gateway
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is the whole of a single-node deployment's configuration.
+//
+// Endpoints are declared statically at first because a control plane that
+// writes them arrives with the operator module. The shape here is already the
+// one the CRD reconciles into, so swapping the loader for a database read is
+// not a change to any caller.
+type Config struct {
+	Listen     string           `yaml:"listen"`
+	Edition    string           `yaml:"edition"`
+	Upstreams  []UpstreamConfig `yaml:"upstreams"`
+	Timeouts   TimeoutConfig    `yaml:"timeouts"`
+	MaxBodyMB  int              `yaml:"max_body_mb"`
+	RateLimits LimitConfig      `yaml:"rate_limits"`
+}
+
+type UpstreamConfig struct {
+	ID       string `yaml:"id"`
+	Model    string `yaml:"model"`
+	BaseURL  string `yaml:"base_url"`
+	Engine   string `yaml:"engine"`
+	Replicas int    `yaml:"replicas"`
+	// APIKey authenticates to the upstream. It is the engine's key, not a
+	// tenant's; tenants authenticate to the gateway.
+	APIKey string `yaml:"api_key"`
+	// AffinityPrefixRunes bounds the prompt prefix that participates in the
+	// routing hash. Long enough to cover a system prompt, short enough that
+	// every request does not hash a whole transcript.
+	AffinityPrefixRunes int `yaml:"affinity_prefix_runes"`
+}
+
+type TimeoutConfig struct {
+	Dial         time.Duration `yaml:"dial"`
+	ResponseHdrs time.Duration `yaml:"response_headers"`
+	// Total bounds a whole request including generation. Zero means no limit,
+	// which is the right default: a long completion is not a failure.
+	Total time.Duration `yaml:"total"`
+}
+
+type LimitConfig struct {
+	RPM int `yaml:"requests_per_minute"`
+	TPM int `yaml:"tokens_per_minute"`
+}
+
+// Default is what a bare `fleet-gateway` with no config file runs as.
+func Default() Config {
+	return Config{
+		Listen:    ":8080",
+		Edition:   "community",
+		MaxBodyMB: 32,
+		Timeouts: TimeoutConfig{
+			Dial:         5 * time.Second,
+			ResponseHdrs: 60 * time.Second,
+			Total:        0,
+		},
+	}
+}
+
+// Load reads YAML from path, then applies FLEET_* environment overrides.
+// Environment last means a container can be reconfigured without rewriting a
+// ConfigMap, which is the common case for image promotion.
+func Load(path string) (Config, error) {
+	cfg := Default()
+
+	if path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return cfg, fmt.Errorf("read config %s: %w", path, err)
+		}
+		// Decoding onto the defaults leaves unset fields alone, which is what
+		// lets a short config file stay short.
+		if err := yaml.Unmarshal(raw, &cfg); err != nil {
+			return cfg, fmt.Errorf("parse config %s: %w", path, err)
+		}
+	}
+
+	applyEnv(&cfg)
+	return cfg, cfg.validate()
+}
+
+func applyEnv(cfg *Config) {
+	setString(&cfg.Listen, "FLEET_LISTEN")
+	setString(&cfg.Edition, "FLEET_EDITION")
+	setInt(&cfg.MaxBodyMB, "FLEET_MAX_BODY_MB")
+	setInt(&cfg.RateLimits.RPM, "FLEET_RATE_RPM")
+	setInt(&cfg.RateLimits.TPM, "FLEET_RATE_TPM")
+	setDuration(&cfg.Timeouts.Dial, "FLEET_TIMEOUT_DIAL")
+	setDuration(&cfg.Timeouts.ResponseHdrs, "FLEET_TIMEOUT_RESPONSE_HEADERS")
+
+	// A single upstream may be supplied inline, which is the shape of a local
+	// llama.cpp or a vLLM pod that has not been adopted yet.
+	if raw := os.Getenv("FLEET_UPSTREAMS"); raw != "" {
+		for _, spec := range strings.Split(raw, ";") {
+			if ep, err := parseUpstream(spec); err == nil && ep.BaseURL != "" {
+				cfg.Upstreams = append(cfg.Upstreams, ep)
+			}
+		}
+	}
+}
+
+// parseUpstream reads "model=...,url=...,id=...,key=...,engine=...".
+func parseUpstream(spec string) (UpstreamConfig, error) {
+	var ep UpstreamConfig
+	for _, kv := range strings.Split(spec, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "id":
+			ep.ID = v
+		case "model":
+			ep.Model = v
+		case "url":
+			ep.BaseURL = v
+		case "engine":
+			ep.Engine = v
+		case "key":
+			ep.APIKey = v
+		}
+	}
+	return ep, nil
+}
+
+func (c Config) validate() error {
+	if c.Listen == "" {
+		return fmt.Errorf("listen address is empty")
+	}
+	if c.MaxBodyMB <= 0 {
+		return fmt.Errorf("max_body_mb must be positive, got %d", c.MaxBodyMB)
+	}
+	seen := make(map[string]bool, len(c.Upstreams))
+	for i, up := range c.Upstreams {
+		if up.BaseURL == "" {
+			return fmt.Errorf("upstreams[%d]: base_url is required", i)
+		}
+		if up.Model == "" {
+			return fmt.Errorf("upstreams[%d]: model is required", i)
+		}
+		if up.ID == "" {
+			// Deriving the id from the URL keeps single-upstream configs to
+			// two lines, which is how most people first run this.
+			up.ID = up.Model + "@" + up.BaseURL
+		}
+		if seen[up.ID] {
+			return fmt.Errorf("upstreams[%d]: duplicate id %q", i, up.ID)
+		}
+		seen[up.ID] = true
+		if up.Engine == "" {
+			up.Engine = "openai-compatible"
+		}
+		if up.Replicas <= 0 {
+			up.Replicas = 1
+		}
+		if up.AffinityPrefixRunes <= 0 {
+			up.AffinityPrefixRunes = 512
+		}
+	}
+	return nil
+}
+
+func setString(dst *string, key string) {
+	if v := os.Getenv(key); v != "" {
+		*dst = v
+	}
+}
+
+func setInt(dst *int, key string) {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			*dst = n
+		}
+	}
+}
+
+func setDuration(dst *time.Duration, key string) {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			*dst = d
+		}
+	}
+}

@@ -1,0 +1,118 @@
+// Command fleet-gateway is the OpenAI-compatible entry point: routing, metering
+// and the operator console, in one binary with no Kubernetes dependency (P7).
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/zlogic-labs/fleet/core/internal/gateway"
+	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
+)
+
+// version is overridden at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
+type options struct {
+	configPath string
+	listen     string
+	logLevel   string
+	edition    string
+	showVer    bool
+}
+
+func parseFlags() options {
+	var o options
+	flag.StringVar(&o.configPath, "config", os.Getenv("FLEET_CONFIG"),
+		"path to a YAML config file")
+	flag.StringVar(&o.listen, "listen", "",
+		"override the listen address")
+	flag.StringVar(&o.logLevel, "log-level", "info",
+		"debug, info, warn or error")
+	flag.StringVar(&o.edition, "edition", "",
+		"override the edition: community or enterprise")
+	flag.BoolVar(&o.showVer, "version", false,
+		"print the version and exit")
+	flag.Parse()
+	return o
+}
+
+func main() {
+	opts := parseFlags()
+
+	if opts.showVer {
+		fmt.Println("fleet-gateway", version)
+		return
+	}
+
+	log := newLogger(opts.logLevel)
+
+	cfg, err := gateway.Load(opts.configPath)
+	if err != nil {
+		log.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	if opts.listen != "" {
+		cfg.Listen = opts.listen
+	}
+	if opts.edition != "" {
+		cfg.Edition = opts.edition
+	}
+
+	log.Info("starting",
+		"version", version,
+		"listen", cfg.Listen,
+		"upstreams", len(cfg.Upstreams),
+		"config", opts.configPath)
+
+	ctx := waitForShutdown()
+	if err := gateway.Run(ctx, cfg, licenseFor(cfg.Edition), log, version); err != nil {
+		log.Error("gateway stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+// licenseFor resolves the edition from configuration.
+//
+// A single-node gateway has no control plane to ask for a licence, so the
+// answer comes from configuration here. The enterprise build replaces this
+// function with one that reads a signed licence file; the seam is
+// entitlement.License, so nothing downstream changes.
+func licenseFor(edition string) entitlement.License {
+	if edition == string(entitlement.EditionEnterprise) {
+		return entitlement.Enterprise("", time.Time{})
+	}
+	return entitlement.Community()
+}
+
+// waitForShutdown blocks until an interrupt or termination arrives, then
+// returns a context that the run loop watches.
+func waitForShutdown() context.Context {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	return ctx
+}
+
+func newLogger(level string) *slog.Logger {
+	var lv slog.Level
+	switch level {
+	case "debug":
+		lv = slog.LevelDebug
+	case "warn":
+		lv = slog.LevelWarn
+	case "error":
+		lv = slog.LevelError
+	default:
+		lv = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
+}

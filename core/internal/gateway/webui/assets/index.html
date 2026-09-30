@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet</title>
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#9635;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">▦</span>
+    <span>Fleet</span>
+    <span class="edition" id="edition-badge" hidden></span>
+  </div>
+
+  <div class="conn">
+    <span class="dot" id="conn-dot" data-state="unknown"></span>
+    <span id="conn-text">connecting</span>
+    <span class="sep">·</span>
+    <span id="conn-latency" class="muted"></span>
+  </div>
+
+  <nav class="tabs">
+    <button class="tab is-active" data-tab="playground">Playground</button>
+    <button class="tab" data-tab="fleet">Fleet</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ── Playground ─────────────────────────────────────────────── -->
+  <section class="panel is-active" data-panel="playground">
+    <aside class="sidebar">
+      <label class="field">
+        <span>Gateway</span>
+        <input id="base-url" type="text" spellcheck="false" placeholder="http://localhost:8080">
+      </label>
+
+      <label class="field">
+        <span>API key</span>
+        <input id="api-key" type="password" spellcheck="false" placeholder="sk-...">
+      </label>
+
+      <label class="field">
+        <span>Model</span>
+        <select id="model-select"></select>
+      </label>
+
+      <label class="field">
+        <span>Max tokens <output id="max-tokens-out">1024</output></span>
+        <input id="max-tokens" type="range" min="64" max="8192" step="64" value="1024">
+      </label>
+
+      <label class="field">
+        <span>Temperature <output id="temperature-out">0.7</output></span>
+        <input id="temperature" type="range" min="0" max="2" step="0.1" value="0.7">
+      </label>
+
+      <dl class="facts" id="model-facts"></dl>
+
+      <button class="btn btn-ghost" id="btn-clear">Clear conversation</button>
+    </aside>
+
+    <div class="transcript" id="transcript">
+      <div class="empty" id="transcript-empty">
+        <p>Pick a model and send a message.</p>
+        <p class="muted">Usage is metered from the engine's own
+        <code>usage</code> field. Streaming responses are only billable if the
+        engine returns usage, which is why Fleet asks for
+        <code>stream_options.include_usage</code>.</p>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <textarea id="prompt" rows="1" placeholder="Send a message…  (Enter to send, Shift+Enter for a newline)"></textarea>
+      <button class="btn btn-primary" type="submit" id="btn-send">Send</button>
+      <button class="btn btn-danger" type="button" id="btn-stop" hidden>Stop</button>
+    </form>
+  </section>
+
+  <!-- ── Fleet ──────────────────────────────────────────────────── -->
+  <section class="panel" data-panel="fleet">
+    <div class="fleet-grid">
+      <article class="card">
+        <h2>Endpoints</h2>
+        <div id="fleet-endpoints" class="rows"></div>
+      </article>
+
+      <article class="card">
+        <h2>Entitlements</h2>
+        <div id="fleet-caps" class="rows"></div>
+      </article>
+
+      <article class="card">
+        <h2>Latency</h2>
+        <p class="muted small">Time to first token and total duration, per
+        request. The gap between them is decode time; a wide gap on short
+        completions points at KV-cache misses.</p>
+        <p class="muted small" id="latency-source"></p>
+        <div id="fleet-latency" class="rows"></div>
+      </article>
+
+      <article class="card" id="card-upgrade" hidden>
+        <h2>Upgrade</h2>
+        <p class="muted small" id="upgrade-copy"></p>
+      </article>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="/assets/js/main.js"></script>
+</body>
+</html>

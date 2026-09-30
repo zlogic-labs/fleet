@@ -72,9 +72,13 @@ func (p *Proxy) Serve(w http.ResponseWriter, r *http.Request, ep engine.Endpoint
 func (p *Proxy) rewrite(pr *httputil.ProxyRequest) {
 	ep, _ := endpointFrom(pr.In.Context())
 
-	if target, err := url.Parse(trimJoin(ep.BaseURL, pr.In.URL.RequestURI())); err == nil {
+	// SetURL joins the target's path onto the outbound request's existing
+	// path, so the target must be the base URL and nothing more. Passing an
+	// already-joined URL here duplicates the path: /v1/chat/completions
+	// becomes /v1/chat/completions/v1/chat/completions. A base URL that
+	// carries its own prefix still works, because that is exactly the join.
+	if target, err := url.Parse(ep.BaseURL); err == nil {
 		pr.SetURL(target)
-		pr.Out.Host = target.Host
 	}
 
 	// Never forward a client Accept-Encoding. A compressed body breaks frame
@@ -118,16 +122,6 @@ func (p *Proxy) writeTransportError(w http.ResponseWriter, _ *http.Request, err 
 
 func isEventStream(contentType string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "text/event-stream")
-}
-
-// trimJoin concatenates a base URL and a request URI without doubling or
-// dropping the separator. Endpoint bases come from Kubernetes Services, so the
-// trailing slash is not ours to control.
-func trimJoin(base, requestURI string) string {
-	if base == "" {
-		return requestURI
-	}
-	return strings.TrimRight(base, "/") + requestURI
 }
 
 // endpointKey and tapKey are distinct types so that the two context values

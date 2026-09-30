@@ -303,3 +303,48 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 - `[待定]` 是否第一版就支持 Anthropic 原生协议，还是只做 OpenAI 兼容 + 一个转换层
 - `[待定]` 部署时模型权重的分发方式：共享存储（GPFS/Lustre）vs 节点本地 NVMe + 预热。影响 P/D 分离和 autoscaler 的冷启动时间
 - `[待定]` 成本池的计价周期（自然月 vs 滚动窗口）与跨周期欠款处理
+
+## 12. 社区版与企业版
+
+### 12.1 唯一的硬性规则：不 fork
+
+企业版仓库里**不允许包含 core 的任何一份修改副本**。这不是风格偏好，是可执行约束：
+
+```
+fleet/core/                 Apache 2.0，公开
+  pkg/entitlement/           ← 接缝在这里定义
+  pkg/authn/                 接口 + 社区实现（本地账号）
+  pkg/audit/                 接口 + 社区实现（结构化日志）
+  ...
+fleet/enterprise/           私有，独立仓库
+  引用 core，不修改 core
+  提供 *另一些* 实现 + 一份签名 license 文件
+```
+
+一旦 fork 出现，"社区版和企业版行为一致"就再也无法验证，两边的 bug 修复会以指数速度分叉，而这个平台的客户正是最不能容忍分叉的那类人。
+
+### 12.2 分的是 entitlement，不是代码
+
+每个可能被 gate 的能力是一个 `entitlement.Capability` 常量，由一处检查：
+
+```go
+if err := lic.Require(entitlement.CapAudit, time.Now()); err != nil {
+    return errs.New(errs.KindPermissionDenied, "feature_requires_enterprise", ...)
+}
+```
+
+社区构建的 `entitlement.Community()` 不 grant 任何能力。企业构建读签名 license 文件。**两者跑同一份代码**，区别只有 license 文件的内容。
+
+能力清单（7 项，`core/pkg/entitlement/entitlement.go`）：`sso`、`audit`、`rbac`、`policy`、`multicluster`、`ha`、`cost_export`。
+
+商业逻辑上这 7 项的共同点是：**它们全部服务于"把平台交给别人管"，而不是"把模型跑得更快"。** 闲置率、路由、计费精度这些真正难的东西全部留在社区版——留在这里才有人用，社区才有人贡献，企业版才有人买。
+
+### 12.3 不做两套页面
+
+一个前端，按 entitlement 显示/隐藏。理由是维护成本而非偷懒：两套页面意味着每个 UI 改动要写两遍，两遍会漂移，而漂移出来的不一致会被销售当成 bug 报上来。
+
+`GET /fleet/status` 直接返回当前 edition 与已 grant 的能力列表，控制台据此渲染 Entitlements 面板——所以"你买的是什么"是服务端的事实，不是浏览器的一个 CSS 类。删掉页面上那个徽章不会解锁任何东西。
+
+### 12.4 许可证失效的降级
+
+`License.Expired` 之后**回落到社区版能力，而不是拒绝服务**。让客户因为发票过期而读不到自己的成本数据，是在最不该失败的时候制造故障；回落到社区版恰好也是有效的销售信号。
