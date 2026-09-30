@@ -7,8 +7,12 @@
 
 CGO_ENABLED ?= 0
 GOBIN       := $(CURDIR)/bin
-CMDS        := fleet-gateway fleet-apiserver
-# Only the modules that exist right now; operator/ is added when it lands.
+# core holds the two processes an installation runs: the gateway that serves
+# the OpenAI API, and the control plane. operator/ holds the Kubernetes
+# controller, kept in its own module so nothing in core can reach for
+# client-go by accident.
+CORE_CMDS   := fleet-gateway fleet-apiserver
+OPERATOR_CMD := operator/cmd/manager
 MODS        := $(wildcard core operator)
 PKGS        := $(MODS:%=%/...)
 
@@ -64,6 +68,26 @@ seed: ## Fill the dev control plane with models, pulls and a cluster report
 smoke: ## Assert end-to-end behaviour against a running ./scripts/dev.sh
 	./scripts/smoke.sh
 
+.PHONY: engine-image
+engine-image: ## Stage a real llama.cpp image and a real quantized model into k3s
+	./scripts/k3s-engine.sh
+
+.PHONY: e2e
+e2e: ## Pull, deploy to k3s, and infer through the gateway
+	./scripts/e2e.sh
+
+# The CRD manifests are generated, not hand-written, and a deployment that
+# ships a stale CRD fails in a way that looks like a controller bug. The
+# generator is pinned because a newer one changes the emitted schema.
+CONTROLLER_GEN_VERSION := v0.17.3
+.PHONY: operator-manifests
+operator-manifests: ## Regenerate the CRD manifests and deepcopy functions
+	$(CONTROLLER_GEN) object paths=./operator/api/...
+	$(CONTROLLER_GEN) crd paths=./operator/api/... 		output:crd:artifacts:config=operator/config/crd/bases
+	cd operator && go mod tidy
+
+CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
 .PHONY: build
 build: ## Compile every command for the host platform into ./bin
 	@mkdir -p $(GOBIN)
@@ -73,7 +97,7 @@ build: ## Compile every command for the host platform into ./bin
 	done
 
 .PHONY: build-release
-build-release: web ## Cross-compile for every supported platform
+build-release: web operator-manifests ## Cross-compile for every supported platform
 	@for target in $(RELEASE_TARGETS); do \
 		os=$${target%/*}; arch=$${target#*/}; \
 		for cmd in $(CMDS); do \

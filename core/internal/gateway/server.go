@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/zlogic-labs/fleet/core/internal/engine"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/handler"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/webui"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 	"github.com/zlogic-labs/fleet/core/pkg/tokenizer"
 )

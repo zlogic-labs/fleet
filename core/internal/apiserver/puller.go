@@ -7,9 +7,9 @@ import (
 	"sync"
 
 	"github.com/zlogic-labs/fleet/core/internal/blobstore"
-	"github.com/zlogic-labs/fleet/core/internal/engine"
 	"github.com/zlogic-labs/fleet/core/internal/hub"
 	"github.com/zlogic-labs/fleet/core/internal/registry"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/weights"
 )
 

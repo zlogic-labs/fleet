@@ -1,0 +1,11 @@
+apiVersion: fleet.zlogic.com/v1alpha1
+kind: FleetModel
+metadata:
+  name: qwen-0.5b-gguf
+  namespace: fleet
+spec:
+  source: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+  # Inferred from the repository: it contains a .gguf and no config.json.
+  format: gguf
+  # Not stated on purpose. A GGUF embeds its tokenizer, so there is no
+  # tiktoken encoding name to record and inventing one is worse than none.

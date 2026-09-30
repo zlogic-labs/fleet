@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/zlogic-labs/fleet/core/internal/engine"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 )
 
 // profile itself: the probes and required-file globs are internal detail, and

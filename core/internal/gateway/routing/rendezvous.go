@@ -8,7 +8,7 @@ import (
 	"hash/fnv"
 	"time"
 
-	"github.com/zlogic-labs/fleet/core/internal/engine"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 

@@ -8,8 +8,8 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/zlogic-labs/fleet/core/internal/engine"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )

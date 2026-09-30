@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zlogic-labs/fleet/core/internal/engine"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )

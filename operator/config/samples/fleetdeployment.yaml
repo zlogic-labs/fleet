@@ -1,0 +1,23 @@
+apiVersion: fleet.zlogic.com/v1alpha1
+kind: FleetDeployment
+metadata:
+  name: qwen-0.5b
+  namespace: fleet
+spec:
+  modelRef: qwen-0.5b-gguf
+  engine: llama-cpp
+  # Overrides the profile's default, which is a registry image. This points at
+  # the scratch image built from the llama.cpp release, because that is what a
+  # single-node development cluster can actually run.
+  image: llama-cpp-local:b11146
+  replicas: 1
+  # No GPU request: llama.cpp runs on a CPU, and asking for a device on a
+  # cluster with none would leave the pod Pending forever.
+  resources:
+    cpu: "2"
+    memory: 2Gi
+  contextLength: 4096
+  weightDelivery: nodeLocal
+  storage:
+    prefix: models/Qwen/Qwen2.5-0.5B-Instruct-GGUF
+    hostPath: /root/fleet/weights
