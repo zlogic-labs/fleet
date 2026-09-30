@@ -44,6 +44,38 @@ operator/  CRDs, reconcilers, GPU scheduling                depends on core
 docs/      architecture and ADRs
 ```
 
+## Try it
+
+```sh
+go run ./core/cmd/fleet-gateway --demo
+```
+
+Then open <http://127.0.0.1:8080>. The console has a chat playground and a
+fleet view showing endpoints, entitlements and per-request latency.
+
+`--demo` starts a built-in stub engine in the same process, so nothing needs
+to be installed and no GPU is involved. The replies are canned — the point is
+to exercise streaming, usage accounting and routing, all of which behave the
+same against a real engine. The stub honours `stream_options.include_usage`
+exactly as vLLM does, including *omitting* the final usage frame when the
+client did not ask for one, so the metering path is genuinely covered.
+
+To point at a real engine instead:
+
+```sh
+fleet-gateway --config fleet.yaml
+```
+
+```yaml
+listen: ":8080"
+upstreams:
+  - id: llama-7b
+    model: Qwen/Qwen2.5-7B-Instruct
+    base_url: http://127.0.0.1:8081   # llama-server, or a vLLM Service
+    replicas: 1
+    api_key: ""                       # the engine's key, not a tenant's
+```
+
 ## Development
 
 ```sh
