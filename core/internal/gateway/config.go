@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zlogic-labs/fleet/core/pkg/authn"
 )
 
 // Config is the whole of a single-node deployment's configuration.
@@ -25,6 +27,12 @@ type Config struct {
 	Timeouts   TimeoutConfig    `yaml:"timeouts"`
 	MaxBodyMB  int              `yaml:"max_body_mb"`
 	RateLimits LimitConfig      `yaml:"rate_limits"`
+	Auth       AuthConfig       `yaml:"auth"`
+	// DefaultMaxTokens is what one request may generate when it does not say.
+	// It is a server ceiling rather than a client default because a client
+	// that omits max_tokens has asked for "as much as possible", and the
+	// reservation has to be an upper bound (P5).
+	DefaultMaxTokens int `yaml:"default_max_tokens"`
 	// ControlPlane is the address of fleet-apiserver. When set, the gateway
 	// learns its endpoints from the operator's inventory reports instead of
 	// only from Upstreams, and the two are merged: static upstreams keep
@@ -66,12 +74,30 @@ type LimitConfig struct {
 	TPM int `yaml:"tokens_per_minute"`
 }
 
+// AuthConfig is how callers identify themselves.
+//
+// Keys is a list of "tenant/keyid" or "tenant/keyid|rpm=10,tpm=1000". It is
+// a list in configuration rather than a database table because v1 has no key
+// management API, and an operator who needs a working gateway today should not
+// first have to stand up Postgres to get one.
+type AuthConfig struct {
+	// Required turns authentication on. Off by default so that
+	// `./scripts/dev.sh` works with no keys at all, and stated explicitly so
+	// that "authentication is disabled" is a decision rather than an omission.
+	Required bool     `yaml:"required"`
+	Keys     []string `yaml:"keys"`
+}
+
 // Default is what a bare `fleet-gateway` with no config file runs as.
 func Default() Config {
 	return Config{
 		Listen:    ":8080",
 		Edition:   "community",
 		MaxBodyMB: 32,
+		// 4096 is the OpenAI default for gpt-3.5-era models and a sane
+		// ceiling for a serving gateway: a request with no max_tokens should
+		// not be able to occupy a replica's whole KV cache for minutes.
+		DefaultMaxTokens: 4096,
 		Timeouts: TimeoutConfig{
 			Dial:         5 * time.Second,
 			ResponseHdrs: 60 * time.Second,
@@ -108,11 +134,25 @@ func applyEnv(cfg *Config) {
 	setInt(&cfg.MaxBodyMB, "FLEET_MAX_BODY_MB")
 	setInt(&cfg.RateLimits.RPM, "FLEET_RATE_RPM")
 	setInt(&cfg.RateLimits.TPM, "FLEET_RATE_TPM")
+	setInt(&cfg.DefaultMaxTokens, "FLEET_DEFAULT_MAX_TOKENS")
 	setDuration(&cfg.Timeouts.Dial, "FLEET_TIMEOUT_DIAL")
 	setDuration(&cfg.Timeouts.ResponseHdrs, "FLEET_TIMEOUT_RESPONSE_HEADERS")
 	setString(&cfg.ControlPlane.URL, "FLEET_CONTROL_PLANE_URL")
 	setString(&cfg.ControlPlane.Token, "FLEET_CONTROL_PLANE_TOKEN")
 	setDuration(&cfg.ControlPlane.Every, "FLEET_CONTROL_PLANE_REFRESH")
+
+	if v := os.Getenv("FLEET_AUTH_REQUIRED"); v != "" {
+		cfg.Auth.Required = v == "1" || strings.EqualFold(v, "true")
+	}
+	// Semicolon-separated, because a key list has no natural comma-free form
+	// and a comma would have to be escaped inside a value nobody reads.
+	if raw := os.Getenv("FLEET_API_KEYS"); raw != "" {
+		for _, spec := range strings.Split(raw, ";") {
+			if s := strings.TrimSpace(spec); s != "" {
+				cfg.Auth.Keys = append(cfg.Auth.Keys, s)
+			}
+		}
+	}
 
 	// A single upstream may be supplied inline, which is the shape of a local
 	// llama.cpp or a vLLM pod that has not been adopted yet.
@@ -165,6 +205,26 @@ func (c Config) validate() error {
 	}
 	if c.ControlPlane.Every < 0 {
 		return fmt.Errorf("control_plane.refresh_every must not be negative")
+	}
+	// Required with no keys is a deployment that refuses every request, which
+	// looks like an outage rather than a misconfiguration. Caught here so it
+	// is a startup error naming the fix, not a 401 storm.
+	if c.Auth.Required && len(c.Auth.Keys) == 0 {
+		return fmt.Errorf("auth.required is set but auth.keys is empty: every request would be rejected")
+	}
+	// A configured key list with required off means the keys are being parsed
+	// and then ignored, which is the shape of a security setting someone
+	// believes is on.
+	if !c.Auth.Required && len(c.Auth.Keys) > 0 {
+		return fmt.Errorf("auth.keys is set but auth.required is false: the keys would be ignored")
+	}
+	// The index, not the spec. A config with twenty keys and one typo is
+	// found by position; quoting the offending string leaves the operator
+	// counting lines.
+	for i, spec := range c.Auth.Keys {
+		if _, err := authn.ParsePrincipal(spec); err != nil {
+			return fmt.Errorf("auth.keys[%d] %q: %w", i, spec, err)
+		}
 	}
 	seen := make(map[string]bool, len(c.Upstreams))
 	for i, up := range c.Upstreams {

@@ -87,6 +87,14 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 
 事后扣减在并发下必然超支。网关在转发前原子预留 `max(prompt_estimate, 1) + max_tokens`，结算时按实际 usage 补差额或退回。
 
+结算的实现细节比这条承诺本身更容易写错，值得记下来：
+
+- **整笔撤除再记实际值，而不是退差额。** 引擎报的比预留多（模型忽略了 `max_tokens`，或 prompt 比估算长）时，"退差额"会退成一个负数，于是原始扣减留在原地**并且**又加上了实际值，等于收两次。撤掉全部预留、单独记实际值，两个方向都对。
+- **settle 到 0 要把请求数也还回去。** 请求没到引擎（路由没命中、副本拒了）就不该消耗配额；只退 token 不退 request 次数的话，打错一个模型名就能烧掉一整分钟的请求额度。
+- **预留发生在 `Pick` 之前**，超限的请求连一次调度决策和一条连接都不该产生。`Pick` 失败必须 settle 成 0，否则每个 404 都会漏掉整笔预留。
+- **滑动窗口，不是固定窗口。** 固定窗口的边界是可以瞄准的：第 N 分钟最后 1 秒花光额度、第 N+1 分钟开头再花一次，两秒内拿到两份。环形桶按秒复用，过期只由 `live` 判定，不需要清扫 goroutine。
+- **已结算的量必须跟预留一样随窗口过期。** 把 settled 记成一个只增不减的标量，会把"每分钟 token 上限"变成"终身 token 上限"：租户花满一次额度后被永久拒绝，只能重启网关。实测：花 600/1000 后推进两个窗口，仍然 429。
+
 ### P6 · 不信任客户端上报的 usage
 
 计费的权威来源是引擎返回的 `usage` 字段。客户端请求体里的任何数字都不参与计费。流式中断拿不到 usage 时按 `max_tokens` 封顶并打 `estimated` 标记，事后对账修正。
@@ -164,8 +172,8 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `internal/gateway/routing` | endpoint 选择（rendezvous + 健康） | `Picker`, `Rendezvous` |
 | `internal/gateway/catalog` | 端点集合的活订阅：拉控制面 + 抓 load | `Refresher`, `Client` |
 | `internal/gateway/transport` | SSE 透传 + usage tap | `Proxy`, `Tap` |
-| `internal/gateway/auth` | 鉴权与配额上下文 | `Resolver`, `Principal` |
-| `internal/gateway/ratelimit` | 分层限流 | `Limiter` |
+| `pkg/authn` | 凭据解析与主体（`internal/gateway/auth.go` 只是它的中间件接线） | `Principal`, `KeyStore`, `Lister`, `Limits` |
+| `internal/gateway/ratelimit` | 预留-结算式分层限流 | `Limiter`, `Policy`, `Limited` |
 | `internal/gateway/handler` | OpenAI 端点 handler | — |
 | `internal/gateway/usage` | UsageEvent 采集与落库 | `Sink` |
 | `internal/store/postgres` | 领域仓储 | 各 repository |
@@ -403,6 +411,26 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 | 7 | autoscaling + 调度器 | 队列深度驱动扩缩，无抖动 |
 
 阶段 1–4 全部不依赖 Kubernetes，可以纯 Go 单测覆盖。**这是把模块边界划在 P7 的直接收益。**
+
+### 11.2 认证与限流：六处不显然的取舍
+
+阶段 2 已落地（`pkg/authn` + `internal/gateway/ratelimit`）。下面六处决策看起来是小事，实际每一处都曾写错或差点写错，值得留下理由。
+
+**限流按租户，不按 key。** 被限的资源是 GPU·小时，是按租户买的；一个租户有十把 key 不等于它买了十台引擎。同一租户的多把 key 合并时**取最紧**，不取最松——取最松的话"这把 key 限 1 rpm"就是摆设，再发一把 key 就能自己抬高兴用上限。代价是一把 key 上的低限额会连带限住它的兄弟 key；这是诚实的读法：key 共享一个桶，是因为它们共享一个租户，而租户是一张账单。
+
+**key 里写的限额是"替换"服务端默认值，不是与之取大。** 两者看起来都像"允许 key 调整"，语义却不同。key 列表是运维配置，不是客户端自己填的，所以没有"客户端把限额调低以逃避计费"这个威胁需要防；而如果取大，运维写 `rpm=5` 会被悄悄抬回服务端的 100——一份**不按字面执行**的配置比没有配置更糟。零表示"没说"，该维度继承默认值（`Limits.OrDefaults`）。
+
+**租户策略在首次请求时读一次并缓存**，所以运行中轮换 key 不会改变一个已在服务中的租户的限额。代价是调低限额需要重启网关——写在这里是为了让它是一个决定而不是一个意外。
+
+**`/healthz` 与 `/health` 不鉴权。** 不是"豁免中间件"，而是注册在鉴权子路由之外。K8s 探针拿不到凭据，一个返回 401 的 `/healthz` 会让 Pod 在服务完全正常时被判为失败——而运维对这种报警的反应是删掉探针，不是修探针。
+
+**凭据在转发前剥掉。** 在 `authenticate` 里剥，不是在 proxy 里。等到 handler 忘了剥，租户 A 的 key 已经进了引擎 B 的请求日志，而那本日志可能属于另一个团队。发出去的东西收不回来。
+
+**认证关闭与认证失败是两件事。** `keyStore` 返回接口类型而不是 `*authn.Memory`：`return nil, nil` 装进接口字段会得到一个**非 nil 的接口持有 nil 指针**，于是 `store == nil` 为假，一个没配 key 的网关会因为"拥有一个什么都回答不了的 store"而拒绝所有请求。开发者笔记本和配错的生产必须不能是同一个现象。
+
+配置：`FLEET_AUTH_REQUIRED`、`FLEET_API_KEYS`（分号分隔，`tenant/keyid|rpm=10,tpm=1000`）、`FLEET_RATE_RPM`、`FLEET_RATE_TPM`、`FLEET_DEFAULT_MAX_TOKENS`。启动时三条硬校验：要求鉴权却没给 key、不要求鉴权却给了 key、任何一条 key spec 解析失败——都拒绝启动。
+
+尚未实现：**配额与账本**。现在只有"每分钟多少请求/多少 token"，没有"这个租户这个月还能花多少"。P5 的预留-结算机制已经就位，配额是它的下一个消费者，`internal/billing` 的 `Ledger` 才是权威账本——限流计数器**不是**账本，重启即失忆，这是刻意的。
 
 ## 11. 待定
 

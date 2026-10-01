@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/webui"
+	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 	"github.com/zlogic-labs/fleet/core/pkg/tokenizer"
@@ -30,6 +32,21 @@ import (
 // change.
 func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string) (http.Handler, *catalog.Refresher, error) {
 	static := staticEndpoints(cfg.Upstreams)
+
+	// Validated here as well as in Load. Load is the path a config file takes,
+	// but Build is also callable with a hand-built Config, and a caller that
+	// skips validation gets a gateway that serves nobody while reporting itself
+	// healthy. Validating twice is free; the alternative is a check that only
+	// applies to the deployments that happened to use the loader.
+	if err := cfg.validate(); err != nil {
+		return nil, nil, err
+	}
+
+	keys, listed, err := keyStore(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	auth := &authn.Authenticator{Store: keys, Lic: lic}
 
 	picker := routing.NewRendezvous(static)
 	refresher := &catalog.Refresher{
@@ -54,41 +71,54 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 	})
 
 	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, handler.ChatOptions{
-		MaxBytes:    int64(cfg.MaxBodyMB) << 20,
-		PrefixRunes: prefixRunes(cfg.Upstreams),
+		MaxBytes:         int64(cfg.MaxBodyMB) << 20,
+		PrefixRunes:      prefixRunes(cfg.Upstreams),
+		DefaultMaxTokens: cfg.DefaultMaxTokens,
+		Limiter:          limiterFor(cfg, listed),
 	})
 
 	current := refresher.Endpoints
 
 	r := chi.NewRouter()
+	// Order matters and is the order it is in: recoverer is outermost so a
+	// panic in any later middleware still becomes an envelope; authentication
+	// runs before the body is read so an invalid key costs nothing.
 	r.Use(recoverer(log), requestLog(log))
 
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	// Health is registered before the authenticated subrouter rather than
+	// exempted from the middleware. A Kubernetes probe cannot hold a
+	// credential, so a /healthz that returns 401 reports the pod as failing
+	// while it is serving perfectly well — and the operator's response to that
+	// is to remove the probe, not to fix the probe.
+	r.Get("/healthz", ok)
 	// Liveness for the engine side, matching what vLLM and llama.cpp serve, so
 	// an operator can curl either endpoint with the same command.
-	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	r.Get("/health", ok)
 
-	r.Route("/v1", func(r chi.Router) {
-		r.Get("/models", handler.NewModels(current).ServeHTTP)
-		r.Post("/chat/completions", chat.ServeHTTP)
-	})
+	r.Group(func(r chi.Router) {
+		r.Use(authenticate(auth))
 
-	r.Get("/fleet/status", (&handler.Fleet{
-		Endpoints: current,
-		Samples:   chat.Samples,
-		Lic:       lic,
-		Version:   version,
-	}).ServeHTTP)
+		r.Route("/v1", func(r chi.Router) {
+			r.Get("/models", handler.NewModels(current).ServeHTTP)
+			r.Post("/chat/completions", chat.ServeHTTP)
+		})
+
+		r.Get("/fleet/status", (&handler.Fleet{
+			Endpoints: current,
+			Samples:   chat.Samples,
+			Lic:       lic,
+			Version:   version,
+		}).ServeHTTP)
+	})
 
 	r.Mount("/", webui.Handler())
 
 	return r, refresher, nil
+}
+
+func ok(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 // staticEndpoints is the config-declared fleet, which never changes on its own.
@@ -104,6 +134,35 @@ func staticEndpoints(ups []UpstreamConfig) []engine.Endpoint {
 		})
 	}
 	return out
+}
+
+// keyStore builds the credential store from configuration.
+//
+// The return type is the interface, not *authn.Memory, and that is the whole
+// point of the signature: returning a nil *Memory in an interface field produces
+// a non-nil interface holding a nil pointer, so `store == nil` downstream is
+// false and a gateway with authentication disabled rejects every request
+// because it believes it has a key store that answers "no" to everything.
+//
+// The second return is what the rate limiter reads, and it is a separate
+// interface because listing keys is a different question from resolving one.
+func keyStore(cfg Config) (authn.KeyStore, authn.Lister, error) {
+	if !cfg.Auth.Required || len(cfg.Auth.Keys) == 0 {
+		return nil, nil, nil
+	}
+	store := authn.NewMemory()
+	for i, spec := range cfg.Auth.Keys {
+		p, err := authn.ParsePrincipal(spec)
+		if err != nil {
+			return nil, nil, fmt.Errorf("auth.keys[%d]: %w", i, err)
+		}
+		// The key id is the credential. A real deployment mints random
+		// strings; here the operator names them, which is what makes a
+		// configuration file reviewable and a revoked key identifiable in a
+		// log.
+		store.Put(p.KeyID, p, time.Time{})
+	}
+	return store, store, nil
 }
 
 // Run serves until ctx is cancelled, then drains.

@@ -20,19 +20,45 @@ API=$CONTROL/api/v1
 pass=0
 fail=0
 
+# Scratch space for this run's own artifacts. It is created here rather than
+# inherited because TMPDIR is routinely unset, and an unset TMPDIR turns a log
+# path into "/auth-gateway.log" — a write to the filesystem root that fails on
+# any machine not running as root, which then reads as the gateway refusing to
+# start.
+WORKDIR=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/fleet-smoke.$$")
+mkdir -p "$WORKDIR"
+
+# One cleanup for the whole script. Each trap would replace the previous one, so
+# a second trap set later in the file silently cancels the first and the
+# temporary directory survives every run.
+cleanup() {
+  for pid in "${AUTH_PID:-}" "${TOKEN_PID:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  rm -rf "$WORKDIR"
+  return 0
+}
+trap cleanup EXIT INT TERM
+
 # Resolved once, up front. Ubuntu ships python3 with no "python" shim, and a
 # script that assumes the name fails every check while reporting dozens of
 # assertion failures that have nothing to do with the code under test — which
 # is worse than no test, because it looks like a regression.
+#
+# Each candidate is executed, not merely located. `command -v` is not enough:
+# Windows installs an App Execution Alias named python3 that resolves on PATH
+# and then fails when run, so detection passes and every JSON check afterwards
+# fails on a missing interpreter. Locating the interpreter is only evidence if
+# the interpreter answers.
 PY=""
 for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1; then
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "" >/dev/null 2>&1; then
     PY=$candidate
     break
   fi
 done
 if [ -z "$PY" ]; then
-  printf '%s no python3 or python on PATH; cannot run the JSON checks\n' "$(red 'ERROR')"
+  printf '%s no working python3 or python on PATH; cannot run the JSON checks\n' "$(red 'ERROR')"
   exit 2
 fi
 
@@ -321,6 +347,143 @@ check "the capacity-starved deployment keeps its reason" "InsufficientCapacity" 
   "$(printf '%s' "$D" | jqp "[x['reason'] for x in d if x['name']=='llama-70b' and x['namespace']=='fleet'][0]")"
 check "the capacity-starved deployment is Scheduling, not Pending" "Scheduling" \
   "$(printf '%s' "$D" | jqp "[x['state'] for x in d if x['name']=='llama-70b' and x['namespace']=='fleet'][0]")"
+
+# ── authentication and rate limiting ───────────────────────────────
+# A second gateway, on its own port, with authentication and a tight limit.
+# The dev stack has both off — a developer's laptop must work with no setup —
+# so the main GATEWAY above cannot be used to check this surface, and leaving
+# it unchecked is how a gateway ships that serves anyone's requests.
+section "gateway: authentication and rate limiting"
+
+AUTH_PORT=${AUTH_PORT:-8099}
+AUTH_GATEWAY=http://127.0.0.1:$AUTH_PORT
+CHAT='{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}]}'
+
+# rpm=3 so the request refusal arrives inside a handful of requests, and tpm is
+# left unset so the two dimensions are exercised separately below.
+FLEET_AUTH_REQUIRED=true \
+FLEET_API_KEYS='acme/admin|rpm=3;acme/second|rpm=99;other/third|rpm=99' \
+  go -C core run ./cmd/fleet-gateway --listen "127.0.0.1:$AUTH_PORT" --demo \
+  >"$WORKDIR/auth-gateway.log" 2>&1 &
+AUTH_PID=$!
+
+for _ in $(seq 1 100); do
+  if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then break; fi
+  if ! kill -0 "$AUTH_PID" 2>/dev/null; then
+    printf '%s the authenticated gateway exited during startup\n' "$(red 'ERROR')" >&2
+    cat "$WORKDIR/auth-gateway.log" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
+
+if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then
+  # A probe cannot hold a credential, so a 401 here reports the pod as failing
+  # while it is serving perfectly well.
+  check "health needs no key" "200" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' "$AUTH_GATEWAY/healthz")"
+
+  check "a valid key is served" "200" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT")"
+
+  check "no key is refused" "401" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -d "$CHAT")"
+
+  check "an unknown key is refused" "401" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer nope' -d "$CHAT")"
+
+  # Headers are read with -D - rather than -I. curl's -I asks for HEAD, and
+  # combining it with -X POST and -d makes curl print nothing at all — so the
+  # check would read as a missing header on a server that is sending it.
+  check "a 401 advertises how to authenticate" "True" \
+    "$(curl -sS -D - -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -d "$CHAT" \
+       | grep -qi 'www-authenticate: *bearer' && echo True || echo False)"
+
+  # acme/admin is capped at 3 rpm and acme/second at 99. The tenant's bucket is
+  # the tightest of its keys, so the admin key's ceiling is what applies and a
+  # sibling key cannot be used to spend past it.
+  for _ in 1 2 3; do
+    curl -sS -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+      -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT"
+  done
+  check "the per-minute request limit refuses" "429" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT")"
+
+  check "a refusal says when to retry" "True" \
+    "$(curl -sS -D - -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT" \
+       | grep -qi '^retry-after: *[1-9]' && echo True || echo False)"
+
+  check "a second key of the same tenant shares the bucket" "429" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer second' -d "$CHAT")"
+
+  # A different tenant has its own bucket. If it inherited acme's exhausted
+  # allowance, a busy tenant would take the whole gateway down with it.
+  check "another tenant is unaffected" "200" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer third' -d "$CHAT")"
+else
+  printf '%s no authenticated gateway on :%s — see %s\n' \
+    "$(red 'ERROR')" "$AUTH_PORT" "$WORKDIR/auth-gateway.log" >&2
+  fail=$((fail + 1))
+fi
+kill "$AUTH_PID" 2>/dev/null || true
+wait "$AUTH_PID" 2>/dev/null || true
+
+# The token ceiling, on its own gateway so it is not spent by the checks above.
+# tpm=200 with a request that reserves the prompt estimate plus the default
+# max_tokens, so a couple of requests exhaust it. A limiter that only counted
+# requests would serve all of these.
+section "gateway: token limits"
+
+TOKEN_PORT=${TOKEN_PORT:-8098}
+TOKEN_GATEWAY=http://127.0.0.1:$TOKEN_PORT
+FLEET_AUTH_REQUIRED=true \
+FLEET_API_KEYS='acme/tight|tpm=200' \
+FLEET_DEFAULT_MAX_TOKENS=100 \
+  go -C core run ./cmd/fleet-gateway --listen "127.0.0.1:$TOKEN_PORT" --demo \
+  >"$WORKDIR/token-gateway.log" 2>&1 &
+TOKEN_PID=$!
+
+for _ in $(seq 1 100); do
+  if curl -fsS "$TOKEN_GATEWAY/healthz" >/dev/null 2>&1; then break; fi
+  if ! kill -0 "$TOKEN_PID" 2>/dev/null; then
+    printf '%s the token-limited gateway exited during startup\n' "$(red 'ERROR')" >&2
+    cat "$WORKDIR/token-gateway.log" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
+
+if curl -fsS "$TOKEN_GATEWAY/healthz" >/dev/null 2>&1; then
+  # Keep going until the ceiling is hit, so the check does not depend on the
+  # exact prompt estimate: the first refusal is the assertion.
+  code=200
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$TOKEN_GATEWAY/v1/chat/completions" \
+      -H 'Content-Type: application/json' -H 'Authorization: Bearer tight' -d "$CHAT")
+    [ "$code" = "429" ] && break
+  done
+  check "a token ceiling refuses before the request ceiling would" "429" "$code"
+
+  # The other half — that the allowance comes back when the window rolls over —
+  # is deliberately not checked here. Asserting it through the network costs a
+  # 62-second sleep on every run, and a check nobody waits for is a check that
+  # gets skipped. TestSettledUsageExpiresWithTheWindow asserts the same thing
+  # with an injected clock, which is the reason the limiter takes one.
+else
+  printf '%s no token-limited gateway on :%s — see %s\n' \
+    "$(red 'ERROR')" "$TOKEN_PORT" "$WORKDIR/token-gateway.log" >&2
+  fail=$((fail + 1))
+fi
+kill "$TOKEN_PID" 2>/dev/null || true
+wait "$TOKEN_PID" 2>/dev/null || true
 
 # ── summary ────────────────────────────────────────────────────────
 printf '\n'

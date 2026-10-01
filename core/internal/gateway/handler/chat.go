@@ -9,8 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
+	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
@@ -22,19 +24,29 @@ type Chat struct {
 	Picker   routing.Picker
 	Proxy    *transport.Proxy
 	Tokens   tokenizer.Resolver
+	Limiter  ratelimit.Limiter
 	Log      *slog.Logger
 	MaxBytes int64
 	// PrefixRunes bounds the hashable prompt prefix.
 	PrefixRunes int
+	// DefaultMaxTokens is what a request that omits max_tokens reserves for.
+	//
+	// It has to exist because reserving nothing for an unbounded request would
+	// let one call with no max_tokens pass a token limit that a hundred
+	// bounded calls cannot. It is the server's answer to "how much may one
+	// request cost", which is the same question a quota answers per tenant.
+	DefaultMaxTokens int
 
 	samples *SampleLog
 }
 
 // ChatOptions groups the tunables the server reads from config.
 type ChatOptions struct {
-	MaxBytes     int64
-	PrefixRunes  int
-	SampleBuffer int
+	MaxBytes         int64
+	PrefixRunes      int
+	SampleBuffer     int
+	DefaultMaxTokens int
+	Limiter          ratelimit.Limiter
 }
 
 // NewChat builds the handler and its rolling sample log, which the Fleet
@@ -43,14 +55,25 @@ func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver
 	if opts.SampleBuffer <= 0 {
 		opts.SampleBuffer = 32
 	}
+	if opts.DefaultMaxTokens <= 0 {
+		opts.DefaultMaxTokens = 1024
+	}
+	if opts.Limiter == nil {
+		// An unlimited limiter rather than a nil check on every request: the
+		// handler's hot path should not branch on whether the deployment
+		// configured a limit.
+		opts.Limiter = ratelimit.NewMemory(nil)
+	}
 	return &Chat{
-		Picker:      p,
-		Proxy:       proxy,
-		Tokens:      tokens,
-		Log:         log,
-		MaxBytes:    opts.MaxBytes,
-		PrefixRunes: opts.PrefixRunes,
-		samples:     NewSampleLog(opts.SampleBuffer),
+		Picker:           p,
+		Proxy:            proxy,
+		Tokens:           tokens,
+		Limiter:          opts.Limiter,
+		Log:              log,
+		MaxBytes:         opts.MaxBytes,
+		PrefixRunes:      opts.PrefixRunes,
+		DefaultMaxTokens: opts.DefaultMaxTokens,
+		samples:          NewSampleLog(opts.SampleBuffer),
 	}
 }
 
@@ -72,8 +95,35 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// same code path as the routing hash, one parse of the body.
 	promptTokens := h.Tokens.Resolve(req.Model, "").Count(req.Prefix(1 << 16))
 
+	// Reserve before picking an endpoint, so a tenant over its limit is turned
+	// away without having caused a scheduling decision or a connection. The
+	// reservation is the request's upper bound: prompt estimate plus the
+	// requested maximum completion.
+	//
+	// ReserveMaxTokens matters here. A client that omits max_tokens has asked
+	// for the whole context window, and reserving a small default for it would
+	// let one unbounded request pass a limit that a thousand small ones
+	// cannot.
+	tenant := authn.TenantFromContext(r.Context())
+	maxOut := req.ResolveMaxTokens(0)
+	if maxOut <= 0 {
+		maxOut = h.DefaultMaxTokens
+	}
+	reservation, err := h.Limiter.Reserve(r.Context(), ratelimit.Request{
+		Tenant: tenant,
+		Tokens: promptTokens + maxOut,
+	})
+	if err != nil {
+		rateLimited(w, err)
+		return
+	}
+
 	ep, err := h.Picker.Pick(req.Model, req.Prefix(h.PrefixRunes))
 	if err != nil {
+		// Settled on the way out even though nothing was generated: the
+		// reservation was taken and nothing will return it. Forgetting this
+		// leaks the tenant's whole limit into every 404.
+		h.Limiter.Settle(r.Context(), reservation, 0)
 		h.fail(w, r, err)
 		return
 	}
@@ -82,6 +132,16 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.forward(w, r, ep, body, req, tap)
 
 	result := tap.Result()
+
+	// Settle against what the engine reported, not what was asked for. P6:
+	// the engine's usage is the only authority, so a client claiming fewer
+	// tokens changes nothing, and a client that asked for 4096 and got 7 is
+	// refunded for the 4089 it did not use.
+	actual := promptTokens + maxOut
+	if result.UsageKnown && result.Usage != nil {
+		actual = result.Usage.TotalTokens
+	}
+	h.Limiter.Settle(r.Context(), reservation, actual)
 	h.samples.Add(Sample{
 		Model:      req.Model,
 		Endpoint:   ep.ID,
@@ -115,6 +175,18 @@ func (h *Chat) forward(w http.ResponseWriter, r *http.Request, ep engine.Endpoin
 }
 
 func (h *Chat) fail(w http.ResponseWriter, _ *http.Request, err error) {
+	openai.WriteError(w, err)
+}
+
+// rateLimited answers a refused reservation.
+//
+// Retry-After is set from the limiter's own message rather than by recomputing
+// the window here: two places computing the reset time will eventually
+// disagree, and the one that disagrees is the one a client retries against.
+func rateLimited(w http.ResponseWriter, err error) {
+	if secs := ratelimit.RetryAfterSeconds(err); secs != "" {
+		w.Header().Set("Retry-After", secs)
+	}
 	openai.WriteError(w, err)
 }
 

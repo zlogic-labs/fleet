@@ -80,7 +80,7 @@ synthetic repository. Everything lands in `.dev/`, which is gitignored.
 ./scripts/smoke.sh        # in a second terminal, with dev.sh running
 ```
 
-52 assertions, and it exits non-zero on the first failure. It is safe to re-run.
+62 assertions, and it exits non-zero on the first failure. It is safe to re-run.
 What it covers, and why each check exists:
 
 | Area | Checks |
@@ -91,6 +91,13 @@ What it covers, and why each check exists:
 | Engine profiles | vLLM demands compute 7.5+ and llama.cpp demands none; vLLM maps cache occupancy to a real series and publishes KV capacity, llama-cpp publishes queue signals but no occupancy signal and no capacity |
 | Weight formats | a safetensors and a GGUF repository side by side, each passing its own engine and each refused by the other's, with the reason in the message |
 | Operator inventory | counts recomputed from the node list, and `Scheduling` with a reason kept distinct from `Pending` |
+| Authentication | health without a key, a valid key served, a missing and an unknown key both 401, and the 401 advertising `WWW-Authenticate` |
+| Rate limiting | a per-minute request ceiling, a token ceiling that bites before the request ceiling, `Retry-After` on the refusal, one tenant's keys sharing a bucket, and another tenant staying unaffected |
+
+The last two rows run against a **second** gateway the script starts itself, on
+port 8099 and 8098. The main gateway on :8080 has authentication off — a
+developer's laptop must work with no setup — so it cannot check this surface,
+and leaving it unchecked is how a gateway ships that serves anyone's requests.
 
 That last row is the one to read twice. A `Ready` model that cannot be loaded
 is a claim the platform cannot back up, and the pull is where that claim is
@@ -98,6 +105,35 @@ made.
 
 `make check` runs what CI runs and needs no server. `smoke.sh` is separate
 because it needs both processes up, so it cannot be part of `check`.
+
+### Turning authentication on
+
+Off by default, because a developer should be able to run the console with no
+setup. On in production, and the gateway refuses to start rather than serving
+everyone when the two halves of the configuration disagree:
+
+```sh
+export FLEET_AUTH_REQUIRED=true
+export FLEET_API_KEYS='acme/team-a|rpm=600,tpm=200000;acme/batch|rpm=60'
+export FLEET_RATE_RPM=1200          # server default, for keys that say nothing
+export FLEET_DEFAULT_MAX_TOKENS=4096 # what an unbounded request reserves against
+```
+
+Keys are `tenant/keyid`, optionally followed by `|rpm=…,tpm=…`. A declared
+limit replaces the server default for that dimension; a dimension the key says
+nothing about inherits the default. Limits are per **tenant**, not per key, and
+where a tenant's keys disagree the **tightest** wins — one tenant with ten keys
+has not bought ten engines, and it must not be able to raise its own ceiling by
+issuing a more generous second key.
+
+Policies are read on a tenant's first request and cached, so changing a limit
+needs a gateway restart. Three configurations are refused at startup —
+`required` with no keys, keys without `required`, and a key spec that does not
+parse — because each of them looks like a working gateway from the outside while
+serving nobody.
+
+`/healthz` and `/health` stay unauthenticated, because a Kubernetes probe
+cannot hold a credential and a 401 there reports a healthy pod as dead.
 
 ### What each page does in the default run
 

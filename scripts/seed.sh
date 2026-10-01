@@ -17,15 +17,21 @@ say() { printf '%-46s %s\n' "$1" "$2"; }
 # Resolved once, up front. Ubuntu ships python3 with no "python" shim, and
 # assuming the name turns every summary below into an empty section that reads
 # as "no models yet" rather than as a broken script.
+#
+# Each candidate is executed, not merely located. `command -v` is not enough:
+# Windows installs an App Execution Alias named python3 that resolves on PATH
+# and then fails when run, so a check-then-run split here passes the detection
+# and fails every assertion afterwards. Finding the interpreter is only evidence
+# if the interpreter answers.
 PY=""
 for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1; then
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "" >/dev/null 2>&1; then
     PY=$candidate
     break
   fi
 done
 if [ -z "$PY" ]; then
-  echo "no python3 or python on PATH; cannot print the summary" >&2
+  echo "no working python3 or python on PATH; cannot print the summary" >&2
   exit 1
 fi
 
