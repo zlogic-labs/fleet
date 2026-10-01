@@ -111,7 +111,7 @@ func applyEnv(cfg *Config) {
 	}
 }
 
-// parseUpstream reads "model=...,url=...,id=...,key=...,engine=...".
+// parseUpstream reads "model=...,url=...,id=...,key=...,engine=...,replicas=...".
 func parseUpstream(spec string) (UpstreamConfig, error) {
 	var ep UpstreamConfig
 	for _, kv := range strings.Split(spec, ",") {
@@ -130,6 +130,13 @@ func parseUpstream(spec string) (UpstreamConfig, error) {
 			ep.Engine = v
 		case "key":
 			ep.APIKey = v
+		case "replicas":
+			// Not optional: without it the endpoint reports zero replicas,
+			// which the console shows next to a healthy engine and the Fleet
+			// page reads as an engine with nothing serving it.
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				ep.Replicas = n
+			}
 		}
 	}
 	return ep, nil
