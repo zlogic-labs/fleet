@@ -42,7 +42,7 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 		return nil, nil, err
 	}
 
-	keys, listed, err := keyStore(cfg)
+	keys, err := keyStore(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -70,11 +70,16 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 		RetainCap: 1 << 20,
 	})
 
+	limiter, err := limiterFor(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, handler.ChatOptions{
 		MaxBytes:         int64(cfg.MaxBodyMB) << 20,
 		PrefixRunes:      prefixRunes(cfg.Upstreams),
 		DefaultMaxTokens: cfg.DefaultMaxTokens,
-		Limiter:          limiterFor(cfg, listed),
+		Limiter:          limiter,
 	})
 
 	current := refresher.Endpoints
@@ -143,26 +148,27 @@ func staticEndpoints(ups []UpstreamConfig) []engine.Endpoint {
 // a non-nil interface holding a nil pointer, so `store == nil` downstream is
 // false and a gateway with authentication disabled rejects every request
 // because it believes it has a key store that answers "no" to everything.
-//
-// The second return is what the rate limiter reads, and it is a separate
-// interface because listing keys is a different question from resolving one.
-func keyStore(cfg Config) (authn.KeyStore, authn.Lister, error) {
+func keyStore(cfg Config) (authn.KeyStore, error) {
 	if !cfg.Auth.Required || len(cfg.Auth.Keys) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	store := authn.NewMemory()
 	for i, spec := range cfg.Auth.Keys {
 		p, err := authn.ParsePrincipal(spec)
 		if err != nil {
-			return nil, nil, fmt.Errorf("auth.keys[%d]: %w", i, err)
+			return nil, fmt.Errorf("auth.keys[%d]: %w", i, err)
 		}
 		// The key id is the credential. A real deployment mints random
 		// strings; here the operator names them, which is what makes a
 		// configuration file reviewable and a revoked key identifiable in a
 		// log.
-		store.Put(p.KeyID, p, time.Time{})
+		//
+		// Scoped by tenant and project rather than by key id alone, because two
+		// tenants may both name a key "admin" and one tenant must not be able
+		// to revoke or impersonate the other's.
+		store.Put(p.Tenant+"/"+p.Project+"/"+p.KeyID, p, time.Time{})
 	}
-	return store, store, nil
+	return store, nil
 }
 
 // Run serves until ctx is cancelled, then drains.

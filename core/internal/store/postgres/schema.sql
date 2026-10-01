@@ -31,12 +31,18 @@ CREATE TABLE tenants (
     -- month end once the cost pool is known; storing a currency amount here
     -- would be storing a number Fleet cannot yet compute.
     budget_units bigint      NOT NULL DEFAULT 0,
-    -- request_limit and token_limit are the same envelope in the terms of
-    -- §11.2: rate limiting protects shared GPUs, quota protects the budget.
-    -- They are stored here rather than in rate_limit_policies because they
-    -- belong to the money conversation, not the traffic conversation.
-    active       boolean     NOT NULL DEFAULT true,
-    created_at   timestamptz NOT NULL DEFAULT now()
+    -- The envelope: the most this tenant may spend across every project it
+    -- owns. Zero means unlimited.
+    --
+    -- These are not budget_units restated. A budget caps what may be *charged*;
+    -- a rate limit caps what may be *in flight at once*. The gap between them
+    -- is the whole reason both exist: a tenant can be well inside its monthly
+    -- budget and still hold every GPU in the deployment for the whole month by
+    -- sending requests that settle to nothing.
+    request_limit integer     NOT NULL DEFAULT 0 CHECK (request_limit >= 0),
+    token_limit   integer     NOT NULL DEFAULT 0 CHECK (token_limit   >= 0),
+    active        boolean     NOT NULL DEFAULT true,
+    created_at    timestamptz NOT NULL DEFAULT now()
 );
 
 -- A project is a tenant's internal cost centre.
@@ -54,29 +60,41 @@ CREATE TABLE projects (
     -- to be excluded from every one of them. NULL means "not attributed", and
     -- rollups COALESCE it to a single bucket.
     budget_units  bigint      NOT NULL DEFAULT 0,
+    -- The partition: the most this project may spend, which must never exceed
+    -- its tenant's envelope. That last rule is NOT a CHECK constraint, because
+    -- it compares two rows in two tables. It is enforced on the write path
+    -- (internal/gateway.limiterFor rejects it at startup for the config-backed
+    -- case) and is the reason a project's limit is not simply additive: ten
+    -- projects each declaring the tenant's full limit would give the tenant ten
+    -- times the capacity and leave the envelope decorative.
+    request_limit integer     NOT NULL DEFAULT 0 CHECK (request_limit >= 0),
+    token_limit   integer     NOT NULL DEFAULT 0 CHECK (token_limit   >= 0),
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE UNIQUE INDEX projects_tenant_name_idx ON projects (tenant_id, name);
 CREATE INDEX projects_tenant_idx ON projects (tenant_id);
 
 -- An API key is a credential, not a scope.
 --
--- project_id is nullable so a key can be tenant-wide, and non-null in practice
--- for anyone who wants per-project attribution. The industry convention is
--- consistent here: a key belongs to exactly one project, and limits hang off
--- the project rather than the key. A key that is rotated keeps its project, so
--- rotating a credential never moves a budget.
+-- It carries no limits at all. A key rotates, it leaks, and it is not a budget:
+-- a limit attached to one would have to be reissued along with it, so lowering
+-- a budget would invalidate whatever the caller was using when they were cut
+-- off. Rotating a key keeps its project, so a rotation never moves a budget.
+--
+-- project_id is NOT NULL: a key that belongs to no project has no partition to
+-- be limited in, and the resulting asymmetry — some keys charged to a project
+-- and some only to the tenant — would make "how much can this project spend"
+-- depend on which credential the caller happened to hold.
 CREATE TABLE api_keys (
     id           text PRIMARY KEY,
     tenant_id    text        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    project_id   text        REFERENCES projects(id) ON DELETE SET NULL,
+    project_id   text        NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     -- The hash, never the key. A plaintext key column in a table that gets
     -- dumped into a support ticket is how a whole customer's access leaks.
     key_hash     bytea       NOT NULL UNIQUE,
     key_prefix   text        NOT NULL,  -- for display: "sk-fleet-a3f2…"
     label        text        NOT NULL DEFAULT '',
-    request_limit integer    NOT NULL DEFAULT 0,  -- 0 = inherit the envelope
-    token_limit   integer    NOT NULL DEFAULT 0,
     expires_at   timestamptz,
     created_at   timestamptz NOT NULL DEFAULT now()
 );

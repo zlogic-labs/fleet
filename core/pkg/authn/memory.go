@@ -70,61 +70,90 @@ func (m *Memory) Revoke(key string) {
 	delete(m.keys, key)
 }
 
-// Keys lists the registered principals, for deriving a tenant's policy.
-//
-// Expired keys are included: the list answers "what did an operator declare",
-// not "what may be used right now", and an expired key with a loose limit must
-// not silently tighten a live key's.
-func (m *Memory) Keys() []Principal {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]Principal, 0, len(m.keys))
-	for _, k := range m.keys {
-		out = append(out, k.Principal)
-	}
-	return out
-}
-
-var _ Lister = (*Memory)(nil)
-
-// ParsePrincipal reads "tenant/keyid:limits" — the form the seed script and a
+// ParsePrincipal reads "tenant/project/keyid" — the form the seed script and a
 // first deployment use.
 //
 // The format is deliberately small. A real installation issues keys through a
 // management API that does not exist yet; until it does, this lets a gateway be
 // given working credentials from an environment variable without writing a
-// config file with secrets in it. Limits are "rpm/tpm" or either alone.
+// config file with secrets in it.
+//
+// The project is required rather than optional. A key without one would have
+// no partition to be limited in, and the resulting asymmetry — some keys
+// charged to a project and some only to the tenant — would make "how much can
+// this project spend" depend on which key a caller happened to hold.
 func ParsePrincipal(spec string) (Principal, error) {
-	ident, limits, _ := strings.Cut(spec, "|")
-	tenant, keyID, ok := strings.Cut(strings.TrimSpace(ident), "/")
-	if !ok || tenant == "" || keyID == "" {
-		return Principal{}, errs.InvalidArgument("key spec %q must be tenant/keyid", spec)
+	if strings.Contains(spec, "|") {
+		// Rejected rather than ignored. A key spec carrying limits is an old
+		// configuration, and quietly dropping the numbers would leave an
+		// operator believing a budget was in force. Saying where they moved is
+		// worth a line of error text.
+		return Principal{}, errs.InvalidArgument(
+			"key spec %q carries limits; rate limits belong to a tenant or a project now, "+
+				"set them under rate_limits.tenants or rate_limits.projects", spec)
 	}
-	p := Principal{Tenant: tenant, KeyID: keyID, Labels: map[string]string{}}
-	if limits == "" {
-		return p, nil
+	parts, err := Split(spec, 3)
+	if err != nil {
+		return Principal{}, errs.InvalidArgument(
+			"key spec %q must be tenant/project/keyid: %s", spec, err)
 	}
-	for _, part := range strings.Split(limits, ",") {
+	return Principal{
+		Tenant:  parts[0],
+		Project: parts[1],
+		KeyID:   parts[2],
+		Labels:  map[string]string{},
+	}, nil
+}
+
+// Split divides a slash-separated name into exactly n parts.
+//
+// Exactly n, not up to n. The three callers are a key spec (3), a project
+// limit (2) and a tenant limit (1), and every one of them has a spelling where
+// a missing part is plausible: "acme/admin" as a key without a project, or
+// "acme/research" as a tenant limit on a name that happens to contain a slash.
+// Accepting the short form would put those in buckets nothing reads, which is
+// a limit that never applies — the failure mode of a misconfiguration that
+// looks like it worked.
+func Split(spec string, n int) ([]string, error) {
+	parts := strings.Split(strings.TrimSpace(spec), "/")
+	if len(parts) != n {
+		return nil, errs.InvalidArgument("expected %d slash-separated parts, got %d", n, len(parts))
+	}
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+		if parts[i] == "" {
+			return nil, errs.InvalidArgument("part %d is empty", i+1)
+		}
+	}
+	return parts, nil
+}
+
+// ParseLimits reads the "rpm=…,tpm=…" suffix of a limit declaration.
+//
+// Either name alone is fine; an unknown name is an error rather than a skipped
+// field, because "rps" instead of "rpm" would otherwise leave a deployment
+// with no request limit and no complaint.
+func ParseLimits(spec string) (Limits, error) {
+	var l Limits
+	for _, part := range strings.Split(spec, ",") {
 		field, value, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
-			return Principal{}, errs.InvalidArgument(
-				"limit %q must be name=value", part)
+			return Limits{}, errs.InvalidArgument("limit %q must be name=value", part)
 		}
 		n, err := atoi(value)
 		if err != nil {
-			return Principal{}, errs.InvalidArgument("limit %q must be a number", value)
+			return Limits{}, errs.InvalidArgument("limit %q must be a number", value)
 		}
-		switch field {
+		switch strings.TrimSpace(field) {
 		case "rpm":
-			p.RateLimit.RequestsPerMinute = n
+			l.RequestsPerMinute = n
 		case "tpm":
-			p.RateLimit.TokensPerMinute = n
+			l.TokensPerMinute = n
 		default:
-			return Principal{}, errs.InvalidArgument(
-				"unknown limit %q; use rpm or tpm", field)
+			return Limits{}, errs.InvalidArgument("unknown limit %q; use rpm or tpm", field)
 		}
 	}
-	return p, nil
+	return l, nil
 }
 
 func atoi(s string) (int, error) {

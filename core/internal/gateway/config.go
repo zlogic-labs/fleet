@@ -5,13 +5,9 @@ package gateway
 import (
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/zlogic-labs/fleet/core/pkg/authn"
 )
 
 // Config is the whole of a single-node deployment's configuration.
@@ -69,17 +65,44 @@ type TimeoutConfig struct {
 	Total time.Duration `yaml:"total"`
 }
 
+// LimitConfig declares rate limits per tenant and per project.
+//
+// The two levels are separate fields rather than one list with a type column,
+// because they answer different questions and fail differently. A tenant entry
+// is the envelope: the most that tenant may spend across everything it does. A
+// project entry divides that envelope. Merging them into one list would make
+// "is this the ceiling or a slice of it" a question only the name could answer.
 type LimitConfig struct {
+	// RPM and TPM are the server defaults, applied to any tenant with no entry
+	// of its own.
+	//
+	// They stay at the top level rather than moving under a `defaults:` key so
+	// an existing deployment that sets them keeps working unchanged. Zero means
+	// unlimited, which is also what an anonymous caller gets.
 	RPM int `yaml:"requests_per_minute"`
 	TPM int `yaml:"tokens_per_minute"`
+
+	// Tenants are the envelopes, as "name" or "name|rpm=…,tpm=…".
+	Tenants []string `yaml:"tenants"`
+	// Projects are the partitions, as "tenant/project" with the same suffix.
+	//
+	// A project limit above its tenant's envelope is rejected at startup: it
+	// could never bind, so an operator who wrote it believes they have divided
+	// a budget they have not divided.
+	Projects []string `yaml:"projects"`
 }
 
 // AuthConfig is how callers identify themselves.
 //
-// Keys is a list of "tenant/keyid" or "tenant/keyid|rpm=10,tpm=1000". It is
-// a list in configuration rather than a database table because v1 has no key
-// management API, and an operator who needs a working gateway today should not
-// first have to stand up Postgres to get one.
+// Keys is a list of "tenant/project/keyid". It is a list in configuration
+// rather than a database table because v1 has no key management API, and an
+// operator who needs a working gateway today should not first have to stand up
+// Postgres to get one.
+//
+// A key names a project and carries no limits. Limits belong to the scopes in
+// LimitConfig, so lowering a budget is a configuration change rather than a key
+// rotation — which matters because a rotated key invalidates whatever the
+// caller was using when they were cut off.
 type AuthConfig struct {
 	// Required turns authentication on. Off by default so that
 	// `./scripts/dev.sh` works with no keys at all, and stated explicitly so
@@ -107,8 +130,6 @@ func Default() Config {
 }
 
 // Load reads YAML from path, then applies FLEET_* environment overrides.
-// Environment last means a container can be reconfigured without rewriting a
-// ConfigMap, which is the common case for image promotion.
 func Load(path string) (Config, error) {
 	cfg := Default()
 
@@ -126,154 +147,4 @@ func Load(path string) (Config, error) {
 
 	applyEnv(&cfg)
 	return cfg, cfg.validate()
-}
-
-func applyEnv(cfg *Config) {
-	setString(&cfg.Listen, "FLEET_LISTEN")
-	setString(&cfg.Edition, "FLEET_EDITION")
-	setInt(&cfg.MaxBodyMB, "FLEET_MAX_BODY_MB")
-	setInt(&cfg.RateLimits.RPM, "FLEET_RATE_RPM")
-	setInt(&cfg.RateLimits.TPM, "FLEET_RATE_TPM")
-	setInt(&cfg.DefaultMaxTokens, "FLEET_DEFAULT_MAX_TOKENS")
-	setDuration(&cfg.Timeouts.Dial, "FLEET_TIMEOUT_DIAL")
-	setDuration(&cfg.Timeouts.ResponseHdrs, "FLEET_TIMEOUT_RESPONSE_HEADERS")
-	setString(&cfg.ControlPlane.URL, "FLEET_CONTROL_PLANE_URL")
-	setString(&cfg.ControlPlane.Token, "FLEET_CONTROL_PLANE_TOKEN")
-	setDuration(&cfg.ControlPlane.Every, "FLEET_CONTROL_PLANE_REFRESH")
-
-	if v := os.Getenv("FLEET_AUTH_REQUIRED"); v != "" {
-		cfg.Auth.Required = v == "1" || strings.EqualFold(v, "true")
-	}
-	// Semicolon-separated, because a key list has no natural comma-free form
-	// and a comma would have to be escaped inside a value nobody reads.
-	if raw := os.Getenv("FLEET_API_KEYS"); raw != "" {
-		for _, spec := range strings.Split(raw, ";") {
-			if s := strings.TrimSpace(spec); s != "" {
-				cfg.Auth.Keys = append(cfg.Auth.Keys, s)
-			}
-		}
-	}
-
-	// A single upstream may be supplied inline, which is the shape of a local
-	// llama.cpp or a vLLM pod that has not been adopted yet.
-	if raw := os.Getenv("FLEET_UPSTREAMS"); raw != "" {
-		for _, spec := range strings.Split(raw, ";") {
-			if ep, err := parseUpstream(spec); err == nil && ep.BaseURL != "" {
-				cfg.Upstreams = append(cfg.Upstreams, ep)
-			}
-		}
-	}
-}
-
-// parseUpstream reads "model=...,url=...,id=...,key=...,engine=...,replicas=...".
-func parseUpstream(spec string) (UpstreamConfig, error) {
-	var ep UpstreamConfig
-	for _, kv := range strings.Split(spec, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "id":
-			ep.ID = v
-		case "model":
-			ep.Model = v
-		case "url":
-			ep.BaseURL = v
-		case "engine":
-			ep.Engine = v
-		case "key":
-			ep.APIKey = v
-		case "replicas":
-			// Not optional: without it the endpoint reports zero replicas,
-			// which the console shows next to a healthy engine and the Fleet
-			// page reads as an engine with nothing serving it.
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				ep.Replicas = n
-			}
-		}
-	}
-	return ep, nil
-}
-
-func (c Config) validate() error {
-	if c.Listen == "" {
-		return fmt.Errorf("listen address is empty")
-	}
-	if c.MaxBodyMB <= 0 {
-		return fmt.Errorf("max_body_mb must be positive, got %d", c.MaxBodyMB)
-	}
-	if c.ControlPlane.Every < 0 {
-		return fmt.Errorf("control_plane.refresh_every must not be negative")
-	}
-	// Required with no keys is a deployment that refuses every request, which
-	// looks like an outage rather than a misconfiguration. Caught here so it
-	// is a startup error naming the fix, not a 401 storm.
-	if c.Auth.Required && len(c.Auth.Keys) == 0 {
-		return fmt.Errorf("auth.required is set but auth.keys is empty: every request would be rejected")
-	}
-	// A configured key list with required off means the keys are being parsed
-	// and then ignored, which is the shape of a security setting someone
-	// believes is on.
-	if !c.Auth.Required && len(c.Auth.Keys) > 0 {
-		return fmt.Errorf("auth.keys is set but auth.required is false: the keys would be ignored")
-	}
-	// The index, not the spec. A config with twenty keys and one typo is
-	// found by position; quoting the offending string leaves the operator
-	// counting lines.
-	for i, spec := range c.Auth.Keys {
-		if _, err := authn.ParsePrincipal(spec); err != nil {
-			return fmt.Errorf("auth.keys[%d] %q: %w", i, spec, err)
-		}
-	}
-	seen := make(map[string]bool, len(c.Upstreams))
-	for i, up := range c.Upstreams {
-		if up.BaseURL == "" {
-			return fmt.Errorf("upstreams[%d]: base_url is required", i)
-		}
-		if up.Model == "" {
-			return fmt.Errorf("upstreams[%d]: model is required", i)
-		}
-		if up.ID == "" {
-			// Deriving the id from the URL keeps single-upstream configs to
-			// two lines, which is how most people first run this.
-			up.ID = up.Model + "@" + up.BaseURL
-		}
-		if seen[up.ID] {
-			return fmt.Errorf("upstreams[%d]: duplicate id %q", i, up.ID)
-		}
-		seen[up.ID] = true
-		if up.Engine == "" {
-			up.Engine = "openai-compatible"
-		}
-		if up.Replicas <= 0 {
-			up.Replicas = 1
-		}
-		if up.AffinityPrefixRunes <= 0 {
-			up.AffinityPrefixRunes = 512
-		}
-	}
-	return nil
-}
-
-func setString(dst *string, key string) {
-	if v := os.Getenv(key); v != "" {
-		*dst = v
-	}
-}
-
-func setInt(dst *int, key string) {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			*dst = n
-		}
-	}
-}
-
-func setDuration(dst *time.Duration, key string) {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			*dst = d
-		}
-	}
 }

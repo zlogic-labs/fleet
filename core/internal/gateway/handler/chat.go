@@ -6,8 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"sync"
-	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
@@ -104,13 +102,17 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// for the whole context window, and reserving a small default for it would
 	// let one unbounded request pass a limit that a thousand small ones
 	// cannot.
-	tenant := authn.TenantFromContext(r.Context())
+	//
+	// Both halves of the scope come from the authenticated principal, never
+	// from the request body: a client that named its own project would charge
+	// whichever of the tenant's budgets it liked.
+	tenant, project := authn.ScopeFromContext(r.Context())
 	maxOut := req.ResolveMaxTokens(0)
 	if maxOut <= 0 {
 		maxOut = h.DefaultMaxTokens
 	}
 	reservation, err := h.Limiter.Reserve(r.Context(), ratelimit.Request{
-		Tenant: tenant,
+		Scope:  ratelimit.Scope{Tenant: tenant, Project: project},
 		Tokens: promptTokens + maxOut,
 	})
 	if err != nil {
@@ -122,7 +124,8 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Settled on the way out even though nothing was generated: the
 		// reservation was taken and nothing will return it. Forgetting this
-		// leaks the tenant's whole limit into every 404.
+		// leaks the tenant's whole limit into every 404 — and with two levels
+		// charged, it would leak into both the envelope and the partition.
 		h.Limiter.Settle(r.Context(), reservation, 0)
 		h.fail(w, r, err)
 		return
@@ -192,81 +195,3 @@ func rateLimited(w http.ResponseWriter, err error) {
 
 // Samples exposes the rolling log for the status endpoint.
 func (h *Chat) Samples() []Sample { return h.samples.Snapshot() }
-
-// ── stream_options injection ───────────────────────────────────
-
-// includeUsageField is what Fleet inserts so that a streamed completion
-// carries token counts at all. Without it the engine sends deltas only, the
-// response is unbillable, and P6 forces the gateway to charge max_tokens —
-// which is worse for the customer than Fleet setting the flag itself.
-const includeUsageField = `"stream_options":{"include_usage":true}`
-
-// ensureIncludeUsage returns body with stream_options.include_usage set.
-//
-// The common case is a surgical byte edit: a well-formed JSON object's last
-// byte is its closing brace, so inserting before it costs nothing and keeps
-// every other byte — including fields this struct does not model — intact.
-// Re-marshalling instead would reorder keys and can render numbers
-// differently, which is a poor trade for a gateway.
-func ensureIncludeUsage(body []byte) []byte {
-	if bytes.Contains(body, []byte(`"include_usage":true`)) {
-		return body
-	}
-	trimmed := bytes.TrimRight(body, " \t\r\n")
-	if len(trimmed) == 0 || trimmed[len(trimmed)-1] != '}' {
-		return body
-	}
-	inner := bytes.TrimRight(trimmed[:len(trimmed)-1], " \t\r\n")
-
-	out := make([]byte, 0, len(trimmed)+len(includeUsageField)+1)
-	if len(inner) == 0 {
-		out = append(out, '{')
-	} else {
-		out = append(out, inner...)
-		out = append(out, ',')
-	}
-	out = append(out, includeUsageField...)
-	out = append(out, '}')
-	return out
-}
-
-// ── rolling sample log ────────────────────────────────────────
-
-// Sample is one completed request, as the console shows it.
-type Sample struct {
-	Model      string
-	Endpoint   string
-	TTFT       time.Duration
-	Duration   time.Duration
-	Bytes      int64
-	Usage      *openai.Usage
-	UsageKnown bool
-	PromptEst  int
-	Requested  int
-	Streamed   bool
-}
-
-type SampleLog struct {
-	mu      sync.RWMutex
-	samples []Sample
-	limit   int
-}
-
-func NewSampleLog(limit int) *SampleLog {
-	return &SampleLog{limit: limit}
-}
-
-func (l *SampleLog) Add(s Sample) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.samples = append(l.samples, s)
-	if len(l.samples) > l.limit {
-		l.samples = l.samples[len(l.samples)-l.limit:]
-	}
-}
-
-func (l *SampleLog) Snapshot() []Sample {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return append([]Sample(nil), l.samples...)
-}

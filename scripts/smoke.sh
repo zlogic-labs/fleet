@@ -359,10 +359,14 @@ AUTH_PORT=${AUTH_PORT:-8099}
 AUTH_GATEWAY=http://127.0.0.1:$AUTH_PORT
 CHAT='{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}]}'
 
-# rpm=3 so the request refusal arrives inside a handful of requests, and tpm is
-# left unset so the two dimensions are exercised separately below.
+# acme has an envelope of 3 rpm and two projects of 3 rpm each. The point of
+# that arithmetic is that it must NOT mean 6: if the two levels were merged
+# into one figure the tenant would get the sum, and the envelope would be
+# decorative. The checks below spend one project and then reach for the other.
 FLEET_AUTH_REQUIRED=true \
-FLEET_API_KEYS='acme/admin|rpm=3;acme/second|rpm=99;other/third|rpm=99' \
+FLEET_API_KEYS='acme/research/admin;acme/batch/second;other/third/third' \
+FLEET_RATE_TENANTS='acme|rpm=3' \
+FLEET_RATE_PROJECTS='acme/research|rpm=3;acme/batch|rpm=3' \
   go -C core run ./cmd/fleet-gateway --listen "127.0.0.1:$AUTH_PORT" --demo \
   >"$WORKDIR/auth-gateway.log" 2>&1 &
 AUTH_PID=$!
@@ -385,7 +389,8 @@ if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then
 
   check "a valid key is served" "200" \
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
-       -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT")"
+       -H 'Content-Type: application/json' \
+       -H 'Authorization: Bearer acme/research/admin' -d "$CHAT")"
 
   check "no key is refused" "401" \
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
@@ -395,6 +400,13 @@ if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
        -H 'Content-Type: application/json' -H 'Authorization: Bearer nope' -d "$CHAT")"
 
+  # Two tenants may both name a key "third". A store keyed on the bare key id
+  # would let one tenant's credential resolve to another tenant's principal,
+  # which is a cross-tenant read of somebody else's ledger.
+  check "a bare key id belongs to nobody" "401" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' -H 'Authorization: Bearer third' -d "$CHAT")"
+
   # Headers are read with -D - rather than -I. curl's -I asks for HEAD, and
   # combining it with -X POST and -d makes curl print nothing at all — so the
   # check would read as a missing header on a server that is sending it.
@@ -403,31 +415,45 @@ if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then
        -H 'Content-Type: application/json' -d "$CHAT" \
        | grep -qi 'www-authenticate: *bearer' && echo True || echo False)"
 
-  # acme/admin is capped at 3 rpm and acme/second at 99. The tenant's bucket is
-  # the tightest of its keys, so the admin key's ceiling is what applies and a
-  # sibling key cannot be used to spend past it.
+  # acme/research is capped at 3 rpm. Spend it.
   for _ in 1 2 3; do
     curl -sS -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
-      -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT"
+      -H 'Content-Type: application/json' \
+      -H 'Authorization: Bearer acme/research/admin' -d "$CHAT"
   done
   check "the per-minute request limit refuses" "429" \
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
-       -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT")"
+       -H 'Content-Type: application/json' \
+       -H 'Authorization: Bearer acme/research/admin' -d "$CHAT")"
 
   check "a refusal says when to retry" "True" \
     "$(curl -sS -D - -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
-       -H 'Content-Type: application/json' -H 'Authorization: Bearer admin' -d "$CHAT" \
+       -H 'Content-Type: application/json' \
+       -H 'Authorization: Bearer acme/research/admin' -d "$CHAT" \
        | grep -qi '^retry-after: *[1-9]' && echo True || echo False)"
 
-  check "a second key of the same tenant shares the bucket" "429" \
-    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
-       -H 'Content-Type: application/json' -H 'Authorization: Bearer second' -d "$CHAT")"
+  # The refusal has to say WHICH budget ran out, or a caller goes looking in the
+  # wrong one.
+  check "a refusal names the scope that ran out" "True" \
+    "$(curl -sS -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -H 'Authorization: Bearer acme/research/admin' -d "$CHAT" \
+       | grep -q 'acme/research' && echo True || echo False)"
 
-  # A different tenant has its own bucket. If it inherited acme's exhausted
+  # The tenant's second project is still empty — 3 rpm each, and only research
+  # has spent any. It must still be refused, because the tenant envelope is at
+  # 3. If it answers 200 the two limits were added rather than nested.
+  check "a second project cannot spend past the envelope" "429" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -H 'Authorization: Bearer acme/batch/second' -d "$CHAT")"
+
+  # A different tenant has its own envelope. If it inherited acme's exhausted
   # allowance, a busy tenant would take the whole gateway down with it.
   check "another tenant is unaffected" "200" \
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
-       -H 'Content-Type: application/json' -H 'Authorization: Bearer third' -d "$CHAT")"
+       -H 'Content-Type: application/json' \
+       -H 'Authorization: Bearer other/third/third' -d "$CHAT")"
 else
   printf '%s no authenticated gateway on :%s — see %s\n' \
     "$(red 'ERROR')" "$AUTH_PORT" "$WORKDIR/auth-gateway.log" >&2
@@ -445,7 +471,8 @@ section "gateway: token limits"
 TOKEN_PORT=${TOKEN_PORT:-8098}
 TOKEN_GATEWAY=http://127.0.0.1:$TOKEN_PORT
 FLEET_AUTH_REQUIRED=true \
-FLEET_API_KEYS='acme/tight|tpm=200' \
+FLEET_API_KEYS='acme/research/tight' \
+FLEET_RATE_PROJECTS='acme/research|tpm=200' \
 FLEET_DEFAULT_MAX_TOKENS=100 \
   go -C core run ./cmd/fleet-gateway --listen "127.0.0.1:$TOKEN_PORT" --demo \
   >"$WORKDIR/token-gateway.log" 2>&1 &
@@ -467,7 +494,7 @@ if curl -fsS "$TOKEN_GATEWAY/healthz" >/dev/null 2>&1; then
   code=200
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$TOKEN_GATEWAY/v1/chat/completions" \
-      -H 'Content-Type: application/json' -H 'Authorization: Bearer tight' -d "$CHAT")
+      -H 'Content-Type: application/json' -H 'Authorization: Bearer acme/research/tight' -d "$CHAT")
     [ "$code" = "429" ] && break
   done
   check "a token ceiling refuses before the request ceiling would" "429" "$code"

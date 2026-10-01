@@ -114,23 +114,43 @@ everyone when the two halves of the configuration disagree:
 
 ```sh
 export FLEET_AUTH_REQUIRED=true
-export FLEET_API_KEYS='acme/team-a|rpm=600,tpm=200000;acme/batch|rpm=60'
-export FLEET_RATE_RPM=1200          # server default, for keys that say nothing
+export FLEET_API_KEYS='acme/research/team-a;acme/batch/worker'
+export FLEET_RATE_TENANTS='acme|rpm=1200,tpm=400000'
+export FLEET_RATE_PROJECTS='acme/research|rpm=600,tpm=200000;acme/batch|rpm=60,tpm=20000'
 export FLEET_DEFAULT_MAX_TOKENS=4096 # what an unbounded request reserves against
 ```
 
-Keys are `tenant/keyid`, optionally followed by `|rpm=…,tpm=…`. A declared
-limit replaces the server default for that dimension; a dimension the key says
-nothing about inherits the default. Limits are per **tenant**, not per key, and
-where a tenant's keys disagree the **tightest** wins — one tenant with ten keys
-has not bought ten engines, and it must not be able to raise its own ceiling by
-issuing a more generous second key.
+A key is `tenant/project/keyid`, and that whole string is also the credential
+the client sends as its bearer token. Keys carry **no limits** — a key rotates
+and leaks, so a budget attached to one would have to be reissued along with it,
+and lowering a budget would invalidate whatever the caller was using when they
+were cut off.
 
-Policies are read on a tenant's first request and cached, so changing a limit
-needs a gateway restart. Three configurations are refused at startup —
-`required` with no keys, keys without `required`, and a key spec that does not
-parse — because each of them looks like a working gateway from the outside while
-serving nobody.
+Limits live on two levels, and **both are checked on every request**:
+
+| | Declared in | Bounds |
+|---|---|---|
+| Envelope | `FLEET_RATE_TENANTS` | everything the tenant spends, across all its projects |
+| Partition | `FLEET_RATE_PROJECTS` | one project, within its tenant's envelope |
+
+They are two counters rather than one merged figure because a project limit on
+its own is arithmetic the tenant performs: ten projects at 600 rpm is 6000, and
+no per-project number would ever have bound. The envelope is what makes the
+partitions add up. A project limit above its tenant's envelope is refused at
+startup rather than clamped — it could never apply, and an operator who wrote one
+believes they have divided a budget they have not divided.
+
+`FLEET_RATE_RPM` and `FLEET_RATE_TPM` are the server defaults for a tenant
+nobody declared. A limit that says only `rpm` stays unlimited on the token
+dimension — for a *partition* that means "no limit of its own here", which is
+not the same as inheriting the tenant default.
+
+Policies are read once per scope and cached, so changing a limit needs a gateway
+restart. Three configurations are refused at startup — `required` with no keys,
+keys without `required`, and a key spec that does not parse — because each of
+them looks like a working gateway from the outside while serving nobody. A key
+spec still carrying `|rpm=…` is also refused, with a message saying where limits
+moved, rather than being silently accepted with the numbers dropped.
 
 `/healthz` and `/health` stay unauthenticated, because a Kubernetes probe
 cannot hold a credential and a 401 there reports a healthy pod as dead.

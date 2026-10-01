@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -70,11 +69,11 @@ func TestAuthenticationGatesTheChatEndpoint(t *testing.T) {
 	var calls atomic.Int64
 	up := fakeEngine(t, &calls)
 	h := gatewayFor(t, Config{
-		Auth:      AuthConfig{Required: true, Keys: []string{"acme/admin|rpm=60"}},
+		Auth:      AuthConfig{Required: true, Keys: []string{"acme/research/admin"}},
 		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
 	})
 
-	if w := post(h, "admin", req); w.Code != http.StatusOK {
+	if w := post(h, "acme/research/admin", req); w.Code != http.StatusOK {
 		t.Errorf("valid key: status %d, body %s", w.Code, w.Body)
 	}
 	if got := calls.Load(); got != 1 {
@@ -98,12 +97,42 @@ func TestAuthenticationGatesTheChatEndpoint(t *testing.T) {
 	}
 }
 
+// Two tenants may both name a key "admin". Storing credentials under the bare
+// key id would make the second registration overwrite the first, and the first
+// tenant's credential would then resolve to the second tenant's principal — one
+// tenant reading and spending another's ledger. The credential is the whole
+// tenant/project/keyid for exactly this reason.
+func TestTwoTenantsMayNameAKeyTheSame(t *testing.T) {
+	var calls atomic.Int64
+	up := fakeEngine(t, &calls)
+	h := gatewayFor(t, Config{
+		Auth: AuthConfig{Required: true, Keys: []string{
+			"acme/research/admin",
+			"globex/research/admin",
+		}},
+		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
+	})
+
+	for _, key := range []string{"acme/research/admin", "globex/research/admin"} {
+		if w := post(h, key, req); w.Code != http.StatusOK {
+			t.Errorf("%s: status %d, body %s", key, w.Code, w.Body)
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("engine saw %d calls, want 2 — one key silently displaced the other", got)
+	}
+	// The bare key id belongs to nobody and must not resolve.
+	if w := post(h, "admin", req); w.Code != http.StatusUnauthorized {
+		t.Errorf("bare key id: status %d, want 401", w.Code)
+	}
+}
+
 // Health must stay reachable without a key. A readiness probe cannot hold a
 // credential, and a gateway whose /healthz returns 401 looks dead to Kubernetes
 // while it is serving fine.
 func TestHealthStaysOpenWhileChatIsGated(t *testing.T) {
 	h := gatewayFor(t, Config{
-		Auth:      AuthConfig{Required: true, Keys: []string{"acme/admin"}},
+		Auth:      AuthConfig{Required: true, Keys: []string{"acme/research/admin"}},
 		Upstreams: []UpstreamConfig{},
 	})
 	for _, path := range []string{"/healthz", "/health"} {
@@ -112,116 +141,5 @@ func TestHealthStaysOpenWhileChatIsGated(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Errorf("%s = %d, want 200 without a key", path, w.Code)
 		}
-	}
-}
-
-// The reservation is the request's upper bound, so a tenant at its limit is
-// turned away before the engine is touched at all.
-func TestRateLimitRefusesAndAdvertisesRetryAfter(t *testing.T) {
-	var calls atomic.Int64
-	up := fakeEngine(t, &calls)
-	h := gatewayFor(t, Config{
-		Auth:      AuthConfig{Required: true, Keys: []string{"acme/admin|rpm=2"}},
-		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
-	})
-
-	// max_tokens=0 resolves to DefaultMaxTokens, so each of these reserves far
-	// more than the 2-per-minute request limit allows on the third call.
-	// The limit is on requests, so the first two must pass.
-	for i := 1; i <= 2; i++ {
-		if w := post(h, "admin", req); w.Code != http.StatusOK {
-			t.Fatalf("request %d: status %d, want 200", i, w.Code)
-		}
-	}
-	w := post(h, "admin", req)
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status %d, want 429", w.Code)
-	}
-	if ra := w.Header().Get("Retry-After"); ra == "" {
-		t.Error("429 without Retry-After; a client without it retries in a tight loop")
-	}
-	if got := calls.Load(); got != 2 {
-		t.Errorf("engine saw %d calls, want 2 — a refused request still reached the GPU", got)
-	}
-	var env struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
-		t.Fatalf("429 body is not an OpenAI envelope: %v", err)
-	}
-	if env.Error.Type == "" {
-		t.Error("429 body carries no error type")
-	}
-}
-
-// Limits are per tenant, not per key: a tenant that bought one engine has not
-// bought one per credential, and one tenant must not be able to drain another's
-// allowance by holding more keys.
-func TestLimitsArePerTenantNotPerKey(t *testing.T) {
-	var calls atomic.Int64
-	up := fakeEngine(t, &calls)
-	h := gatewayFor(t, Config{
-		Auth: AuthConfig{Required: true, Keys: []string{
-			"acme/one|rpm=1", "acme/two|rpm=1000", "other/three|rpm=1000",
-		}},
-		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
-	})
-
-	if w := post(h, "one", req); w.Code != http.StatusOK {
-		t.Fatalf("acme/one: %d", w.Code)
-	}
-	// A different key, same tenant: it shares the bucket, so it is refused.
-	if w := post(h, "two", req); w.Code != http.StatusTooManyRequests {
-		t.Errorf("acme/two: %d, want 429 — the tenant got a fresh allowance per key", w.Code)
-	}
-	// A different tenant is unaffected.
-	if w := post(h, "three", req); w.Code != http.StatusOK {
-		t.Errorf("other/three: %d, want 200", w.Code)
-	}
-}
-
-// A request that cannot be routed costs the tenant nothing. If a 404 leaked the
-// reservation, a tenant pointing at a model name that does not exist would burn
-// its whole minute's allowance on a typo.
-func TestUnroutableRequestIsSettledForFree(t *testing.T) {
-	var calls atomic.Int64
-	up := fakeEngine(t, &calls)
-	h := gatewayFor(t, Config{
-		Auth:      AuthConfig{Required: true, Keys: []string{"acme/admin|rpm=1"}},
-		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
-	})
-
-	for i := 0; i < 5; i++ {
-		w := post(h, "admin", `{"model":"does-not-exist","messages":[{"role":"user","content":"hi"}]}`)
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("request %d: status %d, want 404", i, w.Code)
-		}
-	}
-	// The allowance is untouched, so a real request still works.
-	if w := post(h, "admin", req); w.Code != http.StatusOK {
-		t.Errorf("after 5 unroutable requests: %d, want 200", w.Code)
-	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("engine saw %d calls, want 1", got)
-	}
-}
-
-// A key that declared no limits falls back to the server's, and a key that
-// declared looser ones is not clamped down to the server default.
-func TestServerLimitsApplyToKeysThatDeclareNone(t *testing.T) {
-	var calls atomic.Int64
-	up := fakeEngine(t, &calls)
-	h := gatewayFor(t, Config{
-		Auth:       AuthConfig{Required: true, Keys: []string{"acme/plain"}},
-		RateLimits: LimitConfig{RPM: 1},
-		Upstreams:  []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
-	})
-	if w := post(h, "plain", req); w.Code != http.StatusOK {
-		t.Fatalf("first: %d", w.Code)
-	}
-	if w := post(h, "plain", req); w.Code != http.StatusTooManyRequests {
-		t.Errorf("second: %d, want 429 — the server default was not applied", w.Code)
 	}
 }

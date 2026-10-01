@@ -2,11 +2,8 @@ package gateway
 
 import (
 	"net/http"
-	"strings"
-	"sync"
 	"time"
 
-	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
@@ -65,76 +62,3 @@ func unauthorized(w http.ResponseWriter, err error) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="fleet"`)
 	openai.WriteError(w, err)
 }
-
-// limiterFor builds the limiter the chat handler reserves against.
-//
-// Two rules, and they are not the same rule:
-//
-//   - A declared limit REPLACES the server default for that dimension. Zero
-//     means the key said nothing about it, so the default stands. The key list
-//     is operator configuration, so there is nothing to defend against by
-//     clamping it — the operator writing `rpm=5` meant rpm 5, and a merge that
-//     quietly raised it to the server's 100 would be a config that does not do
-//     what it says.
-//   - Across a tenant's keys, the TIGHTEST wins, because the keys share one
-//     bucket. Taking the loosest would let a tenant raise its own ceiling by
-//     issuing a second, more generous key, which makes every declared limit
-//     advisory. See authn.Limits.Tightest.
-//
-// A per-tenant policy is read on first use and kept for the life of the
-// process, so a key rotated after startup cannot change an established tenant's
-// limits mid-flight. Lowering a limit therefore needs a restart — the same
-// contract as the key list itself, and stated here so it is a decision rather
-// than a surprise.
-func limiterFor(cfg Config, store authn.Lister) *ratelimit.Memory {
-	defaults := ratelimit.Policy{
-		RequestsPerMinute: cfg.RateLimits.RPM,
-		TokensPerMinute:   cfg.RateLimits.TPM,
-	}
-	policies := sync.Map{}
-	return ratelimit.NewMemory(func(tenant string) ratelimit.Policy {
-		if cached, ok := policies.Load(tenant); ok {
-			return cached.(ratelimit.Policy)
-		}
-		p := declaredLimits(tenant, store).OrDefaults(defaults)
-		policies.Store(tenant, p)
-		return p
-	})
-}
-
-// declaredLimits returns the limits a tenant's keys declare in aggregate,
-// taking the tightest.
-//
-// The tightest, because the keys share one bucket. Taking the loosest would let
-// a tenant raise its own ceiling by issuing a second, more generous key, which
-// makes every declared limit advisory. See authn.Limits.Tightest.
-func declaredLimits(tenant string, store authn.Lister) ratelimit.Policy {
-	if store == nil {
-		return ratelimit.Policy{}
-	}
-	out := ratelimit.Policy{}
-	first := true
-	for _, k := range store.Keys() {
-		if TrimTenant(k.Tenant) != tenant {
-			continue
-		}
-		// The first key initialises rather than merging: minPositive treats zero
-		// as unlimited, so starting from a zero Policy would drop the first
-		// key's limits entirely.
-		if first {
-			out, first = k.RateLimit, false
-			continue
-		}
-		out = out.Tightest(k.RateLimit)
-	}
-	return out
-}
-
-// TrimTenant normalises a tenant name for use as a map key.
-//
-// Kept next to the limiter rather than inside it so there is exactly one
-// definition of "the same tenant", and two spellings of one tenant cannot each
-// be handed a full limit. The chat handler goes through
-// authn.TenantFromContext, which applies the same normalisation, so the two
-// spellings share one bucket.
-func TrimTenant(s string) string { return strings.ToLower(strings.TrimSpace(s)) }

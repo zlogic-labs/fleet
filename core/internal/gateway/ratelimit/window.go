@@ -1,14 +1,17 @@
 package ratelimit
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // The sliding window.
 //
 // A ring of one-second buckets, indexed by unix second modulo the ring length,
-// so a tenant's last sixty seconds are always exactly where the next second
-// will look for them. Nothing is swept and nothing expires on a timer: a
-// bucket stops counting the moment it falls outside the window, which is what
-// `live` decides, and what `slot` recycles.
+// so a scope's last sixty seconds are always exactly where the next second will
+// look for them. Nothing is swept and nothing expires on a timer: a bucket
+// stops counting the moment it falls outside the window, which is what `live`
+// decides, and what `slot` recycles.
 //
 // The alternative — a fixed window keyed on the current minute — is cheaper by a
 // few nanoseconds and has a well-known hole: a caller that spends its whole
@@ -16,12 +19,12 @@ import "time"
 // of the next, doubling its rate at will. TestSlidingWindowDoesNotDoubleAllowanceAtTheBoundary
 // is the check for that.
 
-// bucketsPerTenant is how many per-second readings a sliding minute keeps.
+// bucketsPerScope is how many per-second readings a sliding minute keeps.
 //
 // Sixty means one reading per second, which bounds the error in the reported
-// rate to one second's worth of traffic — under a percent for any real tenant
-// — while costing 60 small counters per tenant.
-const bucketsPerTenant = 60
+// rate to one second's worth of traffic — under a percent for any real scope
+// — while costing 60 small counters per scope.
+const bucketsPerScope = 60
 
 type bucket struct {
 	second   int64
@@ -36,12 +39,36 @@ type bucket struct {
 }
 
 type counter struct {
+	// scope is which bucket this is, kept on the counter so a report can name
+	// it without re-parsing the map key.
+	scope   Scope
 	policy  Policy
 	buckets []bucket
 	// inFlight is a scalar rather than a ring entry because it is a point-in-time
 	// fact with no window: a request either is in flight or is not, and ageing
 	// it out would report work that is still running as though it had finished.
 	inFlight int
+}
+
+// scopeOf reads a bucket key back into a Scope.
+//
+// The inverse of Scope.Key, and the two must agree or a report would name a
+// scope nobody is charged to. A key with no slash is a tenant; anything else is
+// split at the first slash, which is the only place one can appear — a tenant
+// name never contains one.
+func scopeOf(key string) Scope {
+	if tenant, project, ok := strings.Cut(key, "/"); ok {
+		return Scope{Tenant: tenant, Project: project}
+	}
+	return Scope{Tenant: key}
+}
+
+// kindOf labels a bucket for reporting.
+func kindOf(key string) Kind {
+	if strings.Contains(key, "/") {
+		return KindProject
+	}
+	return KindTenant
 }
 
 // slot returns the bucket for now's second, recycling the ring entry that

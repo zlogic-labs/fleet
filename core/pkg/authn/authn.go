@@ -22,29 +22,38 @@ import (
 // the same handful of facts, and an interface here would be a nil check in
 // every handler — the one mistake that turns into a panic on the request path.
 type Principal struct {
-	// Tenant is who is charged. Several API keys may share one tenant, which
-	// is what makes it possible to rotate a key without moving a balance.
+	// Tenant is who is charged. Several projects and several API keys may share
+	// one tenant, which is what makes it possible to rotate a key or split a
+	// budget without moving a balance.
 	Tenant string
+	// Project is the partition inside the tenant this key spends from. It is
+	// what a per-project rate limit is keyed on and what the ledger attributes
+	// the spend to, so it is resolved at authentication rather than taken from
+	// the request body — a client that named its own project could charge
+	// whichever budget it liked.
+	Project string
 	// KeyID names the key that was presented, for logs and for revoking one
 	// key without touching the tenant.
 	KeyID string
-	// RateLimit overrides the server default when the key declares its own.
-	// Zero means "use the server's", which keeps the common case — one policy
-	// for everyone — free of per-key bookkeeping.
-	RateLimit Limits
 	// Labels are the key's own attributes, passed through to billing so a
 	// cost can be attributed to a team rather than only to a tenant.
 	Labels map[string]string
 }
 
-// Limits is a per-key override of the server's rate limit policy.
+// Limits is a rate limit policy.
+//
+// It lives here rather than in ratelimit because the configuration parser,
+// the control plane and the limiter all have to agree on one shape, and a
+// second definition would let them drift: the parser would accept `rpm` and the
+// limiter would read something else.
+//
+// A limit is a property of a scope — a tenant or a project — and never of a
+// key. Keys are credentials: they rotate and they leak, so a budget attached to
+// one would have to be reissued along with it.
 type Limits struct {
 	RequestsPerMinute int
 	TokensPerMinute   int
 }
-
-// Set reports whether the key declared its own policy.
-func (l Limits) Set() bool { return l.RequestsPerMinute > 0 || l.TokensPerMinute > 0 }
 
 // Unlimited reports whether the limits permit anything at all.
 func (l Limits) Unlimited() bool { return l.RequestsPerMinute <= 0 && l.TokensPerMinute <= 0 }
@@ -52,9 +61,9 @@ func (l Limits) Unlimited() bool { return l.RequestsPerMinute <= 0 && l.TokensPe
 // OrDefaults fills in each dimension l left unstated from d.
 //
 // A zero means "not declared", not "unlimited", which is why this is a fill-in
-// and not a merge. The gateway applies it to a key's declared limits, so a key
-// that says only `rpm` still inherits the server's token ceiling — and a key
-// that says nothing at all is simply the server's policy.
+// and not a merge. A scope that says only `rpm` still inherits the server's
+// token ceiling, because a configuration that sets one number and silently
+// leaves the other unbounded does not do what it says.
 func (l Limits) OrDefaults(d Limits) Limits {
 	if l.RequestsPerMinute <= 0 {
 		l.RequestsPerMinute = d.RequestsPerMinute
@@ -63,43 +72,6 @@ func (l Limits) OrDefaults(d Limits) Limits {
 		l.TokensPerMinute = d.TokensPerMinute
 	}
 	return l
-}
-
-// Tightest returns the most restrictive of two sets of limits, per dimension.
-//
-// Per dimension rather than whole-set, because the two halves describe
-// different things: a tenant handed a token ceiling has not thereby been handed
-// an unlimited request rate.
-//
-// It is the merge the gateway applies across a tenant's keys, and taking the
-// tightest rather than the loosest is the part that matters. Limits exist to
-// protect the shared GPUs, so if two keys of one tenant declared 1 and 1000
-// requests per minute, honouring the loosest would make the tighter declaration
-// decorative — the tenant would raise its own ceiling by issuing another key.
-// The cost is that a deliberately low limit on one key also throttles its
-// siblings, which is the honest reading: the keys share one bucket because they
-// share one tenant, and the tenant is one bill.
-func (l Limits) Tightest(other Limits) Limits {
-	return Limits{
-		RequestsPerMinute: minPositive(l.RequestsPerMinute, other.RequestsPerMinute),
-		TokensPerMinute:   minPositive(l.TokensPerMinute, other.TokensPerMinute),
-	}
-}
-
-// minPositive returns the smaller of two values, treating zero as "unlimited"
-// rather than as the smallest possible value. A dimension nothing declared must
-// not clamp a dimension something else did.
-func minPositive(a, b int) int {
-	switch {
-	case a <= 0:
-		return b
-	case b <= 0:
-		return a
-	case a < b:
-		return a
-	default:
-		return b
-	}
 }
 
 // Granted reports whether the caller's licence covers a capability.
@@ -122,15 +94,6 @@ type KeyStore interface {
 	// Revoke invalidates one key. Absent from the interface on purpose: v1 has
 	// no key management API, and a method nothing calls is a promise nobody
 	// has checked.
-}
-
-// Lister exposes the registered keys.
-//
-// It is separate from KeyStore because only the rate limiter needs the whole
-// list, and folding it into KeyStore would require the Postgres backend to
-// answer a question about every key on a path that runs for every request.
-type Lister interface {
-	Keys() []Principal
 }
 
 // Authenticator turns a request into a Principal.
@@ -228,18 +191,33 @@ func MustPrincipal(ctx context.Context) (Principal, error) {
 	return p, nil
 }
 
-// TenantFromContext is the caller's tenant in the canonical spelling the
-// limiter keys on, or "" for an anonymous request.
+// ScopeFromContext is the caller's tenant and project in the canonical spelling
+// the limiter keys on.
 //
-// Empty rather than a placeholder like "anonymous": a single shared bucket
-// would let one unauthenticated caller exhaust the limit that every anonymous
-// caller shares, which turns a disabled authenticator into a denial of
-// service. Anonymous traffic is instead unlimited by default, which is the
-// honest reading — nothing is being charged, so there is nothing to ration.
-func TenantFromContext(ctx context.Context) string {
+// Both parts are normalised here rather than by each caller, because a limiter
+// that keyed "Acme" and "acme" separately would hand one tenant two full
+// budgets — the same reason the same normalisation has to happen on the
+// configuration side, which is why this mirrors ratelimit.Scope.Normalized
+// rather than inventing a third spelling.
+//
+// An unauthenticated caller gets an empty scope rather than a placeholder like
+// "anonymous": a single shared bucket would let one unauthenticated caller
+// exhaust the limit that every anonymous caller shares, which turns a disabled
+// authenticator into a denial of service. Anonymous traffic is instead
+// unlimited by default, which is the honest reading — nothing is being charged,
+// so there is nothing to ration.
+func ScopeFromContext(ctx context.Context) (tenant, project string) {
 	p, ok := FromContext(ctx)
 	if !ok {
-		return ""
+		return "", ""
 	}
-	return strings.ToLower(strings.TrimSpace(p.Tenant))
+	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	tenant, project = norm(p.Tenant), norm(p.Project)
+	if tenant == "" {
+		// A project with no tenant names a partition of nothing. Dropping it
+		// keeps the pair one the limiter can key on, rather than leaving a
+		// project bucket that no envelope can bound.
+		project = ""
+	}
+	return tenant, project
 }

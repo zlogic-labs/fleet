@@ -39,20 +39,26 @@ func TestBadKeySpecFailsStartup(t *testing.T) {
 	}
 }
 
-// Two spellings of one tenant must not each get a full allowance, and the
+// Two spellings of one scope must not each get a full allowance, and the
 // engine must never see either spelling's credential — fakeEngine fails the test
 // if an Authorization or x-api-key header reaches it.
 func TestTenantNormalisationAndCredentialStrippingEndToEnd(t *testing.T) {
 	var calls atomic.Int64
 	up := fakeEngine(t, &calls)
 	h := gatewayFor(t, Config{
-		Auth:      AuthConfig{Required: true, Keys: []string{"Acme/admin|rpm=1", "acme/admin-2|rpm=1000"}},
+		Auth: AuthConfig{Required: true, Keys: []string{"Acme/research/admin", "acme/research/admin-2"}},
+		RateLimits: LimitConfig{
+			RPM:     1000,
+			Tenants: []string{"Acme|rpm=1"},
+		},
 		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: up.URL}},
 	})
-	if w := post(h, "admin", req); w.Code != http.StatusOK {
+	if w := post(h, "Acme/research/admin", req); w.Code != http.StatusOK {
 		t.Fatalf("first: %d", w.Code)
 	}
-	if w := post(h, "admin-2", req); w.Code != http.StatusTooManyRequests {
+	// The same tenant written differently: the declaration normalised to
+	// "acme", and so must the request's scope, or this gets a second budget.
+	if w := post(h, "acme/research/admin-2", req); w.Code != http.StatusTooManyRequests {
 		t.Errorf("second: %d, want 429 — 'Acme' and 'acme' got separate buckets", w.Code)
 	}
 }

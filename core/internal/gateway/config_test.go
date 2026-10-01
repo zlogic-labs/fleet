@@ -2,9 +2,10 @@ package gateway
 
 import (
 	"log/slog"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 )
@@ -27,7 +28,7 @@ func TestStartupRejectsAuthMisconfiguration(t *testing.T) {
 		{
 			// The shape of a security setting someone believes is on.
 			name: "keys configured but not required",
-			auth: AuthConfig{Keys: []string{"acme/admin"}},
+			auth: AuthConfig{Keys: []string{"acme/research/admin"}},
 			want: "the keys would be ignored",
 		},
 		{
@@ -36,9 +37,17 @@ func TestStartupRejectsAuthMisconfiguration(t *testing.T) {
 			want: "no-slash",
 		},
 		{
-			name: "an unknown limit name",
-			auth: AuthConfig{Required: true, Keys: []string{"acme/admin|rps=10"}},
-			want: "use rpm or tpm",
+			name: "a key spec with no project",
+			auth: AuthConfig{Required: true, Keys: []string{"acme/admin"}},
+			want: "tenant/project/keyid",
+		},
+		{
+			// An old configuration. Rejecting it is the point: an operator who
+			// still believes rpm=10 is in force is worse off than one told it
+			// moved.
+			name: "a key spec still carrying limits",
+			auth: AuthConfig{Required: true, Keys: []string{"acme/research/admin|rpm=10"}},
+			want: "rate_limits.tenants",
 		},
 	}
 	for _, tc := range cases {
@@ -62,16 +71,23 @@ func TestValidAuthConfigStarts(t *testing.T) {
 	_, _, err := Build(Config{
 		Listen:    "127.0.0.1:0",
 		MaxBodyMB: 1,
-		Auth:      AuthConfig{Required: true, Keys: []string{"acme/admin|rpm=10,tpm=1000"}},
+		Auth:      AuthConfig{Required: true, Keys: []string{"acme/research/admin"}},
+		RateLimits: LimitConfig{
+			RPM:      600,
+			Tenants:  []string{"acme|rpm=600,tpm=200000"},
+			Projects: []string{"acme/research|rpm=60,tpm=20000"},
+		},
 	}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("a valid auth config was rejected: %v", err)
 	}
 }
 
-func TestAuthEnvIsRead(t *testing.T) {
+func TestAuthAndLimitEnvIsRead(t *testing.T) {
 	t.Setenv("FLEET_AUTH_REQUIRED", "true")
-	t.Setenv("FLEET_API_KEYS", "acme/admin|rpm=10;other/b|rpm=20")
+	t.Setenv("FLEET_API_KEYS", "acme/research/admin;other/batch/b")
+	t.Setenv("FLEET_RATE_TENANTS", "acme|rpm=600,tpm=200000")
+	t.Setenv("FLEET_RATE_PROJECTS", "acme/research|rpm=60,tpm=20000")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -80,14 +96,19 @@ func TestAuthEnvIsRead(t *testing.T) {
 		t.Error("FLEET_AUTH_REQUIRED=true was not read")
 	}
 	if len(cfg.Auth.Keys) != 2 {
-		t.Errorf("keys = %d, want 2", len(cfg.Auth.Keys))
+		t.Fatalf("keys = %d, want 2", len(cfg.Auth.Keys))
 	}
-	if cfg.Auth.Keys[0] != "acme/admin|rpm=10" {
+	if cfg.Auth.Keys[0] != "acme/research/admin" {
 		t.Errorf("key[0] = %q — the semicolon split mangled it", cfg.Auth.Keys[0])
 	}
-	// os.Environ is process-wide; t.Setenv restores it, but confirm the two
-	// names the doc promises are the two the code reads.
-	if os.Getenv("FLEET_API_KEYS") == "" {
-		t.Error("FLEET_API_KEYS was not visible to the process")
+	if len(cfg.RateLimits.Tenants) != 1 || len(cfg.RateLimits.Projects) != 1 {
+		t.Fatalf("limit lists = %+v, want one tenant and one project", cfg.RateLimits)
+	}
+	// The env path has to resolve the same tables the file path does, or a
+	// containerised deployment is limited by something other than what it was
+	// configured with.
+	p := limiterMust(t, cfg).PolicyFor(ratelimit.Project("acme", "research"))
+	if p.Envelope.RequestsPerMinute != 600 || p.Partition.RequestsPerMinute != 60 {
+		t.Errorf("policies = %+v / %+v, want 600 and 60", p.Envelope, p.Partition)
 	}
 }

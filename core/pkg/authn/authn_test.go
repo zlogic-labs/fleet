@@ -128,41 +128,82 @@ func TestRevokedKeyStopsWorking(t *testing.T) {
 	}
 }
 
-func TestParsePrincipalReadsLimits(t *testing.T) {
-	p, err := ParsePrincipal("acme/team-a|rpm=10,tpm=1000")
+func TestParsePrincipalReadsTenantProjectAndKey(t *testing.T) {
+	p, err := ParsePrincipal("acme/research/team-a")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if p.Tenant != "acme" || p.KeyID != "team-a" {
-		t.Errorf("parsed %+v", p)
+	if p.Tenant != "acme" || p.Project != "research" || p.KeyID != "team-a" {
+		t.Errorf("parsed %+v, want tenant acme, project research, key team-a", p)
 	}
-	if p.RateLimit.RequestsPerMinute != 10 || p.RateLimit.TokensPerMinute != 1000 {
-		t.Errorf("limits = %+v", p.RateLimit)
+}
+
+// A key spec carrying limits is an old configuration. It must be rejected rather
+// than parsed with the numbers dropped: an operator who still believes rpm=10
+// is in force is worse off than one who was told it moved.
+func TestParsePrincipalRejectsLimits(t *testing.T) {
+	_, err := ParsePrincipal("acme/research/team-a|rpm=10,tpm=1000")
+	if err == nil {
+		t.Fatal("a key spec carrying limits must be rejected")
 	}
-	if !p.RateLimit.Set() {
-		t.Error("Set() = false after limits were declared")
+	if !strings.Contains(err.Error(), "rate_limits") {
+		t.Errorf("error %q does not say where limits moved", err)
 	}
 }
 
 // A typo in a key spec must fail at startup, not become a tenant named
 // something nobody intended.
 func TestParsePrincipalRejectsMalformedSpecs(t *testing.T) {
-	for _, spec := range []string{"", "acme", "/key", "acme/", "acme/key|bogus=1", "acme/key|rpm=x"} {
+	// "acme/admin" is the two-part spelling from before projects existed. It is
+	// in this list deliberately: accepting it would create a key with no
+	// partition, so "how much can this project spend" would depend on which
+	// key the caller happened to hold.
+	for _, spec := range []string{"", "acme", "acme/admin", "/key/admin", "acme//admin",
+		"acme/research/", "acme/research/admin/extra"} {
 		if _, err := ParsePrincipal(spec); err == nil {
 			t.Errorf("ParsePrincipal(%q) succeeded, want an error", spec)
 		}
 	}
 }
 
-func TestTenantFromContextNormalises(t *testing.T) {
-	ctx := WithPrincipal(context.Background(), Principal{Tenant: "  Acme  "})
-	// Two spellings of one tenant must reach the same limiter bucket, or each
-	// gets a full allowance.
-	if got := TenantFromContext(ctx); got != "acme" {
-		t.Errorf("TenantFromContext = %q, want %q", got, "acme")
+func TestParseLimitsReadsBothDimensions(t *testing.T) {
+	l, err := ParseLimits("rpm=10,tpm=1000")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	if got := TenantFromContext(context.Background()); got != "" {
-		t.Errorf("anonymous tenant = %q, want empty", got)
+	if l.RequestsPerMinute != 10 || l.TokensPerMinute != 1000 {
+		t.Errorf("limits = %+v", l)
+	}
+	// Either name alone is a valid declaration; the other dimension stays zero
+	// so the caller can fill it from its own defaults.
+	if l, err := ParseLimits("rpm=7"); err != nil || l.TokensPerMinute != 0 {
+		t.Errorf("rpm-only = %+v, err %v", l, err)
+	}
+	// An unknown name is an error, not a skipped field: "rps" would otherwise
+	// leave a deployment with no request limit and no complaint.
+	for _, bad := range []string{"bogus=1", "rpm=x", "rpm"} {
+		if _, err := ParseLimits(bad); err == nil {
+			t.Errorf("ParseLimits(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+func TestScopeFromContextNormalisesBothParts(t *testing.T) {
+	ctx := WithPrincipal(context.Background(), Principal{Tenant: "  Acme ", Project: " Research "})
+	// Two spellings of one scope must reach the same limiter bucket, or each
+	// gets a full allowance.
+	tenant, project := ScopeFromContext(ctx)
+	if tenant != "acme" || project != "research" {
+		t.Errorf("ScopeFromContext = %q/%q, want acme/research", tenant, project)
+	}
+	if tenant, project := ScopeFromContext(context.Background()); tenant != "" || project != "" {
+		t.Errorf("anonymous scope = %q/%q, want empty", tenant, project)
+	}
+	// A project with no tenant names a partition of nothing, and keeping it
+	// would leave a project bucket no envelope could bound.
+	orphan := WithPrincipal(context.Background(), Principal{Project: "research"})
+	if tenant, project := ScopeFromContext(orphan); tenant != "" || project != "" {
+		t.Errorf("orphan project = %q/%q, want empty", tenant, project)
 	}
 }
 
