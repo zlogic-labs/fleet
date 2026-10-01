@@ -25,6 +25,17 @@ type Config struct {
 	Timeouts   TimeoutConfig    `yaml:"timeouts"`
 	MaxBodyMB  int              `yaml:"max_body_mb"`
 	RateLimits LimitConfig      `yaml:"rate_limits"`
+	// ControlPlane is the address of fleet-apiserver. When set, the gateway
+	// learns its endpoints from the operator's inventory reports instead of
+	// only from Upstreams, and the two are merged: static upstreams keep
+	// working for a llama.cpp on a laptop with no cluster at all.
+	ControlPlane ControlPlaneConfig `yaml:"control_plane"`
+}
+
+type ControlPlaneConfig struct {
+	URL   string        `yaml:"url"`
+	Token string        `yaml:"token"`
+	Every time.Duration `yaml:"refresh_every"`
 }
 
 type UpstreamConfig struct {
@@ -99,6 +110,9 @@ func applyEnv(cfg *Config) {
 	setInt(&cfg.RateLimits.TPM, "FLEET_RATE_TPM")
 	setDuration(&cfg.Timeouts.Dial, "FLEET_TIMEOUT_DIAL")
 	setDuration(&cfg.Timeouts.ResponseHdrs, "FLEET_TIMEOUT_RESPONSE_HEADERS")
+	setString(&cfg.ControlPlane.URL, "FLEET_CONTROL_PLANE_URL")
+	setString(&cfg.ControlPlane.Token, "FLEET_CONTROL_PLANE_TOKEN")
+	setDuration(&cfg.ControlPlane.Every, "FLEET_CONTROL_PLANE_REFRESH")
 
 	// A single upstream may be supplied inline, which is the shape of a local
 	// llama.cpp or a vLLM pod that has not been adopted yet.
@@ -148,6 +162,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxBodyMB <= 0 {
 		return fmt.Errorf("max_body_mb must be positive, got %d", c.MaxBodyMB)
+	}
+	if c.ControlPlane.Every < 0 {
+		return fmt.Errorf("control_plane.refresh_every must not be negative")
 	}
 	seen := make(map[string]bool, len(c.Upstreams))
 	for i, up := range c.Upstreams {

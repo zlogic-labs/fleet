@@ -46,9 +46,12 @@ docs/      architecture and ADRs
 ```
 
 Neither `core` nor the console reads Kubernetes. Node and GPU inventory
-arrives from the operator running inside the cluster and is reported to the
-control plane, which is why the cluster page can be empty on a fresh checkout
-and that is the correct state rather than a missing feature.
+arrives from the operator running inside the cluster, which reports it to the
+control plane (`--report-to=http://127.0.0.1:8081`); the gateway then learns
+its endpoints from that same inventory (`FLEET_CONTROL_PLANE_URL`), so
+scaling a deployment reaches the router without restarting anything. A cluster
+page that is empty on a fresh checkout is the correct state rather than a
+missing feature — nothing has reported yet.
 
 ## Try it
 
@@ -77,7 +80,7 @@ synthetic repository. Everything lands in `.dev/`, which is gitignored.
 ./scripts/smoke.sh        # in a second terminal, with dev.sh running
 ```
 
-45 assertions, and it exits non-zero on the first failure. It is safe to re-run.
+52 assertions, and it exits non-zero on the first failure. It is safe to re-run.
 What it covers, and why each check exists:
 
 | Area | Checks |
@@ -85,7 +88,7 @@ What it covers, and why each check exists:
 | OpenAI compatibility | a real completion, a 54-frame stream, a `usage` object on both, `[DONE]`, error envelopes instead of a router's 404 page |
 | Console | the app shell, a deep link, and that each `/assets/*.js` is served as JavaScript **and is not the app shell** — a 200 that is really `index.html` is the failure that hides |
 | CORS | a loopback origin is allowed and a foreign one is not, because the console is on :8080 and the control plane answers on :8081 |
-| Engine profiles | vLLM demands compute 7.5+ and llama.cpp demands none; llama-cpp claims no autoscaling metrics and no engine tokenizer |
+| Engine profiles | vLLM demands compute 7.5+ and llama.cpp demands none; vLLM maps cache occupancy to a real series and publishes KV capacity, llama-cpp publishes queue signals but no occupancy signal and no capacity |
 | Weight formats | a safetensors and a GGUF repository side by side, each passing its own engine and each refused by the other's, with the reason in the message |
 | Operator inventory | counts recomputed from the node list, and `Scheduling` with a reason kept distinct from `Pending` |
 

@@ -16,17 +16,25 @@ import (
 // reads to a client like "this gateway does not host that model" and is far
 // more confusing than an error at call time.
 type Models struct {
-	Endpoints []engine.Endpoint
+	Endpoints func() []engine.Endpoint
 }
 
-func NewModels(eps []engine.Endpoint) *Models { return &Models{Endpoints: eps} }
+// NewModels builds the handler over a function that yields the current
+// endpoints, rather than over a slice.
+//
+// The slice form is the bug this replaces: the endpoint set changes when a
+// deployment scales, so a handler holding the slice it was constructed with
+// serves a model list from whenever the process started. A function defers the
+// read to the request, which is the only time it can be correct.
+func NewModels(eps func() []engine.Endpoint) *Models { return &Models{Endpoints: eps} }
 
 func (h *Models) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	seen := make(map[string]bool, len(h.Endpoints))
+	endpoints := h.Endpoints()
+	seen := make(map[string]bool, len(endpoints))
 	list := openai.ModelList{Object: "list", Data: []openai.Model{}}
 	now := time.Now().Unix()
 
-	for _, ep := range h.Endpoints {
+	for _, ep := range endpoints {
 		if seen[ep.Model] {
 			continue
 		}
@@ -56,7 +64,9 @@ func ownerOf(ep engine.Endpoint) string {
 // entitlement data, and keeping it on a separate path means the compatibility
 // surface stays exactly what OpenAI specifies.
 type Fleet struct {
-	Endpoints []engine.Endpoint
+	// Endpoints is a function for the same reason Models takes one: the set
+	// moves while the process runs.
+	Endpoints func() []engine.Endpoint
 	Samples   func() []Sample
 	Lic       entitlement.License
 	Version   string
@@ -71,8 +81,8 @@ func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 
-	endpoints := make([]endpointStatus, 0, len(h.Endpoints))
-	for _, ep := range h.Endpoints {
+	endpoints := make([]endpointStatus, 0)
+	for _, ep := range h.Endpoints() {
 		endpoints = append(endpoints, endpointStatus{
 			Model:       ep.Model,
 			BaseURL:     ep.BaseURL,

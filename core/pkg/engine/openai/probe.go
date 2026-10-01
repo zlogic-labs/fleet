@@ -49,6 +49,18 @@ func (a *Adapter) Probe(ctx context.Context, ep engine.Endpoint, p engine.Profil
 	if v, ok := a.probeVersion(ctx, ep, p); ok {
 		cap.Version = v
 	}
+	// Capacity last, and softly. It costs one metrics scrape, and an engine
+	// that will not serve metrics must not fail the probe that already
+	// succeeded: chat still works, and a deployment with no published capacity
+	// is a plan to make, not an outage.
+	if p.Metrics.CapacityAvailable() {
+		if _, c, err := engine.NewScrapeClient(0).Scrape(ctx, ep, p); err == nil {
+			cap.Capacity = c
+		}
+	}
+	if cap.Capacity.MaxModelLen == 0 {
+		cap.Capacity.MaxModelLen = cap.MaxModelLen
+	}
 	return cap, nil
 }
 
@@ -142,19 +154,28 @@ func (a *Adapter) probeVersion(ctx context.Context, ep engine.Endpoint, p engine
 		if err != nil {
 			continue
 		}
+		// Every field this needs, in one struct. llama-server nests the build
+		// under build_info while vLLM reports a flat version, and a decoder
+		// that only knew the flat shape would silently produce an empty
+		// version for every llama.cpp deployment — the kind of quiet gap P4
+		// exists to close, where the endpoint answers and Fleet learns nothing.
 		var resp struct {
-			Version string `json:"version"`
-			Build   string `json:"build"`
+			Version    string `json:"version"`
+			Build      string `json:"build"`
+			BuildInfo  string `json:"build_info"`
+			ModelAlias string `json:"model_alias"`
+			TotalSlots int    `json:"total_slots"`
 		}
 		if err := a.client.Do(ctx, "GET", u, nil, &resp); err != nil {
 			continue
 		}
-		if resp.Version != "" {
-			return resp.Version, true
+		for _, candidate := range []string{resp.Version, resp.BuildInfo, resp.Build} {
+			if candidate != "" {
+				return candidate, true
+			}
 		}
-		// llama-server's /props answers with a nested object rather than a
-		// flat version, and the generic decode leaves it empty. Absence is
-		// still a successful probe; the field simply stays unset.
+		// The endpoint answered but declared no build. That is still a
+		// successful probe: the field simply stays unset.
 		return "", true
 	}
 	return "", false

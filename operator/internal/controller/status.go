@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"net"
+	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,7 +30,15 @@ func statusFor(dep *api.FleetDeployment, phase api.DeploymentPhase, reason strin
 	}
 	if res != nil {
 		out.Selector = res.Selector
+		// The port belongs in the status, not just in the gateway's
+		// configuration. An address without one is read as port 80 by
+		// anything that dials it, and the engines listen on 8000 — so a
+		// consumer that trusted this field would time out against a healthy
+		// engine and conclude it was down.
 		out.Address = res.Address
+		if res.Port > 0 {
+			out.Address = net.JoinHostPort(res.Address, strconv.Itoa(int(res.Port)))
+		}
 		if res.GPUPerReplica > 0 {
 			out.GPUPerReplica = res.GPUPerReplica
 		}

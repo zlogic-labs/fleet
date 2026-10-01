@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zlogic-labs/fleet/core/internal/gateway/catalog"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/handler"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
@@ -21,19 +22,31 @@ import (
 //
 // The split from Run exists so that a test can exercise the whole route table
 // with httptest and no listener, and so that main stays a process wrapper.
-func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string) (http.Handler, error) {
-	endpoints := make([]engine.Endpoint, 0, len(cfg.Upstreams))
-	for _, up := range cfg.Upstreams {
-		endpoints = append(endpoints, engine.Endpoint{
-			ID:       up.ID,
-			Model:    up.Model,
-			BaseURL:  up.BaseURL,
-			Replicas: up.Replicas,
-			Labels:   map[string]string{"engine": up.Engine},
-		})
-	}
+//
+// It also returns the refresher, because the endpoint set is live. A handler
+// built over a fixed slice would be correct until the first scale, which is
+// exactly the moment nobody is watching; the handler reads through a
+// function instead and the refresher is what makes that function's answer
+// change.
+func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string) (http.Handler, *catalog.Refresher, error) {
+	static := staticEndpoints(cfg.Upstreams)
 
-	picker := routing.NewRendezvous(endpoints)
+	picker := routing.NewRendezvous(static)
+	refresher := &catalog.Refresher{
+		Client:   catalog.NewClient(cfg.ControlPlane.URL, cfg.ControlPlane.Token),
+		Profiles: engine.BuiltinProfiles(),
+		Log:      log,
+		Interval: cfg.ControlPlane.Every,
+		// Discovered endpoints are added to, never substituted for, the
+		// static ones. An operator pointing at a control plane should not
+		// silently lose a laptop llama.cpp declared in the config file.
+		Merge: static,
+		Apply: picker.Replace,
+	}
+	// The refresher starts with the static set, so a gateway with no control
+	// plane configured behaves exactly as it did before any of this existed.
+	refresher.Set(static)
+
 	proxy := transport.New(transport.Options{
 		Transport: outboundTransport(cfg.Timeouts),
 		Authorize: upstreamAuthorizer(cfg.Upstreams),
@@ -44,6 +57,8 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 		MaxBytes:    int64(cfg.MaxBodyMB) << 20,
 		PrefixRunes: prefixRunes(cfg.Upstreams),
 	})
+
+	current := refresher.Endpoints
 
 	r := chi.NewRouter()
 	r.Use(recoverer(log), requestLog(log))
@@ -60,12 +75,12 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 	})
 
 	r.Route("/v1", func(r chi.Router) {
-		r.Get("/models", handler.NewModels(endpoints).ServeHTTP)
+		r.Get("/models", handler.NewModels(current).ServeHTTP)
 		r.Post("/chat/completions", chat.ServeHTTP)
 	})
 
 	r.Get("/fleet/status", (&handler.Fleet{
-		Endpoints: endpoints,
+		Endpoints: current,
 		Samples:   chat.Samples,
 		Lic:       lic,
 		Version:   version,
@@ -73,14 +88,40 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 
 	r.Mount("/", webui.Handler())
 
-	return r, nil
+	return r, refresher, nil
+}
+
+// staticEndpoints is the config-declared fleet, which never changes on its own.
+func staticEndpoints(ups []UpstreamConfig) []engine.Endpoint {
+	out := make([]engine.Endpoint, 0, len(ups))
+	for _, up := range ups {
+		out = append(out, engine.Endpoint{
+			ID:       up.ID,
+			Model:    up.Model,
+			BaseURL:  up.BaseURL,
+			Replicas: up.Replicas,
+			Labels:   map[string]string{"engine": up.Engine},
+		})
+	}
+	return out
 }
 
 // Run serves until ctx is cancelled, then drains.
 func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Logger, version string) error {
-	handler, err := Build(cfg, lic, log, version)
+	handler, refresher, err := Build(cfg, lic, log, version)
 	if err != nil {
 		return err
+	}
+
+	if cfg.ControlPlane.URL != "" {
+		// The picker the chat handler holds is the one the refresher pushes
+		// into, so a discovered deployment is routable on the next request
+		// rather than the next restart.
+		go func() {
+			if err := refresher.Run(ctx); err != nil {
+				log.Error("endpoint refresh stopped", "err", err)
+			}
+		}()
 	}
 
 	srv := &http.Server{

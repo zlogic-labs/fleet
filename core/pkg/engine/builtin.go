@@ -57,8 +57,22 @@ func VLLMProfile() Profile {
 			Series: map[Signal]string{
 				SignalQueueDepth:  "vllm:num_requests_waiting",
 				SignalRunningReqs: "vllm:num_requests_running",
-				SignalKVCacheUsed: "vllm:gpu_cache_usage_perc",
+				// vllm:kv_cache_usage_perc, not vllm:gpu_cache_usage_perc. The
+				// latter name was never a real metric in any vLLM release — it
+				// was an assumption about which component owns the cache —
+				// and a wrong series name reads as zero usage, which is a
+				// perfectly healthy-looking deployment. Verified against
+				// vllm/v1/metrics/loggers.py on main at 2eaa3bc, 2026-10-01.
+				SignalKVCacheUsed: "vllm:kv_cache_usage_perc",
 			},
+			// Capacity is reported as labels on an info gauge whose value is
+			// always 1. Field names verified in vllm/config/cache.py on main
+			// at 2eaa3bc: kv_cache_size_tokens is "Per-DP-engine KV cache
+			// capacity in tokens (group-aware)" and kv_cache_max_concurrency
+			// is "Per-DP-engine maximum concurrency at max_model_len tokens".
+			InfoGauge:           "vllm:cache_config_info",
+			KVTokensLabel:       "kv_cache_size_tokens",
+			MaxConcurrencyLabel: "kv_cache_max_concurrency",
 		},
 		MinCompute: 75,
 		Notes:      "Requires compute capability 7.5+ (T4, RTX 20-series and newer). No MIG before 7.5.",
@@ -96,15 +110,34 @@ func LlamaCPPProfile() Profile {
 		// already knows. An engine that adds one later gets a new profile.
 		Tokenize: nil,
 		Metrics: MetricsSpec{
-			// llama-server does publish Prometheus metrics, but not vLLM's
-			// series. Until the signal names are mapped deliberately, claiming
-			// none is better than inventing them: an autoscaler reading
-			// undefined series sees zero and adds replicas forever.
-			Path:   "",
-			Series: nil,
+			// llama-server does publish Prometheus metrics, under its own
+			// llamacpp: prefix and with its own names. Two things about it are
+			// worth stating rather than discovering at 3am: the endpoint is
+			// disabled unless the server is started with --metrics, answering
+			// 501 otherwise, and there is no KV cache capacity among them, so
+			// there is nothing to declare an InfoGauge for. Names verified
+			// against tools/server/README.md on master, 2026-10-01.
+			Path: "/metrics",
+			Series: map[Signal]string{
+				// requests_deferred counts requests that are queued rather
+				// than running, which is the same signal vLLM splits across
+				// num_requests_waiting and num_requests_waiting_by_reason.
+				SignalQueueDepth:  "llamacpp:requests_deferred",
+				SignalRunningReqs: "llamacpp:requests_processing",
+				// No cache-usage equivalent is published. SignalKVCacheUsed is
+				// deliberately left unmapped rather than pointed at
+				// llamacpp:n_tokens_max, which is an observed high-water mark
+				// of context size and not an occupancy — reading it as usage
+				// would make a nearly empty server look full.
+			},
+			InfoGauge:           "",
+			KVTokensLabel:       "",
+			MaxConcurrencyLabel: "",
 		},
 		MinCompute: 0,
-		Notes:      "GGUF only. No /tokenize, so prompt counts come from the gateway's own tokenizer. No autoscaling signals; scale by replica count.",
+		Notes: "GGUF only. No /tokenize, so prompt counts come from the gateway's own " +
+			"tokenizer. Metrics require the server to be started with --metrics, and it " +
+			"publishes no KV cache capacity.",
 	}
 }
 

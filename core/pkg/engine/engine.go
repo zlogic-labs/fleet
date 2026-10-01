@@ -83,7 +83,11 @@ type Capability struct {
 	// engine. False is a normal, supported state: llama-server publishes no
 	// vLLM metric set, and a deployment using it scales by replica count.
 	MetricsAvailable bool
-	ProbedAt         time.Time
+	// Capacity is what one replica can hold at once. Zero values mean the
+	// engine published no capacity gauge, which is a fact about the engine
+	// rather than a fault — llama.cpp does not report one.
+	Capacity Capacity
+	ProbedAt time.Time
 }
 
 // Adapter probes a running engine.

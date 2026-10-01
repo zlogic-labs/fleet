@@ -116,8 +116,16 @@ func TestProbeSkipsUndeclaredExtensions(t *testing.T) {
 	if cap.Tokenize {
 		t.Error("Tokenize = true without a probe")
 	}
-	if cap.MetricsAvailable {
-		t.Error("llama-cpp publishes no usable metric set, so autoscaling is not available")
+	// llama-server does publish Prometheus metrics, under its own prefix and
+	// only when started with --metrics, so autoscaling signals are declared.
+	// What it must not claim is a cache-occupancy signal: llamacpp:n_tokens_max
+	// is an observed high-water mark of context size, and reading it as usage
+	// would make a nearly empty server look full.
+	if !cap.MetricsAvailable {
+		t.Error("llama-cpp declares queue and running signals, so autoscaling is available")
+	}
+	if _, ok := engine.LlamaCPPProfile().Metrics.Series[engine.SignalKVCacheUsed]; ok {
+		t.Error("llama-cpp must not claim a KV cache occupancy signal")
 	}
 }
 

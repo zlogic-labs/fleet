@@ -35,10 +35,32 @@ const (
 type MetricsSpec struct {
 	Path   string
 	Series map[Signal]string
+	// InfoGauge names a gauge whose *labels* carry capacity values rather than
+	// whose value does. vLLM reports KV cache capacity this way:
+	// vllm:cache_config_info carries one label per CacheConfig field and a
+	// constant sample value of 1.
+	//
+	// It is separate from Series on purpose. Series drive autoscaling and are
+	// useful on every engine; capacity drives cost allocation and is genuinely
+	// absent on engines that do not report it. Conflating them would force
+	// either a fabricated capacity on llama.cpp or a refusal to autoscale vLLM.
+	InfoGauge string
+	// KVTokensLabel is the label on InfoGauge holding the KV cache capacity in
+	// tokens. On vLLM this is kv_cache_size_tokens.
+	KVTokensLabel string
+	// MaxConcurrencyLabel is the label holding the engine's own estimate of how
+	// many max-length requests fit concurrently at once.
+	MaxConcurrencyLabel string
 }
 
 // Available reports whether this engine can drive autoscaling at all.
 func (m MetricsSpec) Available() bool { return m.Path != "" && len(m.Series) > 0 }
+
+// CapacityAvailable reports whether this engine publishes a KV cache capacity,
+// which is the input to both cost allocation and an autoscaler target.
+func (m MetricsSpec) CapacityAvailable() bool {
+	return m.Path != "" && m.InfoGauge != "" && m.KVTokensLabel != ""
+}
 
 // Candidates are the paths that might answer one question, best first.
 //

@@ -60,6 +60,14 @@ func Weights(in Input) (vol corev1.Volume, mountPath string, err error) {
 	return vol, mount, nil
 }
 
+// EnginePort is the port every rendered engine listens on.
+//
+// One constant rather than three literals because it appears in the Service,
+// the readiness probe, and the address published to the gateway, and a URL
+// built without a port means port 80. Three copies of 8000 with one of them
+// changed is a deployment that is serving and reported dead.
+const EnginePort int32 = 8000
+
 // Engine renders a FleetDeployment into the Service and Deployment that serve
 // it, given a renderer for the chosen engine.
 //
@@ -102,8 +110,8 @@ func Engine(in Input, rd Renderer) (Result, error) {
 			Selector: labels,
 			Ports: []corev1.ServicePort{{
 				Name:       "http",
-				Port:       8000,
-				TargetPort: intstr.FromInt32(8000),
+				Port:       EnginePort,
+				TargetPort: intstr.FromInt32(EnginePort),
 			}},
 			// The engine is not an ingress: no annotation, no host. The
 			// gateway reaches it, and the gateway is the only thing in the
@@ -160,6 +168,7 @@ func Engine(in Input, rd Renderer) (Result, error) {
 		},
 		Selector:      modelName,
 		Address:       addressFor(svcMeta.Name, in.Deployment.Namespace),
+		Port:          EnginePort,
 		Name:          svcMeta.Name,
 		GPUPerReplica: acceleratorsRequested(rd, in),
 		Format:        in.Model.Status.Format,
@@ -320,7 +329,7 @@ func healthProbe(rd Renderer, in Input) *corev1.Probe {
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Path: path,
-				Port: intstr.FromInt32(8000),
+				Port: intstr.FromInt32(EnginePort),
 			},
 		},
 		InitialDelaySeconds: 10,

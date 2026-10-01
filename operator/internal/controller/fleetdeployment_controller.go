@@ -83,6 +83,25 @@ func (r *FleetDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	logger.V(1).Info("reconciled", "phase", phase, "reason", reason, "address", res.Address)
 	st := statusFor(&dep, phase, reason, &res)
 	st.ReadyReplicas, st.Replicas = ready, replicas
+	st.Format = string(model.Status.Format)
+
+	// Only ask a running engine what it is. A deployment that is still
+	// scheduling has nothing to report, and a failed probe leaves the version
+	// unset rather than carrying a guess into the console (P4).
+	//
+	// The Service ClusterIP is preferred over the DNS name for the probe, and
+	// the distinction is not cosmetic: cluster.local only resolves from
+	// inside the cluster, so an operator running on a workstation probes a
+	// name it cannot resolve and reports no version for a perfectly healthy
+	// engine. The IP works from both places. The DNS name still goes in the
+	// status, because it is the address that survives rescheduling and it is
+	// what the in-cluster gateway should use.
+	if phase == api.DeployAvailable && res.Address != "" {
+		target := r.probeTarget(ctx, &dep, &res)
+		if facts := r.probeEndpoint(ctx, &dep, target, profile); facts.Version != "" {
+			st.Version = facts.Version
+		}
+	}
 	return r.status(ctx, &dep, st)
 }
 

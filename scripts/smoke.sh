@@ -20,6 +20,22 @@ API=$CONTROL/api/v1
 pass=0
 fail=0
 
+# Resolved once, up front. Ubuntu ships python3 with no "python" shim, and a
+# script that assumes the name fails every check while reporting dozens of
+# assertion failures that have nothing to do with the code under test — which
+# is worse than no test, because it looks like a regression.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    PY=$candidate
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  printf '%s no python3 or python on PATH; cannot run the JSON checks\n' "$(red 'ERROR')"
+  exit 2
+fi
+
 green() { printf '\033[32m%s\033[0m' "$1"; }
 red()   { printf '\033[31m%s\033[0m' "$1"; }
 
@@ -42,7 +58,7 @@ check() {
 # an expected "" — so a missing entry would silently pass the check that was
 # supposed to prove it exists.
 jqp() {
-  python -c "
+  "$PY" -c "
 import json,sys
 d=json.load(sys.stdin)
 try:
@@ -88,12 +104,12 @@ check "usage total equals prompt + completion" "True" \
 SBODY='{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}'
 S=$(curl -sS -N -X POST "$GATEWAY/v1/chat/completions" -H 'Content-Type: application/json' -d "$SBODY")
 check "stream emits more than one data frame" "True" \
-  "$(printf '%s\n' "$S" | grep -c '^data: ' | python -c 'import sys;print(int(sys.stdin.read()) > 1)')"
+  "$(printf '%s\n' "$S" | grep -c '^data: ' | "$PY" -c 'import sys;print(int(sys.stdin.read()) > 1)')"
 check "stream ends with [DONE]" "True" \
   "$(printf '%s\n' "$S" | grep -q 'data: \[DONE\]' && echo True || echo False)"
 check "stream carries a usage frame" "True" \
   "$(printf '%s\n' "$S" | grep '^data: ' | sed 's/^data: //' \
-     | python -c "
+     | "$PY" -c "
 import sys,json
 for line in sys.stdin:
     line=line.strip()
@@ -173,10 +189,22 @@ check "vllm requires compute 7.5+" "75" \
   "$(printf '%s' "$E" | jqp "[e['minCompute'] for e in d if e['name']=='vllm'][0]")"
 check "llama-cpp claims no compute floor" "0" \
   "$(printf '%s' "$E" | jqp "[e['minCompute'] for e in d if e['name']=='llama-cpp'][0]")"
-# An autoscaler reading a series the engine does not publish sees zero and
-# adds replicas forever. Declaring none is the honest answer.
-check "llama-cpp claims no autoscaling metrics" "False" \
+# llama-server does publish Prometheus metrics under its own llamacpp: prefix,
+# verified against its README. What it must NOT claim is a cache-occupancy
+# signal: llamacpp:n_tokens_max is an observed high-water mark of context size,
+# and an autoscaler reading that as occupancy would never scale down an engine
+# that is nearly empty.
+check "llama-cpp declares autoscaling metrics" "True" \
   "$(printf '%s' "$E" | jqp "[e['metrics'] for e in d if e['name']=='llama-cpp'][0]")"
+check "llama-cpp claims no KV cache occupancy signal" "True" \
+  "$(printf '%s' "$E" | jqp "[not e['kvCacheUsage'] for e in d if e['name']=='llama-cpp'][0]")"
+check "vllm maps KV cache occupancy to a real series" "vllm:kv_cache_usage_perc" \
+  "$(printf '%s' "$E" | jqp "[e['kvCacheUsage'] for e in d if e['name']=='vllm'][0]")"
+check "llama-cpp publishes no KV cache capacity" "False" \
+  "$(printf '%s' "$E" | jqp "[e['capacity'] for e in d if e['name']=='llama-cpp'][0]")"
+# vLLM does report capacity, as labels on an info gauge whose value is always 1.
+check "vllm publishes KV cache capacity" "True" \
+  "$(printf '%s' "$E" | jqp "[e['capacity'] for e in d if e['name']=='vllm'][0]")"
 check "vllm declares autoscaling metrics" "True" \
   "$(printf '%s' "$E" | jqp "[e['metrics'] for e in d if e['name']=='vllm'][0]")"
 check "llama-cpp declares no engine tokenizer" "False" \

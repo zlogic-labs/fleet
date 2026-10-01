@@ -113,6 +113,11 @@ type Result struct {
 	Selector string
 	// Address is the in-cluster endpoint.
 	Address string
+	// Port is the Service port the engine listens on, taken from the rendered
+	// Service rather than assumed. The status and the probe both build a URL
+	// from this, and a URL without a port means port 80 — which is a timeout
+	// against an engine that is serving perfectly well on 8000.
+	Port int32
 	// Name is the rendered workload's name, which is not the
 	// FleetDeployment's: a Service cannot contain the dots a model name
 	// usually has. Reading the status back means using this rather than

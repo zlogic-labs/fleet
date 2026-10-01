@@ -58,9 +58,30 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 
 ### P4 · 自有 CRD，不 adopt 上游 CRD
 
-`FleetDeployment` / `FleetModel` / `FleetCluster` 是我们自己的 API。controller 内部渲染成 KubeRay `RayCluster` 或 AIBrix `StormService`。
+`FleetDeployment` / `FleetModel` 是我们自己的 API。controller 内部渲染成 K8s 原生对象（`Deployment` + `Service`），必要时渲染 gang 调度用的 PodGroup。
 
 推论：上游组件（KubeRay / AIBrix / KAI Scheduler）的版本升级不会成为我们的 API 破坏性变更。
+
+#### 为什么不用 KubeRay（2026-10-01 核实）
+
+**这个结论会过期，所以先记日期和依据。**
+
+vLLM `main` 分支 `vllm/config/parallel.py` 里有硬约束：
+
+```python
+allowed_backends = ("mp", "uni", "external_launcher")
+if self.distributed_executor_backend not in allowed_backends and self.nnodes > 1:
+    raise ValueError("nnodes > 1 can only be set when distributed executor "
+                     "backend is mp, uni or external_launcher.")
+```
+
+**`nnodes > 1` 明确拒绝 ray。** vLLM 走的是 K8s 原生路线：`external_launcher`（靠 `RANK`/`WORLD_SIZE` 环境变量，每 rank 一个 Pod）、或 `mp` + `--nnodes` + `--data-parallel-master-ip`；`data_parallel_external_lb` 的文档原话是 *"useful for a 'one-pod-per-rank' wide-EP setup in Kubernetes"*。
+
+（一次更正：`vllm/executor/ray_executor.py` 返回 404 不是删除，是搬到了 `vllm/v1/executor/`，`parallel.py` 里仍有 `from vllm.v1.executor import ray_utils`。但上面那条约束是真的。）
+
+所以 KubeRay 不是我们的底座，它只是"如果要渲染 RayCluster 时的另一个 renderer"。真要用，加一个 renderer 即可，不改架构。
+
+Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路由器，而 P3 规定路由权归网关（唯一同时掌握 token 计数、配额、成本池水位的一方）。它适合训练 / 批量 / RL 线的后端。
 
 ### P5 · 限流必须硬性预留，不能事后扣减
 
@@ -105,9 +126,11 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
                                                                │ 渲染
                                     ┌──────────────────────────┼──────────────────┐
                                     ▼                          ▼                  ▼
-                             RayCluster              StormService          KAI Scheduler
-                            (KubeRay)               (AIBrix)           (gang + 拓扑)
+                        Deployment + Service           (P/D 分离时)         PodGroup
+                          (vLLM / llama.cpp)             成对的 Pod 组      (gang + 拓扑)
 ```
+
+**渲染目标是 K8s 原生对象，不是 RayCluster**——理由见 P4 的核实记录。TP=8 渲染成 8 个独立 Pod 会被默认调度器**拆开调度**（3 个落 3 个节点，5 个 Pending，模型永远起不来），所以 TP>1 时需要 gang 调度：倾向 scheduler-plugins 的 coscheduling（对 Pod 形状中立），备选 Volcano / KAI Scheduler。
 
 ### 请求路径
 
@@ -134,9 +157,12 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 | `pkg/tokenizer` | 预检计数，三级回退 | `Tokenizer` |
 | `pkg/log` | slog 上下文封装 | `Logger` |
 | `internal/config` | 配置加载（env + yaml） | `Config` |
-| `internal/engine` | 引擎抽象：Adapter（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Profile`, `Adapter` |
+| `internal/engine` | 引擎抽象：Adapter（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Capacity`, `Profile`, `Adapter`, `Scraper` |
 | `pkg/weights` | 权重格式分类，决定谁能加载 | `Format`, `Of` |
-| `internal/gateway/routing` | endpoint 选择（一致性哈希 + 健康） | `Picker`, `HealthTracker` |
+| `pkg/inventory` | operator → 控制面的上报契约（跨 module 共享，所以不能放 internal） | `Report`, `Cluster`, `Deployment` |
+| `pkg/prom` | Prometheus 文本解析（只读四个 gauge，不引 client 库） | `Parse`, `Sample` |
+| `internal/gateway/routing` | endpoint 选择（rendezvous + 健康） | `Picker`, `Rendezvous` |
+| `internal/gateway/catalog` | 端点集合的活订阅：拉控制面 + 抓 load | `Refresher`, `Client` |
 | `internal/gateway/transport` | SSE 透传 + usage tap | `Proxy`, `Tap` |
 | `internal/gateway/auth` | 鉴权与配额上下文 | `Resolver`, `Principal` |
 | `internal/gateway/ratelimit` | 分层限流 | `Limiter` |
@@ -153,7 +179,8 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 |---|---|
 | `api/v1alpha1` | CRD Go 类型（controller-gen 生成 deepcopy） |
 | `internal/controller` | 各 CRD 的 reconciler |
-| `internal/render` | FleetDeployment → RayCluster / StormService |
+| `internal/report` | 周期上报 cluster inventory 与 deployment 状态到控制面（P7：只有 operator 知道 K8s） |
+| `internal/render` | FleetDeployment → K8s 原生 Deployment + Service |
 | `internal/scheduler` | GPU 装箱、拓扑匹配、gang 分配 |
 
 ## 5. 核心数据模型
@@ -161,10 +188,13 @@ TP 的通信开销随卡数超线性增长，故障域随卡数线性膨胀。67
 ### 5.1 引擎能力：Adapter 只有一个，Profile 是数据
 
 ```
-core/internal/engine/engine.go      Adapter 接口（按协议）· Capability · Endpoint
-core/internal/engine/profile.go     Profile · ProfileRegistry · vllm / llama-cpp 两个字面量
-core/internal/engine/openai/        唯一实现：probe 走 Profile 的候选列表
-core/pkg/weights/                   Format 分类（safetensors / gguf / unknown）
+core/pkg/engine/engine.go          Adapter 接口（按协议）· Capability · Capacity · Endpoint
+core/pkg/engine/profile.go         Profile · Profiles · vllm / llama-cpp 两个字面量
+core/pkg/engine/scrape.go          Scraper：一次 /metrics 同时读出 Load 与 Capacity
+core/pkg/engine/openai/            唯一实现：probe 走 Profile 的候选列表
+ core/pkg/weights/                 Format 分类（safetensors / gguf / unknown）
+ core/pkg/inventory/               operator → 控制面的上报契约
+ core/pkg/prom/                    Prometheus 文本解析
 ```
 
 `engine.Profiles.For(name)` 永不失败：没登记的引擎拿到 `DefaultProfile()`，它**只**假设 OpenAI 兼容面，不声明格式、不声明指标。少假设是重点——对未知引擎的猜测会变成错的 readiness 判定，而 readiness 决定流量往哪走。查找带家族前缀回退（`vllm-0.9.1` 仍命中 vLLM），因为拼写差异静默丢掉格式检查会放 GGUF 进 vLLM。
@@ -200,12 +230,9 @@ type FleetDeploymentSpec struct {
     Resources  GPURequest              // {count, model, vramGB, interconnect}
     Autoscaling AutoscalingSpec
 }
-
-// FleetCluster — 多集群注册
-type FleetClusterSpec struct {
-    Endpoint, KubeconfigRef, Scheduler string  // scheduler: default | kai
-}
 ```
+
+多集群不在 v1：第一版只有单集群。`FleetCluster` 不做成 CRD——集群级 inventory 由 operator 在集群内采集后 POST 给控制面（`pkg/inventory.Report`），控制面与网关都不知道 K8s 的存在（P7）。真要多集群，加的是控制面的注册表，不是一个新 CRD。
 
 `admission` 阶段用 `engine.Compatible(model.Format, spec.Engine)` 拒绝格式不匹配的组合，并给出可读原因。控制台用同一个函数的反方向（`engine.EnginesFor`）把不能用的引擎置灰，而不是接受组合后在 admission 失败——那时候调度往返已经花掉了。
 
@@ -263,6 +290,38 @@ type FleetClusterSpec struct {
 
 ## 7. 路由与缓存亲和
 
+### 判据：谁拥有做决定所需的信息，这件事就归谁
+
+| 归属 | 内容 | 依据 |
+|---|---|---|
+| **引擎内部** | prefix cache 命中、`gpu_memory_utilization`、block 分配、`cache_dtype`（fp8/nvfp4/int4）、`kv_offloading_backend`（目标是本实例 CPU）、chunked prefill、P/D 分离 | 依据 vLLM `vllm/config/cache.py`（main，2026-10-01）。`gpu_memory_utilization` 文档原话：*"It does not matter if you have another vLLM instance running on the same GPU... you can set it to 0.5 for each instance."* —— vLLM 自己就假设多实例共存，KV cache 是纯实例内概念。 |
+| **网关** | 选哪个 replica（P3）、prefix 亲和路由 | 只有网关同时知道 token 计数、配额、成本池水位。 |
+
+**网关的 prefix 亲和不搬运 KV cache。** 它是带偏置的负载均衡启发式，命中发生在被选中的引擎内部。
+
+### 两个必须记住的坑
+
+- **坑一（接 P8）**：prefix 亲和把流量钉死在一个副本，其他闲置，而闲置也在烧 GPU·小时。所以"命中率"可能拿"闲置率"换。**亲和必须有幅度上限**，超过就退回轮询。这个限幅参数属于网关，唯一存在理由是 P8。
+- **坑二**：P/D 分离会削弱网关 prefix 亲和 —— 命中的是 P，收益体现在 D 侧，引擎内部已优化过。endpoint 声明 disaggregation 时网关应自动降权/关掉。
+
+### 明确不做
+
+不在网关做跨副本 KV 共享（会把网关变成分布式存储，多一个故障域）。真要跨实例走引擎 connector（LMCache remote / kv-transfer-config），Fleet 只声明配置。
+
+### 容量数字从引擎读，不自己算
+
+`engine.Capacity` 的 `KVTokens` / `MaxConcurrency` 来自引擎自报的 metrics，不来自 Fleet 的推算——只有引擎知道自己怎么切的 KV block，自己算就要重新实现一遍 vLLM 的 memory profiler，然后在下个版本漂移。
+
+vLLM 把容量放在 **info gauge 的 label 上**（值恒为 1），不是放在指标值里：
+
+```
+vllm:cache_config_info{...,kv_cache_size_tokens="616000",kv_cache_max_concurrency="37.67",...} 1.0
+```
+
+`kv_cache_size_tokens` 是 "Per-DP-engine KV cache capacity in tokens (group-aware)"，`kv_cache_max_concurrency` 是 "Per-DP-engine maximum concurrency at max_model_len tokens"。未设置的字段 vLLM 渲染成字符串 `"None"`，所以解析时 `"None"` 必须当"没有"而不是当 0——否则会报出一个 0 token 的 KV cache，然后所有下游容量计算除以它。
+
+llama-server **不报**任何 KV cache 容量等价物，所以 llama-cpp 的 `InfoGauge` 故意留空。
+
 ### 为什么不能轮询
 
 vLLM 的 KV cache 按 prompt 前缀复用。轮询把前缀打散 → 命中率归零 → 同样的 GPU 吞吐掉一个数量级。llm-d 在 MI300X 上的实测：开启 prefix-cache 感知路由后输出 token/s 3x、TTFT 减半。
@@ -270,12 +329,18 @@ vLLM 的 KV cache 按 prompt 前缀复用。轮询把前缀打散 → 命中率�
 ### 策略
 
 ```go
-// key = sha256(system_content + 前 N token)，N 可配（默认 512）
-// → 虚拟节点 → 端点的一致性哈希
-// 候选集内：过滤不健康 → 按 (KV cache 命中率, 队列深度) 打分 → 取最优
+// key = 前 N rune 的 prompt 前缀，N 可配（默认 512）
+// → Rendezvous hashing（不是一致性哈希环）
+// 候选集内：打分 → 取最优
 ```
 
+**用 rendezvous 而不是一致性哈希环**：fleet 是几十个端点不是几万个。rendezvous 在这个量级上分布完全均匀、不需要虚拟节点，而且**移除一个端点时只有落在它身上的 key 会迁移**——其他端点已经缓存的东西原封不动。环在端点增删时会造成大范围重映射，正好把 prefix cache 冲掉，也就是这个方案本来要保护的东西。
+
 熔断按 `engine` + `endpoint` 两级计数，连续失败进入冷却。冷却期内不参与打分，但**健康探测继续**——避免"恢复后仍被标记不健康"的死锁。
+
+**端点集合是活的**：`routing.Rendezvous` 带读写锁并支持 `Replace`，`gateway/catalog` 周期从控制面拉 deployment 状态刷新它。只读 `Available` 且有 address 的部署——`Scheduling` 是承诺，把流量发过去只会拿到 503，而那看起来像引擎繁忙。
+
+**刷新失败时保留旧集合**，不清空。两种失败模式严重不对称：旧端点会把流量发给可能已经消失的引擎，而清空端点集合会把一次上报故障变成一次全面的推理故障。
 
 ## 8. 依赖清单
 
@@ -333,7 +398,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 | 2 | auth + 限流 + 配额预留/结算 | 超限返回 429，预留正确回滚 |
 | 3 | routing：一致性哈希 + 健康 | 同前缀命中同端点，熔断能恢复 |
 | 4 | 计价 + 账本 + ClickHouse | 账实一致，对账任务能跑 |
-| 5 | operator：CRD → RayCluster | k3s 上 `kubectl apply` 能起一个 vLLM |
+| 5 | operator：CRD → K8s 原生 Deployment + Service | k3s 上 `kubectl apply` 能起一个引擎 |
 | 6 | 成本分摊 + 控制台 | 成本报表数字对得上 |
 | 7 | autoscaling + 调度器 | 队列深度驱动扩缩，无抖动 |
 

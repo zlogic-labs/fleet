@@ -14,6 +14,21 @@ API=$BASE/api/v1
 
 say() { printf '%-46s %s\n' "$1" "$2"; }
 
+# Resolved once, up front. Ubuntu ships python3 with no "python" shim, and
+# assuming the name turns every summary below into an empty section that reads
+# as "no models yet" rather than as a broken script.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    PY=$candidate
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "no python3 or python on PATH; cannot print the summary" >&2
+  exit 1
+fi
+
 if ! curl -fsS "$BASE/healthz" >/dev/null 2>&1; then
   echo "no control plane at $BASE — start ./scripts/dev.sh first" >&2
   exit 1
@@ -95,17 +110,20 @@ say "6 requests through the gateway" ok
 
 echo
 echo "state:"
-curl -sS "$API/models" | python -c "
+# No error masking on these: a summary that prints nothing must not look the
+# same as a registry that is genuinely empty, which is how a broken script
+# reads as an empty system.
+curl -sS "$API/models" | "$PY" -c "
 import json,sys
 for m in json.load(sys.stdin):
     # The tokenizer is empty for GGUF by design: it is inside the weights file.
     tok = m['tokenizerId'] or ('embedded' if m['format']=='gguf' else '—')
-    print(f\"  {m['name']:38} {m['format']:12} {m['state']:8} {m['files']:>3} files  tokenizer={tok}\")" 2>/dev/null || true
-curl -sS "$API/engines" | python -c "
+    print(f\"  {m['name']:38} {m['format']:12} {m['state']:8} {m['files']:>3} files  tokenizer={tok}\")"
+curl -sS "$API/engines" | "$PY" -c "
 import json,sys
 for e in json.load(sys.stdin):
-    print(f\"  engine {e['name']:10} loads={e['format']:12} minCompute={e['minCompute']:<4} metrics={str(e['metrics']):5} tokenize={e['tokenize']}\")" 2>/dev/null || true
-curl -sS "$API/storage" | python -c "
+    print(f\"  engine {e['name']:10} loads={e['format']:12} minCompute={e['minCompute']:<4} metrics={str(e['metrics']):5} capacity={str(e['capacity']):5} tokenize={e['tokenize']}\")"
+curl -sS "$API/storage" | "$PY" -c "
 import json,sys
 s=json.load(sys.stdin)
-print(f\"  storage: {s['reachable'] and 'reachable' or 'UNREACHABLE'}  {s['objectCount']} objects  {s['usedBytes']} bytes\")" 2>/dev/null || true
+print(f\"  storage: {s['reachable'] and 'reachable' or 'UNREACHABLE'}  {s['objectCount']} objects  {s['usedBytes']} bytes\")"
