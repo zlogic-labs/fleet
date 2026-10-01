@@ -34,3 +34,6 @@ fleet-data/
 
 # tool caches
 .zlogic/
+
+# Headless Chrome profile used for console screenshots.
+/.chrome-tmp/
