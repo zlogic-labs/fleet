@@ -124,11 +124,10 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
                      └────┬────────────────┘          └─────┘
                           │ UsageEvent                      │ OpenAI 协议
                           ▼                                 ▼
-              ┌──────────────────┐              ┌────────────────────────┐
-              │ Redis (限流/预留) │              │ vLLM / SGLang replicas │
-              │ Postgres (账本)   │              │ (K8s, headless svc)   │
-              │ ClickHouse (用量) │              └───────────┬────────────┘
-              └────────▲─────────┘                          │
+              ┌───────────────────────────┐         ┌────────────────────────┐
+              │ Postgres (限流/配额/账本)  │         │ vLLM / llama.cpp       │
+              │ ClickHouse (用量明细)     │         │ replicas (K8s, headless)│
+              └────────▲──────────────────┘         └───────────┬────────────┘
                        │                            ┌─────────▼──────────┐
    ┌───────────────────┴──────────┐                 │  fleet-controller   │
    │ fleet-apiserver (控制台 API)  │                 │  (Go, k8s operator) │
@@ -145,8 +144,8 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 ### 请求路径
 
 ```
-1. auth        API key → tenant（带缓存，本地 LRU + Redis 回源）
-2. ratelimit   Redis 原子扣减配额，预留 max_tokens
+1. auth        API key → tenant + project（缓存，回源到 Postgres）
+2. ratelimit   预留 prompt + max_tokens；租户行锁下扣减，滑动窗口
 3. route       model + tenant → endpoint 集合 → 一致性哈希选一个
 4. proxy       SSE 透传，边转发边 tap
 5. usage tap   解析 SSE 末帧的 usage；无则按已收 chunk 估算
@@ -180,7 +179,7 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `internal/gateway/quota` | 预留-结算式分层预算（tenant + project 两层） | `Limiter`, `Reservation`, `Exceeded`, `Window` |
 | `internal/gateway/handler` | OpenAI 端点 handler | `Chat`, `Samples` |
 | `pkg/billing` | 计价算术与账本行类型 | `Rate`, `Price`, `Pricer`, `Record`, `Recorder` |
-| `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流读路径、价格本、账本 | `DB`, `KeyStore`, `PolicySource`, `PriceStore`, `Ledger` |
+| `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流读路径与计数器、价格本、账本、配额、成本池 | `DB`, `KeyStore`, `PolicySource`, `RateLimiter`, `Quota`, `PriceStore`, `Ledger`, `CostStore` |
 | `internal/apiserver` | 控制台 REST API | — |
 
 ### `fleet-serving`（module `github.com/zlogic-labs/fleet-serving`，另一仓库）
@@ -430,9 +429,9 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 这直接影响 P/D 分离是否可行，也影响 `FleetDeploymentSpec` 要不要显式声明 `WeightDelivery: shared | nodeLocal`。**倾向**：显式声明，operator 据此选 init container 还是直接挂载——但两条路径都还在 operator 里，尚未实现。
 
-### 11.2 认证与限流：十三处不显然的取舍
+### 11.2 认证与限流：十四处不显然的取舍
 
-阶段 2 已落地（`pkg/authn` + `internal/gateway/ratelimit`）。下面十三处决策看起来是小事，实际每一处都曾写错或差点写错，值得留下理由。
+阶段 2 已落地（`pkg/authn` + `internal/gateway/ratelimit`）。下面十四处决策看起来是小事，实际每一处都曾写错或差点写错，值得留下理由。
 
 **限额绑在租户与 project 上，不绑在 key 上。** key 是凭据：会轮换、会泄漏，不是一个预算。绑上去只有两种结局——要么执行不了（租户再发一把 key 就绕过去了），要么限额跟着一个 secret 的寿命走，调低预算要先做一次轮换，而轮换会把调用方正在用的东西作废。所以 `Principal` 里有 `Tenant` 和 `Project`，没有 `RateLimit`；`api_keys` 表上也没有任何限额列。
 
@@ -468,6 +467,17 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 **限流计数器不是账本，重启即失忆，这是刻意的。** 它是一道闸，不是账。而账本已经落地：`internal/store/postgres` 的 `Ledger` 只增不改，`billing.Record` 是它的行类型，`internal/billing` 是计价算术。两者分开是因为生命周期不同——闸可以丢，账不能。
 
+**计数器有进程内的，也有落表的，取决于有没有数据库——而这个 bug 是静默的。** 最初的滑动窗口是 Go map 里的 60 个桶，`PolicySource` 只从数据库读**策略**、不读计数器。网关跑 N 个副本，有效 RPM 就是限额 × N，**永远如此**，而且**没有任何东西会报告异常**：每个副本单独看都是对的，只是加在一起超了。租户买了 100 rpm，拿到的是每副本 100。LiteLLM 在 [#40291](https://github.com/BerriAI/litellm/issues/40291) 上是同一个形状。
+
+修法是把计数器也放进 Postgres（`rate_counters`，`RateLimiter`），语义与配额一致：租户行锁 + 窗口内求和。没有数据库时仍退回进程内实现——那是给笔记本的，`replicas > 1` 的部署不应该走到那条路。
+
+两处细节值得留着：
+
+- **不共用 `spend_counters`。** 那张表的桶按各条规则自己的窗口对齐，一条 5 小时窗口的规则会把限流器写的 1 秒桶一起求和进去，同一笔 token 被算两次。限流的窗口按定义就是固定 60 秒，1 秒桶是精确的而不是推算出来的，所以它是自己的一张表。
+- **释放要回到当初扣的那一秒。** 进程内版本靠从当前秒往回走找到那一桶；能指出行的版本直接退款到自己被扣的那行，退款离开窗口的时刻才和扣款一样。
+
+**并发测试的量必须远超限额，否则它证明不了任何事。** 第一个版本是 40 个 goroutine 对 50 的限额——**把行锁整个删掉它照样通过**，因为 40 < 50，一个坏掉的实现也无法超发。现在是 200 对 20，删掉 `FOR UPDATE` 会报 `granted 35 against a limit of 20`。
+
 ### 11.3 结算路径：为什么是这三步、这个顺序
 
 阶段 4 的落账已经接到结算上（`internal/gateway/handler/settle.go`）。顺序本身是内容，不是实现细节：
@@ -492,7 +502,9 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 `internal/gateway/quota` + `budget_rules` + `spend_counters`。形状与 `ratelimit` 相同（预留→结算），但**不合并进 `ratelimit`**，原因是两个计数器的生命周期不同：
 
-> **限流是一道闸，账本和预算是钱。** 限流重启即忘，最多丢一分钟的一次突发；预算重启即忘，就是让租户**每次重启都能把额度再花一遍**，永远。所以限流可以是内存环形桶，预算必须是表。
+> **限流是一道闸，账本和预算是钱。** 限流重启即忘，最多丢一分钟的一次突发；预算重启即忘，就是让租户**每次重启都能把额度再花一遍**，永远。
+
+这条曾被用来推出"限流可以是内存环形桶"，而那个推论是错的：进程内的计数器在 N 个副本下就是 N 倍限额，而它自己不报告任何问题——每个副本单独看都是对的。**重启即忘**只说明限流可以接受一个短窗口，它不说明这个窗口可以不出现在副本之间。两者现在都是表，见 §11.2 的第十四处。
 
 **一条规则是四元组，不是两个数字。** `Rule{ScopeKind, ScopeID, Dimension, Limit, Window}`。最初 `tenants` 和 `projects` 上各有一个 `budget_units bigint`，看起来够用，直到它被这样一句话问倒：
 

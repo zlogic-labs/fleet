@@ -25,47 +25,6 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
-// Reservation is a committed deduction awaiting settlement.
-//
-// It is a value rather than a token because the caller holds exactly one and
-// passes it back by value; the shared state lives in the limiter's own map
-// keyed by an opaque id. That keeps the thing that crosses package boundaries
-// trivially copyable, and keeps the mutex out of every caller's struct.
-//
-// It names two buckets rather than one because a reservation is taken against
-// both the tenant envelope and the project partition. Settlement has to release
-// both, and it can only do that if it remembers both — which is also why the
-// two are settled together rather than one being an optimisation of the other.
-type Reservation struct {
-	id     string
-	tenant string
-	// project is the partition charged, empty when the request was charged to
-	// the tenant envelope alone.
-	project string
-	// policies are the limits in force at reservation time, kept for the
-	// refusal path and for reporting. Settlement does not re-read them: a limit
-	// lowered mid-flight must not change what an in-flight request releases.
-	tenantPolicy  Policy
-	projectPolicy Policy
-	// Reserved is what was deducted. Settlement removes all of it and records
-	// the actual amount instead.
-	Reserved int
-	// counted records whether this reservation took a request slot. It is false
-	// when both policies are unlimited, which returns before touching any
-	// counter, and settlement must not then credit back a request that was
-	// never counted.
-	counted bool
-}
-
-// ID identifies the reservation for logs.
-func (r Reservation) ID() string { return r.id }
-
-// TenantName is who the reservation is charged to.
-func (r Reservation) TenantName() string { return r.tenant }
-
-// ProjectName is which partition was also charged, or "" for the envelope only.
-func (r Reservation) ProjectName() string { return r.project }
-
 // Policy is one scope's limits. Zero means unlimited.
 //
 // It is an alias of authn.Limits rather than a second definition of the same
@@ -203,4 +162,15 @@ func RetryAfterSeconds(err error) string {
 		return strconv.Itoa(l.RetryAfter)
 	}
 	return ""
+}
+
+// LimitedError builds a refusal naming which scope ran out and when to come
+// back.
+//
+// Exported for the same reason NewReservation is: a Limiter implemented
+// outside this package has to produce this type, and building it field by field
+// would put the message format in two places, where the second copy is the one
+// nobody updates.
+func LimitedError(scope Scope, kind Kind, what string, used, limit int, reset time.Duration) error {
+	return limited(scope, kind, what, used, limit, reset)
 }

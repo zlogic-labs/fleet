@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
@@ -133,11 +132,15 @@ func (q *Quota) Rules(ctx context.Context, kind quota.ScopeKind, id string) ([]q
 // request. Anything older than the longest window is invisible to every check,
 // so deleting it cannot change an answer.
 func (q *Quota) Prune(ctx context.Context) (int64, error) {
+	// COALESCE because MAX over an empty table returns NULL inside a row, not
+	// no rows: a gateway whose tenants have declared no budget rules still has
+	// spend counters to clear. The floor keeps a day of them in that case, so a
+	// rule added moments later starts from history rather than from nothing.
 	var horizon time.Time
 	err := q.db.pool.QueryRow(ctx,
-		`SELECT now() - make_interval(secs => MAX(window_seconds)) FROM budget_rules`).
-		Scan(&horizon)
-	if err != nil && !isNoRows(err) {
+		`SELECT now() - make_interval(secs => COALESCE(MAX(window_seconds), 86400))
+		   FROM budget_rules`).Scan(&horizon)
+	if err != nil {
 		return 0, fmt.Errorf("postgres: find the longest window: %w", err)
 	}
 	tag, err := q.db.pool.Exec(ctx,
@@ -151,7 +154,3 @@ func (q *Quota) Prune(ctx context.Context) (int64, error) {
 func ruleID(r quota.Rule) string {
 	return fmt.Sprintf("%s/%s/%s/%d", r.ScopeKind, r.ScopeID, r.Dimension, int64(r.Window/time.Second))
 }
-
-// isNoRows reports the "the query matched nothing" case, which for the
-// longest-window lookup means "no rules exist, so nothing needs pruning".
-func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }

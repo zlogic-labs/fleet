@@ -186,3 +186,12 @@ func Load(path string) (Config, error) {
 	applyEnv(&cfg)
 	return cfg, cfg.validate(nil)
 }
+
+func prefixRunes(ups []UpstreamConfig) int {
+	for _, up := range ups {
+		if up.AffinityPrefixRunes > 0 {
+			return up.AffinityPrefixRunes
+		}
+	}
+	return 512
+}

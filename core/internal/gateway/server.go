@@ -193,6 +193,10 @@ func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Log
 		}()
 	}
 
+	if ps := prunersFor(db); len(ps) > 0 {
+		go startPruner(ctx, log, ps...)
+	}
+
 	srv := &http.Server{
 		Addr:    cfg.Listen,
 		Handler: handler,
@@ -237,13 +241,4 @@ func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Log
 	}
 	log.Info("fleet-gateway stopped")
 	return nil
-}
-
-func prefixRunes(ups []UpstreamConfig) int {
-	for _, up := range ups {
-		if up.AffinityPrefixRunes > 0 {
-			return up.AffinityPrefixRunes
-		}
-	}
-	return 512
 }

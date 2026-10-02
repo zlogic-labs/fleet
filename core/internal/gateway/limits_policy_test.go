@@ -34,11 +34,18 @@ func TestPolicyIsCachedPerScope(t *testing.T) {
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
+// limiterMust returns the in-process limiter, which is what a config with no
+// database gets. The database-backed one is exercised against a real
+// PostgreSQL in the store package instead.
 func limiterMust(t *testing.T, cfg Config) *ratelimit.Memory {
 	t.Helper()
 	lim, err := limiterFor(cfg, nil)
 	if err != nil {
 		t.Fatalf("limiterFor: %v", err)
 	}
-	return lim
+	mem, ok := lim.(*ratelimit.Memory)
+	if !ok {
+		t.Fatalf("no database configured, expected the in-process limiter, got %T", lim)
+	}
+	return mem
 }

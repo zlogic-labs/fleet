@@ -213,7 +213,7 @@ func truncateWired(t *testing.T, db *sqlstore.DB) {
 	// in a package this one has never heard of.
 	if _, err := db.Pool().Exec(context.Background(),
 		"TRUNCATE api_keys, projects, tenants, usage_events, price_books, "+
-			"budget_rules, spend_counters CASCADE"); err != nil {
+			"budget_rules, spend_counters, rate_counters CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 }

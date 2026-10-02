@@ -334,6 +334,38 @@ ALTER TABLE spend_counters ADD CONSTRAINT spend_counters_nonnegative CHECK (
     tokens_fresh_spent     >= 0 AND tokens_fresh_reserved  >= 0 AND
     units_spent_micro    >= 0 AND units_reserved_micro >= 0
 );
+
+-- The sliding minute, for the rate limiter.
+--
+-- Deliberately not spend_counters: those buckets are sized to whichever window
+-- a budget rule declares, and a rule summing over its window would pick up a
+-- rate limiter's one-second rows and count them against the budget. The rate
+-- limit is a fixed sixty seconds by definition, so one-second buckets are
+-- exact rather than inferred.
+--
+-- reserved and settled are separate for the same reason they are there: a check
+-- that read only reserved would see the bucket drain after every request
+-- finishes, and a steady stream of short requests would never reach a ceiling.
+CREATE TABLE IF NOT EXISTS rate_counters (
+    scope    text   NOT NULL,
+    second   bigint NOT NULL,
+    requests bigint NOT NULL DEFAULT 0,
+    reserved bigint NOT NULL DEFAULT 0,
+    settled  bigint NOT NULL DEFAULT 0,
+    -- inflight counts reservations outstanding, charged to the second the
+    -- request arrived in and summed without the window filter: a request
+    -- either is running or is not, and ageing it out would report work that is
+    -- still generating as though it had finished.
+    inflight bigint NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, second)
+);
+
+-- Nothing here may go negative. A negative counter raises a scope's apparent
+-- headroom, which is the one direction of error that lets a tenant through.
+ALTER TABLE rate_counters DROP CONSTRAINT IF EXISTS rate_counters_nonnegative;
+ALTER TABLE rate_counters ADD CONSTRAINT rate_counters_nonnegative CHECK (
+    requests >= 0 AND reserved >= 0 AND settled >= 0
+);
 -- What one GPU-hour costs the operator (P8).
 --
 -- Fleet cannot know this: a cloud bill, a colocation contract and a
