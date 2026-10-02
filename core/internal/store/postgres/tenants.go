@@ -31,7 +31,6 @@ type Scope struct {
 type TenantRow struct {
 	ID           string
 	Name         string
-	BudgetUnits  int64
 	RequestLimit int
 	TokenLimit   int
 	Active       bool
@@ -47,7 +46,6 @@ type ProjectRow struct {
 	ID           string
 	TenantID     string
 	Name         string
-	BudgetUnits  int64
 	RequestLimit int
 	TokenLimit   int
 }
@@ -164,9 +162,9 @@ func clamp(partition, envelope int) int {
 
 // CreateTenant inserts a tenant.
 func (s *PolicySource) CreateTenant(ctx context.Context, t TenantRow) error {
-	const q = `INSERT INTO tenants (id, name, budget_units, request_limit, token_limit, active)
-	           VALUES ($1,$2,$3,$4,$5,$6)`
-	_, err := s.db.pool.Exec(ctx, q, t.ID, t.Name, t.BudgetUnits, t.RequestLimit, t.TokenLimit, t.Active)
+	const q = `INSERT INTO tenants (id, name, request_limit, token_limit, active)
+	           VALUES ($1,$2,$3,$4,$5)`
+	_, err := s.db.pool.Exec(ctx, q, t.ID, t.Name, t.RequestLimit, t.TokenLimit, t.Active)
 	if err != nil {
 		return fmt.Errorf("postgres: create tenant %s: %w", t.ID, err)
 	}
@@ -195,9 +193,9 @@ func (s *PolicySource) CreateProject(ctx context.Context, p ProjectRow) error {
 			return fmt.Errorf("project %s/%s: token limit %d exceeds the tenant envelope %d",
 				p.TenantID, p.Name, p.TokenLimit, envTok)
 		}
-		const q = `INSERT INTO projects (id, tenant_id, name, budget_units, request_limit, token_limit)
-		           VALUES ($1,$2,$3,$4,$5,$6)`
-		if _, err := tx.Exec(ctx, q, p.ID, p.TenantID, p.Name, p.BudgetUnits, p.RequestLimit, p.TokenLimit); err != nil {
+		const q = `INSERT INTO projects (id, tenant_id, name, request_limit, token_limit)
+		           VALUES ($1,$2,$3,$4,$5)`
+		if _, err := tx.Exec(ctx, q, p.ID, p.TenantID, p.Name, p.RequestLimit, p.TokenLimit); err != nil {
 			return fmt.Errorf("postgres: create project %s: %w", p.ID, err)
 		}
 		return nil

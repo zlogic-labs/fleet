@@ -141,33 +141,18 @@ func (s *PriceStore) Charge(ctx context.Context, model string, u openai.Usage) (
 // name whose price may since have changed.
 func (s *PriceStore) BookID(model string) string { return s.ids[model] }
 
-// AnyPriced and EstimateAtCheapest forward to the loaded pricer.
+// Predict implements billing.PricerSource.
 //
-// They reload first for the same reason Charge does: the budget's fallback is
-// only meaningful against the current book, and a book that failed to load
-// must read as "nothing priced" so the reservation falls through to zero rather
-// than to a stale rate.
-func (s *PriceStore) AnyPriced() bool {
-	p, _ := s.Pricer(context.Background())
-	return p != nil && p.AnyPriced()
-}
-
-// EstimateAtCheapest prices a token count at the lowest rate in force.
-func (s *PriceStore) EstimateAtCheapest(tokens int) billing.Amount {
-	p, err := s.Pricer(context.Background())
-	if err != nil || p == nil {
-		return 0
+// It reloads first for the same reason Charge does: a budget's reservation has
+// to be against the current book, and a book that failed to load must read as
+// "nothing priced" so the reservation falls through to a zero rather than to a
+// stale rate.
+func (s *PriceStore) Predict(ctx context.Context, model string, promptTokens, maxTokens int) (billing.Prediction, error) {
+	p, err := s.Pricer(ctx)
+	if err != nil {
+		return billing.Prediction{}, err
 	}
-	return p.EstimateAtCheapest(tokens)
-}
-
-// Estimate is the budget's per-model upper bound. See billing.PricerSource.
-func (s *PriceStore) Estimate(model string, promptTokens, maxTokens int) billing.Amount {
-	p, err := s.Pricer(context.Background())
-	if err != nil || p == nil {
-		return 0
-	}
-	return p.Estimate(model, promptTokens, maxTokens)
+	return p.Predict(model, promptTokens, maxTokens), nil
 }
 
 // PutPrice inserts a price book, closing the previous open-ended one.

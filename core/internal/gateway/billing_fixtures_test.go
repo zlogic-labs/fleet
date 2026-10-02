@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
@@ -35,41 +36,73 @@ func buildBillingTokenLimit(t *testing.T, db *sqlstore.DB, tokenLimit int,
 	t.Helper()
 	seedTenant(t, db, "acme", 100, tokenLimit)
 	key := seedKey(t, db, "acme", "research", label)
-	cfg := Config{
-		Listen: "127.0.0.1:0", MaxBodyMB: 1,
-		Auth:      AuthConfig{Required: true},
-		Upstreams: []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: engineURL}},
-	}
-	h, _, err := Build(cfg, db, entitlement.Community(), discardLogger(), "test")
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	return h, key
+	return buildPricedWired(t, db, engineURL), key
 }
 
-// buildBudgeted assembles a gateway whose tenant and project both hold the
-// given budget in whole units, and a key in that project.
+// buildBudgeted assembles a gateway whose tenant and project both hold a budget
+// of the given number of micro-units per hour, and a key in that project.
 //
-// Both levels are set to the same figure so the partition never binds before
-// the envelope does, which keeps the test about one rule at a time.
-func buildBudgeted(t *testing.T, db *sqlstore.DB, budget int64, engineURL, label string) (http.Handler, string) {
+// The figure is in micro-units, which is what the units dimension measures and
+// what the column stores: one unit is a million of them. Naming a parameter
+// "units" and passing 1000 reads as a dollar budget and is a thousandth of one,
+// which is the kind of test that passes for the wrong reason.
+//
+// Both levels carry the same rule so the partition never binds before the
+// envelope does, which keeps a test about one rule from failing on the other.
+// The rule is written to budget_rules rather than a column on the tenant: a
+// budget is a dimension, a window and a scope, and one bigint column could only
+// ever have been the first of those three.
+func buildBudgeted(t *testing.T, db *sqlstore.DB, budgetMicro int64, engineURL, label string) (http.Handler, string) {
 	t.Helper()
-	// seedTenant and seedKey create the tenant and the project; the budgets are
-	// set afterwards because neither takes one.
+	// seedTenant and seedKey create the tenant and the project; the rules go in
+	// afterwards because neither takes one.
 	seedTenant(t, db, "acme", 100, 1_000_000)
 	key := seedKey(t, db, "acme", "research", label)
-	mustExecWired(t, db, `UPDATE tenants SET budget_units = $1 WHERE id = 'acme'`, budget)
-	mustExecWired(t, db, `UPDATE projects SET budget_units = $1 WHERE id = 'acme/research'`, budget)
+	seedBudget(t, db, "tenant", "acme", budgetMicro)
+	seedBudget(t, db, "project", "acme/research", budgetMicro)
+	return buildPricedWired(t, db, engineURL), key
+}
+
+// buildBudgetedTokens is buildBudgeted for a token ceiling instead of a money
+// one, so a test can drive two dimensions against the same tenant.
+func buildBudgetedTokens(t *testing.T, db *sqlstore.DB, tokens int64, engineURL, label string) (http.Handler, string) {
+	t.Helper()
+	seedTenant(t, db, "acme", 100, 1_000_000)
+	key := seedKey(t, db, "acme", "research", label)
+	seedBudgetDimension(t, db, "tenant", "acme", quota.TokensTotal, tokens)
+	seedBudgetDimension(t, db, "project", "acme/research", quota.TokensTotal, tokens)
+	return buildPricedWired(t, db, engineURL), key
+}
+
+// buildPricedWired is buildWired with a model that has a price, because the
+// billing tests need one and the auth tests do not care.
+func buildPricedWired(t *testing.T, db *sqlstore.DB, engineURL string) http.Handler {
+	t.Helper()
 	cfg := Config{
 		Listen: "127.0.0.1:0", MaxBodyMB: 1,
 		Auth:      AuthConfig{Required: true},
+		Database:  DatabaseConfig{URL: "postgres://configured-but-unused"},
 		Upstreams: []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: engineURL}},
 	}
-	h, _, err := Build(cfg, db, entitlement.Community(), discardLogger(), "test")
+	h, _, err := Build(cfg, db, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	return h, key
+	return h
+}
+
+func seedBudget(t *testing.T, db *sqlstore.DB, kind, id string, units int64) {
+	t.Helper()
+	seedBudgetDimension(t, db, kind, id, quota.Units, units)
+}
+
+func seedBudgetDimension(t *testing.T, db *sqlstore.DB, kind, id string, d quota.Dimension, limit int64) {
+	t.Helper()
+	mustExecWired(t, db,
+		`INSERT INTO budget_rules (id, scope_kind, scope_id, dimension,
+		                           limit_value, window_seconds, resolution_seconds)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		kind+"/"+id+"/"+string(d), kind, id, string(d), limit, 3600, 60)
 }
 
 // countRows is how many ledger rows exist, for the "nothing was billed" checks.
@@ -90,7 +123,7 @@ func mustExecWired(t *testing.T, db *sqlstore.DB, q string, args ...any) {
 	}
 }
 
-// seedPrice writes a price book for demo: 1M input tokens at 1000 micro per
+// seedPrice writes a price book for demo: 1M input tokens at 1000 quota units
 // unit, 1M output at 2000.
 func seedPrice(t *testing.T, db *sqlstore.DB) {
 	t.Helper()

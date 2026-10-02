@@ -27,10 +27,10 @@
 CREATE TABLE IF NOT EXISTS tenants (
     id           text PRIMARY KEY,
     name         text        NOT NULL,
-    -- Money caps are in quota units (see pkg/billing). Money is derived at
-    -- month end once the cost pool is known; storing a currency amount here
-    -- would be storing a number Fleet cannot yet compute.
-    budget_units bigint      NOT NULL DEFAULT 0,
+    -- The tenant's budget is not a column here but a set of rows in
+    -- budget_rules. A single bigint could only ever express one dimension over
+    -- one window, and the question "5M tokens per 5 hours, 200 units a month"
+    -- has no answer without both.
     -- The envelope: the most this tenant may spend across every project it
     -- owns. Zero means unlimited.
     --
@@ -59,7 +59,6 @@ CREATE TABLE IF NOT EXISTS projects (
     -- default row would show up in reports as a real cost centre and would have
     -- to be excluded from every one of them. NULL means "not attributed", and
     -- rollups COALESCE it to a single bucket.
-    budget_units  bigint      NOT NULL DEFAULT 0,
     -- The partition: the most this project may spend, which must never exceed
     -- its tenant's envelope. That last rule is NOT a CHECK constraint, because
     -- it compares two rows in two tables. It is enforced on the write path
@@ -219,46 +218,107 @@ CREATE INDEX IF NOT EXISTS usage_events_unestimated_idx
     ON usage_events (occurred_at)
     WHERE NOT usage_known;
 
--- Running spend per scope per window: the input to the budget check.
+-- ── budgets ────────────────────────────────────────────────────────────────
 --
--- This is the third thing that keeps mutable state, and the reason it is a
--- table rather than more in-memory buckets like the rate limiter's is that a
--- budget is money. A rate limit that forgets itself after a restart loses at
--- most one minute of one burst; a budget that forgets itself lets a tenant spend
--- its whole allowance again, every restart, forever.
+-- A budget is a set of rules, not a number. Each rule is "this much of this
+-- thing per this much time", and a scope is refused as soon as one of its rules
+-- would be passed. That is what makes a tenant enforceable on more than one
+-- axis at a time: 5M tokens per 5 hours AND 200 quota units per month are two
+-- rules on the same scope, and the cheaper-to-express one is not the
+-- substitute for the other.
 --
--- spent and reserved are kept apart for the same reason the rate limiter keeps
--- them apart: a request is committed when it reserves, and the reservation has
--- to come back when the real charge is known. Summing them is what the check
--- compares against the budget.
+-- Dimensions exist because "tokens" is not one number. Prompt and completion
+-- are priced differently, and the cached part of a prompt is priced differently
+-- again, so a rule on tokens has to say which of them it means. fresh is the
+-- prompt that was not served from the engine's prefix cache — the only part of
+-- a prompt that costs full input price, and on a deployment where caching works
+-- well it is a small fraction, so a budget stated in total tokens would
+-- overstate the cost by an order of magnitude.
 --
--- The window is a column rather than implicit in the query so a rolling window
--- is a different value in the key, not a different SUM. Which window a tenant
--- is billed over is still undecided (docs/architecture.md §11); this table does
--- not take a position on it, it only has to hold whatever the caller passes.
---
--- scope is the tenant/project path, the same string ratelimit.Scope.Key()
--- produces. Both levels are stored as their own row: a tenant envelope and a
--- project partition are two counters, for the same reason they are two
--- counters in the limiter — merging them is how a tenant's projects end up
--- multiplying its capacity.
-CREATE TABLE IF NOT EXISTS spend_counters (
-    scope        text        NOT NULL,
-    window_start timestamptz NOT NULL,
+-- A scope with no rows is unlimited. That is the whole default: an evaluation,
+-- a laptop, and every tenant nobody has thought about yet all serve traffic
+-- with no budget attached, and no row is the natural way to say so.
 
-    -- Millionths of a quota unit, matching usage_events.amounts_micro so the
-    -- reconciliation pass can rebuild this table from the ledger by SUM.
-    spent_micro    bigint NOT NULL DEFAULT 0,
-    reserved_micro bigint NOT NULL DEFAULT 0,
+CREATE TABLE IF NOT EXISTS budget_rules (
+    id       text PRIMARY KEY,
+    -- tenant or project, matching quota.ScopeKind. NOT NULL-constrained
+    -- because an untyped rule cannot be applied to anything and would be
+    -- invisible until somebody wondered why it had no effect.
+    scope_kind text        NOT NULL CHECK (scope_kind IN ('tenant', 'project')),
+    scope_id   text        NOT NULL,
+    -- Which quantity this rule caps. See quota.Dimension.
+    dimension  text        NOT NULL,
+    -- The allowance, in the dimension's own unit: tokens for the token
+    -- dimensions, millionths of a quota unit for 'units'.
+    limit_value bigint      NOT NULL CHECK (limit_value >= 0),
+    -- The window, in seconds, and the bucket size in seconds.
+    --
+    -- Both are stored rather than only the window because the resolution is
+    -- derived from the duration, and a derived value that is recomputed on
+    -- every read is a value that can drift. Storing it means a rule keeps
+    -- meaning the same thing even if the derivation is retuned.
+    window_seconds   integer NOT NULL CHECK (window_seconds > 0),
+    resolution_seconds integer NOT NULL CHECK (resolution_seconds > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
 
-    PRIMARY KEY (scope, window_start),
-
-    -- Neither may go negative. A counter that did would silently raise the
-    -- tenant's available budget, which is the one direction of error that pays
-    -- out money.
-    CHECK (spent_micro    >= 0),
-    CHECK (reserved_micro >= 0)
+    CHECK (resolution_seconds <= window_seconds)
 );
 
--- Rebuilding from the ledger scans usage_events for one window and one scope.
--- The tenant-time index above already serves it.
+-- The check looks up every rule that applies to a scope.
+CREATE INDEX IF NOT EXISTS budget_rules_scope_idx
+    ON budget_rules (scope_kind, scope_id);
+
+-- One tenant cannot have two rules for the same dimension and window: the two
+-- would be enforced independently and the tighter would silently win while
+-- both read as configured.
+CREATE UNIQUE INDEX IF NOT EXISTS budget_rules_unique_idx
+    ON budget_rules (scope_kind, scope_id, dimension, window_seconds);
+
+-- Running spend per scope, in time buckets.
+--
+-- A bucket, not a single running total, because the windows are rolling and a
+-- rolling window has no fixed start. "The last 5 hours" cannot be one counter
+-- that resets somewhere; it is a sum over the buckets that fall inside it. The
+-- bucket size is chosen per rule so the number of buckets a check has to add up
+-- stays bounded whatever the duration — see quota.ResolutionFor.
+--
+-- All six dimensions live in one row rather than a row per dimension: a check
+-- that spans several dimensions reads them together, and six narrow rows per
+-- bucket per scope is six times the rows for no read saved.
+CREATE TABLE IF NOT EXISTS spend_counters (
+    scope        text        NOT NULL,
+    -- The bucket this row covers, aligned to resolution_seconds. Buckets
+    -- older than the longest window any rule needs are deleted, not kept.
+    bucket_start timestamptz NOT NULL,
+
+    tokens_total_spent     bigint NOT NULL DEFAULT 0,
+    tokens_total_reserved  bigint NOT NULL DEFAULT 0,
+    tokens_input_spent     bigint NOT NULL DEFAULT 0,
+    tokens_input_reserved  bigint NOT NULL DEFAULT 0,
+    tokens_output_spent    bigint NOT NULL DEFAULT 0,
+    tokens_output_reserved bigint NOT NULL DEFAULT 0,
+    tokens_cached_spent    bigint NOT NULL DEFAULT 0,
+    tokens_cached_reserved bigint NOT NULL DEFAULT 0,
+    tokens_fresh_spent     bigint NOT NULL DEFAULT 0,
+    tokens_fresh_reserved  bigint NOT NULL DEFAULT 0,
+    units_spent_micro    bigint NOT NULL DEFAULT 0,
+    units_reserved_micro bigint NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (scope, bucket_start)
+);
+
+-- Every check is a range sum on this, and it is the only index the read path
+-- needs. It is also the primary key, so it is free.
+--
+-- None of these may go negative. A counter that did would silently raise the
+-- scope's available budget, which is the one direction of error that pays out
+-- money.
+ALTER TABLE spend_counters DROP CONSTRAINT IF EXISTS spend_counters_nonnegative;
+ALTER TABLE spend_counters ADD CONSTRAINT spend_counters_nonnegative CHECK (
+    tokens_total_spent     >= 0 AND tokens_total_reserved  >= 0 AND
+    tokens_input_spent     >= 0 AND tokens_input_reserved  >= 0 AND
+    tokens_output_spent    >= 0 AND tokens_output_reserved >= 0 AND
+    tokens_cached_spent    >= 0 AND tokens_cached_reserved >= 0 AND
+    tokens_fresh_spent     >= 0 AND tokens_fresh_reserved  >= 0 AND
+    units_spent_micro    >= 0 AND units_reserved_micro >= 0
+);

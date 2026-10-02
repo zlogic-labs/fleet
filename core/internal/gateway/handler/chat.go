@@ -135,7 +135,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Tokens: promptTokens + maxOut,
 	})
 	if err != nil {
-		rateLimited(w, err)
+		writeRefusal(w, err)
 		return
 	}
 
@@ -215,17 +215,25 @@ func (h *Chat) forward(w http.ResponseWriter, r *http.Request, ep engine.Endpoin
 }
 
 func (h *Chat) fail(w http.ResponseWriter, _ *http.Request, err error) {
-	openai.WriteError(w, err)
+	writeRefusal(w, err)
 }
 
-// rateLimited answers a refused reservation.
+// writeRefusal answers a refused reservation and says when to come back.
 //
-// Retry-After is set from the limiter's own message rather than by recomputing
-// the window here: two places computing the reset time will eventually
-// disagree, and the one that disagrees is the one a client retries against.
-func rateLimited(w http.ResponseWriter, err error) {
+// Retry-After comes from the refusal's own field, never recomputed here: two
+// places computing a reset time will eventually disagree, and the one that
+// disagrees is the one a client retries against. Routing both refusal types
+// through here is the other half — a budget refusal that arrives without the
+// header tells the client to guess, and guessing means retrying early against a
+// budget that is already spent, which is how a tenant turns one 402 into a
+// loop.
+func writeRefusal(w http.ResponseWriter, err error) {
 	if secs := ratelimit.RetryAfterSeconds(err); secs != "" {
 		w.Header().Set("Retry-After", secs)
+	} else if ex, ok := err.(*quota.Exceeded); ok {
+		if after := ex.RetryAfter(); after != "" {
+			w.Header().Set("Retry-After", after)
+		}
 	}
 	openai.WriteError(w, err)
 }

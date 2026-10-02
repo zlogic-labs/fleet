@@ -203,11 +203,17 @@ func buildWired(t *testing.T, db *sqlstore.DB, engineURL string) http.Handler {
 
 func truncateWired(t *testing.T, db *sqlstore.DB) {
 	t.Helper()
-	// price_books is in the list for a reason that cost a debugging session:
-	// without it a price written by one test is still in force for the next,
-	// and a test asserting "this model has no price" quietly fails.
+	// Every table a rule can live in belongs in the list. price_books cost a
+	// debugging session: a price written by one test stayed in force for the
+	// next, and a test asserting "this model has no price" quietly failed.
+	// budget_rules cost the same one more time, for the same reason — a rule
+	// left behind by another test's tenant is a limit this gateway never set,
+	// and it arrives as a 402 that has nothing to do with the code under test.
+	// The two test packages share a database, so "another test" includes tests
+	// in a package this one has never heard of.
 	if _, err := db.Pool().Exec(context.Background(),
-		"TRUNCATE api_keys, projects, tenants, usage_events, price_books, spend_counters CASCADE"); err != nil {
+		"TRUNCATE api_keys, projects, tenants, usage_events, price_books, "+
+			"budget_rules, spend_counters CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 }

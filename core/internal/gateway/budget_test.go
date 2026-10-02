@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 )
 
 // The spend budget, end to end through a real gateway.
@@ -23,7 +25,7 @@ func TestASpentBudgetIsRefusedWithPaymentRequired(t *testing.T) {
 
 	var calls atomic.Int64
 	up := fakeEngine(t, &calls)
-	// One unit of budget against a request that reserves far more.
+	// One micro-unit of budget against a request that reserves orders of magnitude more.
 	h, key := buildBudgeted(t, db, 1, up.URL, "broke")
 
 	w := post(h, key, req)
@@ -55,7 +57,10 @@ func TestTheBudgetAndTheLedgerAgree(t *testing.T) {
 
 	var calls atomic.Int64
 	up := fakeEngine(t, &calls)
-	h, key := buildBudgeted(t, db, 1000, up.URL, "agree")
+	// Sized against seedPrice, which is 1000 units per 1M tokens: three requests of
+	// roughly 4096 output tokens cost about 8 units each, so 100 units is ample
+	// and the test is about the two agreeing rather than about the ceiling.
+	h, key := buildBudgeted(t, db, 100_000_000, up.URL, "agree")
 
 	for i := 0; i < 3; i++ {
 		if w := post(h, key, req); w.Code != 200 {
@@ -76,8 +81,12 @@ func TestTheBudgetAndTheLedgerAgree(t *testing.T) {
 	// and the partition are two views of the same spending, not two spendings.
 	// Summing the rows would double the ledger and prove nothing, so each is
 	// compared on its own.
+	// The column names come from the dimension rather than being written here:
+	// hardcoding them is how a renamed column turns this assertion into a SQL
+	// error instead of a comparison.
+	spent, _ := quota.Units.Columns()
 	rows, err := db.Pool().Query(context.Background(),
-		`SELECT scope, spent_micro FROM spend_counters ORDER BY scope`)
+		`SELECT scope, `+spent+` FROM spend_counters ORDER BY scope`)
 	if err != nil {
 		t.Fatalf("read the counters: %v", err)
 	}

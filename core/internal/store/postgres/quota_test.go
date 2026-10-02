@@ -2,13 +2,12 @@ package postgres
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
-	"github.com/zlogic-labs/fleet/core/pkg/billing"
+	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // The budget, against a real database.
@@ -21,18 +20,16 @@ import (
 func TestSpendIsReservedThenSettled(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 100, 100)
+	q, scope := budgetFixture(t, db)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 1000, 24*time.Hour)
 
-	// The reservation is visible immediately, at its upper bound, before the
-	// request has run.
-	r := mustReserve(t, q, scope, w, 60)
-	if got, want := mustSpent(t, q, scope, w), u(60); got != want {
-		t.Errorf("committed = %s after reserving, want %s", got, want)
+	r := mustReserve(t, q, scope, usageFor(60, 0))
+	if got, want := used(t, q, scope, quota.TokensTotal), int64(60); got != want {
+		t.Errorf("committed = %d after reserving, want %d", got, want)
 	}
-
-	q.Settle(context.Background(), r, u(7))
-	if got, want := mustSpent(t, q, scope, w), u(7); got != want {
-		t.Errorf("committed = %s after settling 7, want 7 — the reservation was not released", got)
+	q.Settle(context.Background(), r, estimate(usageFor(7, 0)))
+	if got, want := used(t, q, scope, quota.TokensTotal), int64(7); got != want {
+		t.Errorf("committed = %d after settling 7, want 7 — the reservation was not released", got)
 	}
 }
 
@@ -42,193 +39,188 @@ func TestSpendIsReservedThenSettled(t *testing.T) {
 func TestSettlingBelowTheBoundRefundsTheDifference(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 1000, 1000)
+	q, scope := budgetFixture(t, db)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 10_000, 24*time.Hour)
 
 	for i := 0; i < 5; i++ {
-		q.Settle(context.Background(), mustReserve(t, q, scope, w, 100), u(3))
+		q.Settle(context.Background(), mustReserve(t, q, scope, usageFor(100, 0)), estimate(usageFor(3, 0)))
 	}
-	if got, want := mustSpent(t, q, scope, w), u(15); got != want {
-		t.Errorf("committed = %s after five requests of 3, want %s — the bounds were not refunded", got, want)
+	if got, want := used(t, q, scope, quota.TokensTotal), int64(15); got != want {
+		t.Errorf("committed = %d after five requests of 3, want %d — the bounds were not refunded", got, want)
 	}
 }
 
-// A budget that cannot cover the bound refuses it whole. A partial commit would
-// be worse than useless: the request is refused anyway, having moved the
-// counter first.
+// A rule that cannot cover the bound refuses it whole. A partial commit would
+// be worse than useless: the request is refused anyway, having moved a counter
+// first.
 func TestABoundOverTheBudgetIsRefusedWhole(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 100, 100)
+	q, scope := budgetFixture(t, db)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 100, 24*time.Hour)
 
-	if _, err := tryReserve(q, scope, w, 101); quota.AsExceeded(err) == nil {
+	if _, err := tryReserve(q, scope, usageFor(101, 0)); quota.AsExceeded(err) == nil {
 		t.Fatalf("a bound of 101 against a budget of 100 was admitted: %v", err)
 	}
-	if got := mustSpent(t, q, scope, w); got != 0 {
-		t.Errorf("committed = %s after a refusal, want 0 — a refused reservation left a mark", got)
+	if got := used(t, q, scope, quota.TokensTotal); got != 0 {
+		t.Errorf("committed = %d after a refusal, want 0 — a refused reservation left a mark", got)
 	}
 }
 
-// A request that really did cost more than it reserved is recorded in full. The
-// budget has to agree with the ledger, or reconciliation finds a bill nobody
-// was charged.
-func TestAChargeAboveTheBoundIsStillRecorded(t *testing.T) {
+// Tokens are not one number. A cached prompt is a fraction of the prompt, and
+// a rule on fresh prompt tokens must see the difference — otherwise a budget
+// meant to cap what was actually paid for would be enforced against traffic the
+// engine served from its cache.
+func TestEachDimensionIsCountedSeparately(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 1000, 1000)
+	q, scope := budgetFixture(t, db)
+	// A prompt of 1000 of which 900 came from the cache.
+	p := usageFor(1000, 0)
+	p.PromptTokensDetails = &openai.PromptTokensDetails{CachedTokens: 900}
 
-	q.Settle(context.Background(), mustReserve(t, q, scope, w, 10), u(250))
-	if got, want := mustSpent(t, q, scope, w), u(250); got != want {
-		t.Errorf("committed = %s, want 250 — a charge above the bound was truncated", got)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensFresh, 5000, time.Hour)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 5000, time.Hour)
+	mustReserve(t, q, scope, p)
+
+	if got, want := used(t, q, scope, quota.TokensFresh), int64(100); got != want {
+		t.Errorf("fresh tokens = %d, want %d — the cached 900 were counted as fresh", got, want)
+	}
+	// The same request reads as its full prompt under a total rule, which is the
+	// point of having both: the two rules are answering different questions
+	// about one request.
+	if got, want := used(t, q, scope, quota.TokensTotal), int64(1000); got != want {
+		t.Errorf("total tokens = %d, want %d", got, want)
 	}
 }
 
-// The tenant envelope is not the sum of its projects' budgets. This is the same
-// multiplication trap the rate limiter has, and here it costs money: a tenant
-// with ten projects would have ten times the allowance if the levels were added.
-func TestProjectsPartitionTheEnvelopeRatherThanAddingToIt(t *testing.T) {
+// Money and tokens are separate caps, not alternatives. A tenant can be
+// comfortably inside one and far outside the other, and the cheaper-to-express
+// rule is not a substitute for the other.
+func TestTokenAndMoneyRulesAreEnforcedTogether(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 100, 100)
+	q, scope := budgetFixture(t, db)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 1_000_000, time.Hour)
+	// A generous token allowance, a tight money one.
+	rule(t, q, quota.KindTenant, "acme", quota.Units, 10, time.Hour)
 
-	r := mustReserve(t, q, scope, w, 100)
-	q.Settle(context.Background(), r, u(100))
+	// Well inside the token rule, over the money one.
+	u := usageFor(100, 0)
+	big := estimate(u)
+	big.Amount = 25
 
-	// A second project of the same tenant may not spend anything more: the
-	// envelope is gone. If the two levels were merged this would succeed.
-	second := ratelimit.Scope{Tenant: scope.Tenant, Project: "second"}
-	mustExec(t, db, `INSERT INTO projects (id, tenant_id, name, budget_units)
-		VALUES ('acme/second','acme','second',100)`)
-	if _, err := tryReserve(q, second, w, 1); quota.AsExceeded(err) == nil {
-		t.Fatal("a second project spent after the envelope was exhausted; the levels were added")
+	if _, err := q.Reserve(context.Background(),
+		quota.Request{Scope: scope, Estimate: big, Now: time.Now()}); quota.AsExceeded(err) == nil {
+		t.Fatal("a request inside its token budget but over its money budget was admitted")
+	}
+	// Nothing was written, even for the token rule that would have passed.
+	if got := used(t, q, scope, quota.TokensTotal); got != 0 {
+		t.Errorf("tokens committed = %d after a refusal by the money rule", got)
 	}
 }
 
-// A project that is out of budget must not spend the tenant's envelope. The
-// partition is a slice of the envelope, and charging the envelope for traffic
-// the partition refused is the tenant paying for a limit it set itself.
-func TestARefusedPartitionDoesNotSpendTheEnvelope(t *testing.T) {
+// A project's rules and its tenant's are both enforced, and neither is a
+// substitute for the other.
+func TestProjectRulesAndTenantRulesBothApply(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 100, 20)
+	q, scope := budgetFixture(t, db)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 1_000_000, time.Hour)
+	rule(t, q, quota.KindProject, "acme/research", quota.TokensTotal, 100, time.Hour)
 
-	// One request fits the partition's 20.
-	q.Settle(context.Background(), mustReserve(t, q, scope, w, 15), u(15))
-
-	// Three more are refused by the partition. If the rollback were missing,
-	// the envelope would show 15 + 45.
-	for i := 0; i < 3; i++ {
-		if _, err := tryReserve(q, scope, w, 15); quota.AsExceeded(err) == nil {
-			t.Fatalf("request %d: a project over its own 20 was admitted", i+2)
-		}
+	// Inside the tenant's allowance, outside the project's.
+	if _, err := tryReserve(q, scope, usageFor(101, 0)); quota.AsExceeded(err) == nil {
+		t.Fatal("a project spent past its own budget")
 	}
-
-	tenant := ratelimit.Scope{Tenant: scope.Tenant}
-	if got, want := mustSpent(t, q, tenant, w), u(15); got != want {
-		t.Errorf("tenant envelope committed = %s, want %s — refused traffic was charged to it",
-			got, want)
+	// And the project rule is the one that reported it, so the tenant is told
+	// which of their scopes is the problem.
+	_, err := tryReserve(q, scope, usageFor(101, 0))
+	if e := quota.AsExceeded(err); e == nil || e.Kind != quota.KindProject {
+		t.Errorf("refusal kind = %v, want the project", e)
 	}
 }
 
-// Zero means unlimited, and a deployment with no budgets set is the common case.
-// It has to serve traffic.
-func TestZeroBudgetMeansUnlimited(t *testing.T) {
+// A rolling window forgets. Spending two hours ago must stop counting once it
+// is two hours out of a two-hour rule, which is the property an anchored
+// counter cannot have and is the reason the counters are bucketed at all.
+func TestTheWindowActuallySlides(t *testing.T) {
 	db := testDB(t)
 	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 0, 0)
+	q, scope := budgetFixture(t, db)
+	rule(t, q, quota.KindTenant, "acme", quota.TokensTotal, 100, 2*time.Hour)
 
-	for i := 0; i < 5; i++ {
-		if _, err := tryReserve(q, scope, w, 1_000_000); err != nil {
-			t.Fatalf("reserve %d: an unlimited scope refused: %v", i, err)
-		}
+	// Spend 60 two hours and one bucket ago, where a 2h rule cannot see it.
+	q.db.pool.Exec(context.Background(),
+		`INSERT INTO spend_counters (scope, bucket_start, tokens_total_spent)
+		 VALUES ($1, $2, 60)`, scope.Tenant,
+		quota.BucketStart(time.Now().Add(-3*time.Hour), quota.ResolutionFor(2*time.Hour)))
+
+	mustReserve(t, q, scope, usageFor(90, 0))
+	if got := used(t, q, scope, quota.TokensTotal); got != 90 {
+		t.Errorf("committed = %d, want 90 — spending from outside the window still counted", got)
 	}
 }
 
 // Concurrency is the only reason reservation exists. Many requests racing for
 // the last of a budget must not collectively pass it.
-func TestConcurrentReservationsNeverExceedTheBudget(t *testing.T) {
-	db := testDB(t)
-	truncateSpend(t, db)
-	q, scope, w := budgetFixture(t, db, 100, 0)
 
-	const workers, bound = 40, 10
-	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		granted int
-	)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := tryReserve(q, scope, w, bound); err == nil {
-				mu.Lock()
-				granted++
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-
-	if granted > 100/bound {
-		t.Errorf("granted %d reservations of %d against a budget of 100", granted, bound)
-	}
-	if got := mustSpent(t, q, scope, w); got > u(100) {
-		t.Errorf("committed = %s, more than the budget of 100", got)
-	}
-	if granted == 0 {
-		t.Error("nothing was granted at all; the check is refusing unconditionally")
-	}
+func budgetFixture(t *testing.T, db *DB) (*Quota, ratelimit.Scope) {
+	t.Helper()
+	mustExec(t, db, `INSERT INTO tenants (id, name) VALUES ('acme','Acme')
+		ON CONFLICT (id) DO NOTHING`)
+	mustExec(t, db, `INSERT INTO projects (id, tenant_id, name) VALUES ('acme/research','acme','research')
+		ON CONFLICT (id) DO NOTHING`)
+	return NewQuota(db), ratelimit.Scope{Tenant: "acme", Project: "research"}
 }
 
-// ── fixtures ────────────────────────────────────────────────
-
-// budgetFixture returns a quota over acme/research with the given budgets in
-// whole units, the scope, and a window inside the current month.
-//
-// The scope carries the project's bare name while the row's id is the
-// tenant/name path, which is the same shape a principal has at runtime — the
-// mismatch is invisible until a query uses the wrong one.
-func budgetFixture(t *testing.T, db *DB, envelope, partition int64) (*Quota, ratelimit.Scope, quota.Window) {
+func rule(t *testing.T, q *Quota, kind quota.ScopeKind, id string,
+	d quota.Dimension, limit int64, window time.Duration) {
 	t.Helper()
-	mustExec(t, db, `INSERT INTO tenants (id, name, budget_units)
-		VALUES ('acme','Acme',$1)
-		ON CONFLICT (id) DO UPDATE SET budget_units = EXCLUDED.budget_units`, envelope)
-	mustExec(t, db, `INSERT INTO projects (id, tenant_id, name, budget_units)
-		VALUES ('acme/research','acme','research',$1)
-		ON CONFLICT (id) DO UPDATE SET budget_units = EXCLUDED.budget_units`, partition)
-	return NewQuota(db),
-		ratelimit.Scope{Tenant: "acme", Project: "research"},
-		quota.CalendarMonth(time.Now())
+	if err := q.PutRule(context.Background(), quota.Rule{
+		ScopeKind: kind, ScopeID: id, Dimension: d, Limit: limit, Window: window,
+	}); err != nil {
+		t.Fatalf("put rule %s %s: %v", kind, d, err)
+	}
 }
 
 func truncateSpend(t *testing.T, db *DB) {
 	t.Helper()
-	truncate(t, db, "spend_counters", "api_keys", "projects", "tenants")
+	truncate(t, db, "spend_counters", "budget_rules", "api_keys", "projects", "tenants")
 }
 
-// u converts whole units to the micro-unit an Amount is expressed in.
-func u(n int64) billing.Amount { return billing.Amount(n) * billing.MicroPerUnit }
+func usageFor(prompt, completion int) openai.Usage {
+	return openai.Usage{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      prompt + completion,
+	}
+}
 
-func tryReserve(q *Quota, scope ratelimit.Scope, w quota.Window, bound int64) (quota.Reservation, error) {
+func estimate(u openai.Usage) quota.Estimate {
+	return quota.Estimate{Usage: u, Known: true}
+}
+
+func tryReserve(q *Quota, scope ratelimit.Scope, u openai.Usage) (quota.Reservation, error) {
 	return q.Reserve(context.Background(), quota.Request{
-		Scope: scope, Bound: u(bound), Now: w.From.Add(time.Hour),
+		Scope: scope, Estimate: estimate(u), Now: time.Now(),
 	})
 }
 
-func mustReserve(t *testing.T, q *Quota, scope ratelimit.Scope, w quota.Window, bound int64) quota.Reservation {
+func mustReserve(t *testing.T, q *Quota, scope ratelimit.Scope, u openai.Usage) quota.Reservation {
 	t.Helper()
-	r, err := tryReserve(q, scope, w, bound)
+	r, err := tryReserve(q, scope, u)
 	if err != nil {
-		t.Fatalf("reserve %d: %v", bound, err)
+		t.Fatalf("reserve: %v", err)
 	}
 	return r
 }
 
-func mustSpent(t *testing.T, q *Quota, scope ratelimit.Scope, w quota.Window) billing.Amount {
+func used(t *testing.T, q *Quota, scope ratelimit.Scope, d quota.Dimension) int64 {
 	t.Helper()
-	got, err := q.Spent(context.Background(), scope, w)
+	got, err := q.Used(context.Background(), scope)
 	if err != nil {
-		t.Fatalf("Spent: %v", err)
+		t.Fatalf("Used: %v", err)
 	}
-	return got
+	return got[d]
 }

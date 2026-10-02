@@ -68,10 +68,6 @@ type Recorder interface {
 // what lets the settlement path be tested against a fixed price and a real
 // deployment keep its prices fresh.
 //
-// BookID is part of the same contract rather than a separate lookup because the
-// two must agree: a record quoting a price book its charge did not come from is
-// an audit trail that lies.
-//
 // An error from Charge means "no price for this model", never "the price is
 // zero". A tenant with an unbilled model is a tenant nobody notices is being
 // given a GPU for free.
@@ -83,21 +79,26 @@ type PricerSource interface {
 	Charge(ctx context.Context, model string, u openai.Usage) (Amount, error)
 	// BookID names the book in force for a model, or "" when it has none.
 	BookID(model string) string
-	// AnyPriced reports whether the book holds any price at all. It is how a
-	// caller tells "this model has no price" from "nothing is priced", which
-	// are different problems with different answers.
-	AnyPriced() bool
-	// Estimate is the upper bound on what a request that has not run yet may
-	// cost. It is what a budget reserves.
-	Estimate(model string, promptTokens, maxTokens int) Amount
-	// EstimateAtCheapest prices a token count at the lowest rate in force,
-	// regardless of model.
+	// Predict is what a request that has not run yet may cost, in tokens as
+	// well as money. A budget reserves against it, and a budget can be stated
+	// in tokens, so the token breakdown has to come out of the same place as
+	// the price rather than being recomputed by each caller.
 	//
-	// This exists for one caller: reserving a budget for a model that has no
-	// price. Reserving nothing there would leave the budget unenforced for
-	// exactly the models nobody has priced yet, so the fallback has to be a
-	// real number. It is an over-estimate by construction, which means an
-	// unpriced model stops a tenant sooner rather than later — the direction
-	// where being wrong is recoverable.
-	EstimateAtCheapest(tokens int) Amount
+	// Known is false when the model has no price: the figures are then a floor
+	// rate rather than this model's own, which is an over-estimate on purpose.
+	// Reserving nothing for an unpriced model would leave the budget
+	// unenforced for exactly the models nobody has priced yet.
+	Predict(ctx context.Context, model string, promptTokens, maxTokens int) (Prediction, error)
+}
+
+// Prediction is an upper bound on one request's cost, in every dimension.
+type Prediction struct {
+	Usage  openai.Usage
+	Amount Amount
+	// Known is false when the model had no price and these figures come from
+	// the cheapest rate in force instead.
+	Known bool
+	// Model the prediction was made for, which is what a caller must record:
+	// the resolved name, never the string the client sent.
+	Model string
 }

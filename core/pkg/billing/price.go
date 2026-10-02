@@ -32,6 +32,13 @@ const UnitsPer = 1_000_000
 // decide the bill. Anything not modelled here is billed as the rate that
 // contains it, which is stated explicitly rather than left to chance — see
 // Pricer.charge.
+// The unit is a whole quota unit per UnitsPer tokens, so the smallest price
+// expressible is one unit per million — a millionth of a dollar. That covers
+// every hosted model and is below anything llama.cpp charges, but it is a floor
+// and not a coincidence: a per-token rate in integer money would need a scale
+// fine enough to survive a one-token request, and the ledger already carries
+// micro-units so that the arithmetic stays integral. A model priced below the
+// floor needs a finer unit here, not a float.
 type Rate struct {
 	// Input is a fresh prompt token. Prompt tokens that hit the prefix cache
 	// are Cached instead.

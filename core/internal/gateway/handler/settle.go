@@ -104,7 +104,11 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, bookin
 	// The budget settles with the same figure the ledger records, so the
 	// budget and the invoice can never disagree about a request.
 	if h.Budget != nil {
-		h.Budget.Settle(settleCtx, booking, rec.Amount)
+		h.Budget.Settle(settleCtx, booking, quota.Estimate{
+			Usage:  rec.Usage,
+			Amount: rec.Amount,
+			Known:  rec.UsageKnown,
+		})
 	}
 
 	if h.Recorder == nil {
