@@ -36,14 +36,22 @@ These are the rules the code is written against. Changing one requires an ADR.
 
 ## Layout
 
-Two Go modules, split so that P7 is a compile error rather than a convention.
+This repository holds the gateway and everything about money: tenants, keys,
+quotas, the ledger and the cost pool. The Kubernetes controller is a separate
+repository, [fleet-serving](https://github.com/zlogic-labs/fleet-serving), so
+that the module graph makes P7 a compile error rather than a convention —
+nothing reachable from a gateway process can pull in `client-go`.
 
 ```
 core/      gateway, control plane, billing, storage        no k8s dependency
-operator/  CRDs, reconcilers, GPU scheduling               depends on core
 web/       operator console (React + antd)                 builds into core
 docs/      architecture and ADRs
 ```
+
+The two repositories talk over one versioned contract, `PUT /api/v1/inventory`
+(`core/pkg/inventory`). That is the whole surface between them: fleet-serving
+reads Kubernetes because only it can, and pushes what it finds; it never calls
+back into the gateway.
 
 Neither `core` nor the console reads Kubernetes. Node and GPU inventory
 arrives from the operator running inside the cluster, which reports it to the
@@ -308,6 +316,17 @@ Requires Go 1.26+ and Node 20+.
 
 `scripts/dev.sh`, `scripts/seed.sh` and `scripts/smoke.sh` do not need make —
 the Makefile targets are aliases so the sequences are discoverable.
+
+`make e2e` is the one target that needs both repositories, because it is the
+only test that goes from a CRD to an inference through the real gateway. Clone
+the two side by side and the default works:
+
+```sh
+git clone https://github.com/zlogic-labs/fleet
+git clone https://github.com/zlogic-labs/fleet-serving
+```
+
+Otherwise point `FLEET_SERVING_DIR` at the fleet-serving checkout.
 
 The console bundle is built by `web/` and embedded into the gateway binary; it
 is not committed. A fresh clone still compiles — the binary serves a

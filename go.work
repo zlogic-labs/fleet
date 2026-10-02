@@ -1,6 +1,6 @@
+// The repository holds one Go module. The workspace file exists so that
+// `go test ./...` and the Makefile's package patterns resolve from the
+// repository root; a single module does not otherwise need one.
 go 1.26.4
 
-use (
-	./core
-	./operator
-)
+use ./core

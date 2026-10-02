@@ -10,9 +10,12 @@
 set -euo pipefail
 
 ROOT=${ROOT:-/mnt/d/Workspace/zlogic-fleet}
+# The Kubernetes controller lives in its own repository, zlogic-labs/fleet-serving.
+SERVING=${FLEET_SERVING_DIR:-$ROOT/../fleet-serving}
 FLEET_HOME=${FLEET_HOME:-/root/fleet}
 NS=${NS:-fleet}
 UNIT_DIR=/etc/systemd/system
+SKIP_OPERATOR=
 
 say() { printf '\n== %s\n' "$1"; }
 
@@ -28,7 +31,14 @@ mkdir -p "$FLEET_HOME/bin" "$FLEET_HOME/state"
 for cmd in fleet-gateway fleet-apiserver; do
   (cd "$ROOT/core" && CGO_ENABLED=0 go build -o "$FLEET_HOME/bin/$cmd" "./cmd/$cmd")
 done
-(cd "$ROOT/operator" && CGO_ENABLED=0 go build -o "$FLEET_HOME/bin/fleet-operator" ./cmd/manager)
+# fleet-serving is a separate checkout. Skipping it rather than failing keeps
+# the gateway and the control plane installable on a host that only runs them.
+if [ -d "$SERVING" ]; then
+  (cd "$SERVING" && CGO_ENABLED=0 go build -o "$FLEET_HOME/bin/fleet-operator" ./cmd/manager)
+else
+  echo "  fleet-serving not found at $SERVING; skipping fleet-operator"
+  SKIP_OPERATOR=1
+fi
 
 # The gateway's upstream is the Service the operator rendered. Its ClusterIP is
 # not known until something is deployed, and it changes if the Service is
@@ -123,6 +133,7 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
+if [ -z "$SKIP_OPERATOR" ]; then
 cat > "$UNIT_DIR/fleet-operator.service" <<EOF
 [Unit]
 Description=Fleet operator (reconciles FleetModel and FleetDeployment)
@@ -138,23 +149,32 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 systemctl daemon-reload
-systemctl enable fleet-operator fleet-apiserver fleet-upstream fleet-gateway >/dev/null
-systemctl restart fleet-operator fleet-apiserver
+systemctl enable fleet-apiserver fleet-upstream fleet-gateway >/dev/null
+systemctl restart fleet-apiserver
+UNITS="fleet-apiserver fleet-gateway"
+if [ -z "$SKIP_OPERATOR" ]; then
+  systemctl enable fleet-operator >/dev/null
+  systemctl restart fleet-operator
+  UNITS="$UNITS fleet-operator"
+fi
 
-say "waiting for a deployment to exist"
-for _ in $(seq 1 90); do
-  kubectl get fleetdeployment -n "$NS" >/dev/null 2>&1 && break
-  sleep 2
-done
-# The upstream oneshot is RemainAfterExit, so restarting the gateway does not
-# re-run it and the gateway would keep whatever address was resolved last.
-systemctl restart fleet-upstream
+if [ -z "$SKIP_OPERATOR" ]; then
+  say "waiting for a deployment to exist"
+  for _ in $(seq 1 90); do
+    kubectl get fleetdeployment -n "$NS" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  # The upstream oneshot is RemainAfterExit, so restarting the gateway does not
+  # re-run it and the gateway would keep whatever address was resolved last.
+  systemctl restart fleet-upstream
+fi
 systemctl restart fleet-gateway
 
 say "status"
-for u in fleet-operator fleet-apiserver fleet-gateway; do
+for u in $UNITS; do
   printf '  %-18s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"
 done
 printf '\n  console  http://127.0.0.1:8080\n'

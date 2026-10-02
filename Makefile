@@ -8,18 +8,17 @@
 CGO_ENABLED ?= 0
 GOBIN       := $(CURDIR)/bin
 # core holds the two processes an installation runs: the gateway that serves
-# the OpenAI API, and the control plane. operator/ holds the Kubernetes
-# controller, kept in its own module so nothing in core can reach for
-# client-go by accident.
+# the OpenAI API, and the control plane. The Kubernetes controller lives in its
+# own repository (zlogic-labs/fleet-serving) and its own module, so nothing in
+# core can reach for client-go by accident.
 CORE_CMDS   := fleet-gateway fleet-apiserver
-OPERATOR_CMD := operator/cmd/manager
-MODS        := $(wildcard core operator)
+MODS        := core
 PKGS        := $(MODS:%=%/...)
 
-# The operator console is an npm project whose output is embedded into
-# core/internal/gateway/webui/assets. Keeping the two in one repository means
-# the Go build has a single checkout to depend on, and `make build` can embed a
-# current console without a second repository to pin.
+# The console is an npm project whose output is embedded into
+# core/internal/gateway/webui/dist. Building it here rather than in a separate
+# repository means `make build` can embed a current console with no second
+# checkout to pin.
 WEB_DIR    := web
 WEB_OUT    := $(WEB_DIR)/dist
 WEB_DIST   := core/internal/gateway/webui/dist
@@ -74,33 +73,21 @@ engine-image: ## Stage a real llama.cpp image and a real quantized model into k3
 
 .PHONY: e2e
 e2e: ## Pull, deploy to k3s, and infer through the gateway
-	./scripts/e2e.sh
-
-# The CRD manifests are generated, not hand-written, and a deployment that
-# ships a stale CRD fails in a way that looks like a controller bug. The
-# generator is pinned because a newer one changes the emitted schema.
-CONTROLLER_GEN_VERSION := v0.17.3
-.PHONY: operator-manifests
-operator-manifests: ## Regenerate the CRD manifests and deepcopy functions
-	$(CONTROLLER_GEN) object paths=./operator/api/...
-	$(CONTROLLER_GEN) crd paths=./operator/api/... 		output:crd:artifacts:config=operator/config/crd/bases
-	cd operator && go mod tidy
-
-CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+	FLEET_SERVING_DIR=$${FLEET_SERVING_DIR:-$$(cd .. && pwd)/fleet-serving} ./scripts/e2e.sh
 
 .PHONY: build
 build: ## Compile every command for the host platform into ./bin
 	@mkdir -p $(GOBIN)
-	@for cmd in $(CMDS); do \
+	@for cmd in $(CORE_CMDS); do \
 		echo "  build $$cmd"; \
 		CGO_ENABLED=$(CGO_ENABLED) go build -o $(GOBIN)/$$cmd ./core/cmd/$$cmd || exit 1; \
 	done
 
 .PHONY: build-release
-build-release: web operator-manifests ## Cross-compile for every supported platform
+build-release: web ## Cross-compile for every supported platform
 	@for target in $(RELEASE_TARGETS); do \
 		os=$${target%/*}; arch=$${target#*/}; \
-		for cmd in $(CMDS); do \
+		for cmd in $(CORE_CMDS); do \
 			echo "  build $$cmd for $$target"; \
 			CGO_ENABLED=$(CGO_ENABLED) GOOS=$$os GOARCH=$$arch \
 				go build -o $(GOBIN)/$$os-$$arch/$$cmd ./core/cmd/$$cmd || exit 1; \

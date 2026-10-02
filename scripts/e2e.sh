@@ -10,6 +10,10 @@
 set -uo pipefail
 
 ROOT=${ROOT:-/mnt/d/Workspace/zlogic-fleet}
+# The Kubernetes controller lives in its own repository, zlogic-labs/fleet-serving.
+# Clone the two side by side and the default below is right; otherwise point
+# FLEET_SERVING_DIR at the checkout. This is the only place Fleet needs both.
+SERVING=${FLEET_SERVING_DIR:-$ROOT/../fleet-serving}
 FLEET_HOME=${FLEET_HOME:-/root/fleet}
 NS=${NS:-fleet}
 GATEWAY=${GATEWAY:-127.0.0.1:8080}
@@ -38,7 +42,11 @@ trap cleanup EXIT
 
 # ------------------------------------------------------------------ 1. CRDs
 head_ "1/6  custom resource definitions"
-kubectl apply -f "$ROOT/operator/config/crd/bases/" >/dev/null 2>&1
+if [ ! -d "$SERVING/config/crd/bases" ]; then
+  bad "fleet-serving is not checked out at $SERVING — set FLEET_SERVING_DIR"
+  exit 1
+fi
+kubectl apply -f "$SERVING/config/crd/bases/" >/dev/null 2>&1
 if kubectl get crd fleetdeployments.fleet.zlogic.com >/dev/null 2>&1; then
   ok "FleetDeployment CRD is established"
 else
@@ -50,7 +58,7 @@ kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create ns "$NS" >/dev/null
 head_ "2/6  a model and a deployment, declared"
 kubectl delete fleetdeployment --all -n "$NS" --ignore-not-found >/dev/null 2>&1
 kubectl delete fleetmodel --all -n "$NS" --ignore-not-found >/dev/null 2>&1
-kubectl apply -f "$ROOT/operator/config/samples/" >/dev/null 2>&1
+kubectl apply -f "$SERVING/config/samples/" >/dev/null 2>&1
 if kubectl get fleetmodel qwen-0.5b-gguf -n "$NS" >/dev/null 2>&1; then
   ok "FleetModel accepted"
 else
@@ -95,7 +103,7 @@ assert_contains "the format was inferred, not declared" \
 # -------------------------------------------------------------- 3. reconcile
 head_ "3/6  the operator reconciles it"
 mkdir -p "$FLEET_HOME/bin"
-(cd "$ROOT/operator" && go build -o "$FLEET_HOME/bin/fleet-operator" ./cmd/manager) || {
+(cd "$SERVING" && go build -o "$FLEET_HOME/bin/fleet-operator" ./cmd/manager) || {
   bad "the operator does not build"; exit 1; }
 nohup "$FLEET_HOME/bin/fleet-operator" \
   --metrics-bind-address :9090 --health-probe-bind-address :9091 \

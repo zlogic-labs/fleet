@@ -32,9 +32,9 @@
 
 | 轴 | 是什么 | 数量 | 落在哪 |
 |---|---|---|---|
-| 怎么说话 | `engine.Adapter` | **1 个** | `core/internal/engine/openai` |
-| 找什么 | `engine.Profile` | N 个，纯数据 | `core/internal/engine/profile.go` |
-| 渲染成什么 | renderer | N 个 | operator 模块（尚未实现） |
+| 怎么说话 | `engine.Adapter` | **1 个** | `core/pkg/engine/openai` |
+| 找什么 | `engine.Profile` | N 个，纯数据 | `core/pkg/engine/profile.go` |
+| 渲染成什么 | renderer | N 个，注册进 `render.Registry` | fleet-serving 的 `internal/render` |
 
 `Adapter` **按协议**分，不按厂商分。引擎差异全部是 `Profile` 里的字面量：能加载什么权重格式、健康检查端点候选、要额外探测哪些扩展、指标路径与 series 名、最低 compute capability。
 
@@ -103,7 +103,9 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 
 `core` 模块不依赖任何 k8s 库。这不是洁癖：gateway 镜像要小、启动要快、贡献者不该为了改一个 handler 而下载整个 k8s.io。
 
-推论：**两个 Go module**。`core`（无 k8s 依赖）+ `operator`（依赖 k8s + core）。边界由编译器强制，不靠 code review 自觉。
+推论：**两个 Go module，两个仓库**。`core`（无 k8s 依赖，主仓 `zlogic-labs/fleet`）+ `fleet-serving`（依赖 k8s + core，`zlogic-labs/fleet-serving`）。边界由编译器强制，不靠 code review 自觉。
+
+拆成两个仓库而不是一个仓库两个目录，是因为拆仓前唯一需要钉死的就是两仓之间的那条契约。放在一起时它是个"顺手改一下就行"的内部调用；分仓之后它是公开接口，改它要发两个版本、放两个 release note。**在还便宜的时候定契约，比在已经依赖它的时候定便宜。**
 
 ### P8 · 计费是成本分摊，不是余额扣减
 
@@ -154,9 +156,9 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 
 ## 4. 模块划分
 
-依赖方向严格单向：`pkg` ← `core/internal` ← `cmd`。`operator` 单向依赖 `core`。
+依赖方向严格单向：`pkg` ← `core/internal` ← `cmd`。`fleet-serving` 单向依赖 `core`。
 
-### `core`（module `github.com/zlogic-labs/fleet`，零 k8s 依赖）
+### `core`（module `github.com/zlogic-labs/fleet/core`，零 k8s 依赖）
 
 | 包 | 职责 | 关键类型 |
 |---|---|---|
@@ -181,7 +183,7 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流读路径、价格本、账本 | `DB`, `KeyStore`, `PolicySource`, `PriceStore`, `Ledger` |
 | `internal/apiserver` | 控制台 REST API | — |
 
-### `operator`（module `.../fleet/operator`）
+### `fleet-serving`（module `github.com/zlogic-labs/fleet-serving`，另一仓库）
 
 | 包 | 职责 |
 |---|---|
@@ -190,6 +192,8 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `internal/report` | 周期上报 cluster inventory 与 deployment 状态到控制面（P7：只有 operator 知道 K8s） |
 | `internal/render` | FleetDeployment → K8s 原生 Deployment + Service |
 | `internal/scheduler` | GPU 装箱、拓扑匹配、gang 分配 |
+
+它通过 `require github.com/zlogic-labs/fleet/core v…` 钉住主仓的一个版本，**不使用 `replace`**：本地联调把替换写进 `go.work`（已 gitignore），因为 `go.mod` 里的 `replace` 会跟着每个 `go get` 它的下游走，那是给库代码的禁忌。
 
 ## 5. 核心数据模型
 
@@ -202,7 +206,7 @@ core/pkg/engine/scrape.go          Scraper：一次 /metrics 同时读出 Load �
 core/pkg/engine/openai/            唯一实现：probe 走 Profile 的候选列表
  core/pkg/cost/                      成本池：日历月、时间积分、分摊
  core/pkg/weights/                 Format 分类（safetensors / gguf / unknown）
- core/pkg/inventory/               operator → 控制面的上报契约
+ core/pkg/inventory/               fleet-serving → 控制面的上报契约
  core/pkg/prom/                    Prometheus 文本解析
 ```
 
@@ -241,7 +245,7 @@ type FleetDeploymentSpec struct {
 }
 ```
 
-多集群不在 v1：第一版只有单集群。`FleetCluster` 不做成 CRD——集群级 inventory 由 operator 在集群内采集后 POST 给控制面（`pkg/inventory.Report`），控制面与网关都不知道 K8s 的存在（P7）。真要多集群，加的是控制面的注册表，不是一个新 CRD。
+多集群不在 v1：第一版只有单集群。`FleetCluster` 不做成 CRD——集群级 inventory 由 fleet-serving 在集群内采集后 `PUT` 给控制面（`pkg/inventory.Report`），控制面与网关都不知道 K8s 的存在（P7）。真要多集群，加的是控制面的注册表，不是一个新 CRD。
 
 `admission` 阶段用 `engine.Compatible(model.Format, spec.Engine)` 拒绝格式不匹配的组合，并给出可读原因。控制台用同一个函数的反方向（`engine.EnginesFor`）把不能用的引擎置灰，而不是接受组合后在 admission 失败——那时候调度往返已经花掉了。
 
@@ -369,7 +373,7 @@ vLLM 的 KV cache 按 prompt 前缀复用。轮询把前缀打散 → 命中率�
 | `google/uuid` | ID | |
 | `gopkg.in/yaml.v3` | 配置 | 不引 koanf，配置结构简单不值得多一个依赖 |
 
-### operator 依赖
+### fleet-serving 依赖
 
 `sigs.k8s.io/controller-runtime`、`k8s.io/{api,apimachinery,client-go}`、`sigs.k8s.io/yaml`
 
@@ -377,11 +381,11 @@ KubeRay / AIBrix 的 CRD **用 `unstructured` 消费**，不引它们的 Go clie
 
 ### 代码生成
 
-| 工具 | 产出 |
-|---|---|
-| `sqlc` | `core/internal/store/postgres/*.sql.go` |
-| `controller-gen` | `operator/api/v1alpha1/zz_generated.deepcopy.go` + CRD yaml |
-| `goimports` | 格式化 |
+| 工具 | 产出 | 仓库 |
+|---|---|---|
+| `sqlc` | `core/internal/store/postgres/*.sql.go` | fleet |
+| `controller-gen` | `api/v1alpha1/zz_generated.deepcopy.go` + CRD yaml | fleet-serving |
+| `goimports` | 格式化 | 两个 |
 
 ## 9. 本地开发环境
 
@@ -407,7 +411,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 | 2 | auth + 限流 + 配额预留/结算 | 超限返回 429，预留正确回滚（已完成） |
 | 3 | routing：一致性哈希 + 健康 | 同前缀命中同端点，熔断能恢复 |
 | 4 | 计价 + 账本 + ClickHouse | 账实一致，对账任务能跑（计价与 PostgreSQL 账本已落地，ClickHouse 明细与对账任务尚未） |
-| 5 | operator：CRD → K8s 原生 Deployment + Service | k3s 上 `kubectl apply` 能起一个引擎 |
+| 5 | fleet-serving：CRD → K8s 原生 Deployment + Service | k3s 上 `kubectl apply` 能起一个引擎（已落地，`make e2e` 18 条断言） |
 | 6 | 成本分摊 + 控制台 | 成本报表数字对得上 |
 | 7 | autoscaling + 调度器 | 队列深度驱动扩缩，无抖动 |
 
