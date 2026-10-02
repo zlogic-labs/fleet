@@ -42,7 +42,7 @@ func gatewayFor(t *testing.T, cfg Config) http.Handler {
 	if cfg.DefaultMaxTokens == 0 {
 		cfg.DefaultMaxTokens = 4096
 	}
-	h, _, err := Build(cfg, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	h, _, err := Build(cfg, nil, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

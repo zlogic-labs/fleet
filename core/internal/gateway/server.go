@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/webui"
+	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
@@ -25,12 +25,17 @@ import (
 // The split from Run exists so that a test can exercise the whole route table
 // with httptest and no listener, and so that main stays a process wrapper.
 //
+// db may be nil, which is the whole-database-in-memory configuration. It is a
+// parameter rather than something Build opens because the pool has a lifetime
+// that outlives this function: whoever opens it closes it, and a Build that
+// opened one would leak it on every error return.
+//
 // It also returns the refresher, because the endpoint set is live. A handler
 // built over a fixed slice would be correct until the first scale, which is
 // exactly the moment nobody is watching; the handler reads through a
 // function instead and the refresher is what makes that function's answer
 // change.
-func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string) (http.Handler, *catalog.Refresher, error) {
+func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logger, version string) (http.Handler, *catalog.Refresher, error) {
 	static := staticEndpoints(cfg.Upstreams)
 
 	// Validated here as well as in Load. Load is the path a config file takes,
@@ -42,7 +47,7 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 		return nil, nil, err
 	}
 
-	keys, err := keyStore(cfg)
+	keys, err := keyStore(cfg, db)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -70,7 +75,7 @@ func Build(cfg Config, lic entitlement.License, log *slog.Logger, version string
 		RetainCap: 1 << 20,
 	})
 
-	limiter, err := limiterFor(cfg)
+	limiter, err := limiterFor(cfg, db)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -141,39 +146,33 @@ func staticEndpoints(ups []UpstreamConfig) []engine.Endpoint {
 	return out
 }
 
-// keyStore builds the credential store from configuration.
+// keyStore builds the credential store.
 //
-// The return type is the interface, not *authn.Memory, and that is the whole
-// point of the signature: returning a nil *Memory in an interface field produces
-// a non-nil interface holding a nil pointer, so `store == nil` downstream is
-// false and a gateway with authentication disabled rejects every request
-// because it believes it has a key store that answers "no" to everything.
-func keyStore(cfg Config) (authn.KeyStore, error) {
-	if !cfg.Auth.Required || len(cfg.Auth.Keys) == 0 {
-		return nil, nil
-	}
-	store := authn.NewMemory()
-	for i, spec := range cfg.Auth.Keys {
-		p, err := authn.ParsePrincipal(spec)
-		if err != nil {
-			return nil, fmt.Errorf("auth.keys[%d]: %w", i, err)
-		}
-		// The key id is the credential. A real deployment mints random
-		// strings; here the operator names them, which is what makes a
-		// configuration file reviewable and a revoked key identifiable in a
-		// log.
-		//
-		// Scoped by tenant and project rather than by key id alone, because two
-		// tenants may both name a key "admin" and one tenant must not be able
-		// to revoke or impersonate the other's.
-		store.Put(p.Tenant+"/"+p.Project+"/"+p.KeyID, p, time.Time{})
-	}
-	return store, nil
-}
+// A database, when configured, wins over the config file's key list. Not as a
+// precedence rule but because the two answer different questions: the file says
+// "these keys exist", the database says "these keys exist and here is what they
+// are allowed to do". A gateway pointed at Postgres and holding a stale key list
+// from a laptop experiment would otherwise accept credentials the tenant has
+// since revoked.
+//
+// The return type is the interface, not a concrete pointer, and that is the
+// whole point of the signature: returning a nil *authn.Memory in an interface
+// field produces a non-nil interface holding a nil pointer, so `store == nil`
+// downstream is false and a gateway with authentication disabled rejects every
+// request because it believes it has a key store that answers "no" to
+// everything. The same trap applies to a nil *postgres.KeyStore.
 
 // Run serves until ctx is cancelled, then drains.
 func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Logger, version string) error {
-	handler, refresher, err := Build(cfg, lic, log, version)
+	db, err := openDatabase(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	if db != nil {
+		defer db.Close()
+	}
+
+	handler, refresher, err := Build(cfg, db, lic, log, version)
 	if err != nil {
 		return err
 	}

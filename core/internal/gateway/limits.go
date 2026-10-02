@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
+	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 )
 
@@ -171,21 +172,59 @@ func parseLimitSpec(spec string, parts int) (ratelimit.Scope, authn.Limits, erro
 // same resolution, so in practice it is always nil — but a caller that built a
 // Config by hand and skipped validation would otherwise get a gateway running
 // with the server defaults and no sign that its declared limits were discarded.
-func limiterFor(cfg Config) (*ratelimit.Memory, error) {
+//
+// A database, when configured, supplies the policies instead of the config
+// tables. The per-scope cache is kept either way, and for the same reason: a
+// limit read once and reused is what lets Reserve stay a single lock over
+// in-memory counters rather than a transaction. The cost is the same contract
+// as the config path — lowering a limit takes effect on the next process, not
+// the next request.
+func limiterFor(cfg Config, db *sqlstore.DB) (*ratelimit.Memory, error) {
 	tables, err := resolveLimits(cfg.RateLimits)
 	if err != nil {
 		return nil, err
 	}
-	cache := sync.Map{}
+
+	// The policy source owns its own context and its own per-call deadline.
+	// It cannot be given one from here: this function returns, and a context
+	// with a deferred cancel is already cancelled by the time the first request
+	// looks a policy up — which silently turns every database lookup into a
+	// failure, and a failed lookup returns the server defaults, so every tenant
+	// becomes unlimited.
+	cache := &policyCache{}
+	var src *sqlstore.PolicySource
+	if db != nil {
+		src = sqlstore.NewPolicySource(db, tables.defaults)
+	}
 	return ratelimit.NewMemory(func(scope ratelimit.Scope) ratelimit.Policies {
-		key := scope.Normalized().Key()
-		if cached, ok := cache.Load(key); ok {
-			return cached.(ratelimit.Policies)
-		}
-		p := tables.policies(scope.Normalized())
-		cache.Store(key, p)
-		return p
+		return cache.get(scope, func(s ratelimit.Scope) ratelimit.Policies {
+			if src == nil {
+				return tables.policies(s)
+			}
+			return src.Policies(s)
+		})
 	}), nil
+}
+
+// policyCache memoises one scope's policy.
+//
+// Load-then-Store, not LoadOrStore: two concurrent first-requests for one scope
+// may both read the database and both store, and the loser discards a value
+// equal to the winner's. Coalescing them onto a single in-flight read needs a
+// per-key lock and buys one query, at the cost of a much more complicated
+// structure, on a path that runs once per scope per process.
+type policyCache struct {
+	m sync.Map
+}
+
+func (c *policyCache) get(scope ratelimit.Scope, load func(ratelimit.Scope) ratelimit.Policies) ratelimit.Policies {
+	key := scope.Normalized().Key()
+	if cached, ok := c.m.Load(key); ok {
+		return cached.(ratelimit.Policies)
+	}
+	p := load(scope.Normalized())
+	c.m.Store(key, p)
+	return p
 }
 
 // TrimTenant normalises a tenant name for use as a map key.

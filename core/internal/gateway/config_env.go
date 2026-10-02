@@ -31,6 +31,11 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.ControlPlane.URL, "FLEET_CONTROL_PLANE_URL")
 	setString(&cfg.ControlPlane.Token, "FLEET_CONTROL_PLANE_TOKEN")
 	setDuration(&cfg.ControlPlane.Every, "FLEET_CONTROL_PLANE_REFRESH")
+	setString(&cfg.Database.URL, "FLEET_DATABASE_URL")
+
+	if v := os.Getenv("FLEET_DATABASE_MIGRATE"); v != "" {
+		cfg.Database.Migrate = v == "1" || strings.EqualFold(v, "true")
+	}
 
 	// Semicolon-separated, for the same reason the key list is: neither a
 	// tenant name nor a limit suffix contains a comma.

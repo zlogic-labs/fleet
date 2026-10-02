@@ -36,7 +36,7 @@ func contains(haystack, needle string) bool { return strings.Contains(haystack, 
 
 func limiterMust(t *testing.T, cfg Config) *ratelimit.Memory {
 	t.Helper()
-	lim, err := limiterFor(cfg)
+	lim, err := limiterFor(cfg, nil)
 	if err != nil {
 		t.Fatalf("limiterFor: %v", err)
 	}

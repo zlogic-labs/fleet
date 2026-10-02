@@ -23,13 +23,13 @@ func TestStartupRejectsAuthMisconfiguration(t *testing.T) {
 			// Serves nothing, and looks like an outage rather than a mistake.
 			name: "required with no keys",
 			auth: AuthConfig{Required: true},
-			want: "auth.required is set but auth.keys is empty",
+			want: "set auth.keys or database.url",
 		},
 		{
 			// The shape of a security setting someone believes is on.
 			name: "keys configured but not required",
 			auth: AuthConfig{Keys: []string{"acme/research/admin"}},
-			want: "the keys would be ignored",
+			want: "would be ignored",
 		},
 		{
 			name: "a malformed key spec",
@@ -54,7 +54,7 @@ func TestStartupRejectsAuthMisconfiguration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := Build(Config{
 				Listen: "127.0.0.1:0", MaxBodyMB: 1, Auth: tc.auth,
-			}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+			}, nil, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 			if err == nil {
 				t.Fatal("startup succeeded, want an error")
 			}
@@ -77,9 +77,30 @@ func TestValidAuthConfigStarts(t *testing.T) {
 			Tenants:  []string{"acme|rpm=600,tpm=200000"},
 			Projects: []string{"acme/research|rpm=60,tpm=20000"},
 		},
-	}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	}, nil, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("a valid auth config was rejected: %v", err)
+	}
+}
+
+// A database is a source of keys, so "required with an empty key list" is only
+// an error when there is nowhere to look one up. Without this the obvious
+// configuration — point Fleet at Postgres and let tenants live there — would be
+// rejected by the very check that exists to catch a typo.
+func TestDatabaseSatisfiesTheKeyRequirement(t *testing.T) {
+	cfg := Config{
+		Listen:    "127.0.0.1:0",
+		MaxBodyMB: 1,
+		Auth:      AuthConfig{Required: true},
+		// No Build call: it would try to connect. This is validate alone,
+		// which is what Load calls and what the check lives in.
+	}
+	if err := cfg.validate(); err == nil {
+		t.Error("required with no keys and no database was accepted")
+	}
+	cfg.Database.URL = "postgres://localhost/fleet"
+	if err := cfg.validate(); err != nil {
+		t.Errorf("required with a database and no key list was rejected: %v", err)
 	}
 }
 

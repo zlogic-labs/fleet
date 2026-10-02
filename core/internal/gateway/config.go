@@ -34,6 +34,35 @@ type Config struct {
 	// only from Upstreams, and the two are merged: static upstreams keep
 	// working for a llama.cpp on a laptop with no cluster at all.
 	ControlPlane ControlPlaneConfig `yaml:"control_plane"`
+	// Database is where tenants, keys, limits and the ledger live.
+	//
+	// Empty means the gateway keeps everything in memory and loses it on
+	// restart, which is a legitimate laptop configuration and an illegitimate
+	// production one. It is not a default that fills in: a gateway that
+	// silently created an empty in-memory store because a URL was mistyped
+	// would refuse every tenant while reporting itself healthy.
+	Database DatabaseConfig `yaml:"database"`
+}
+
+// DatabaseConfig points at Fleet's PostgreSQL.
+//
+// Separate from ControlPlane because they answer different questions and fail
+// differently: the control plane tells the gateway what exists, the database
+// tells it what it may do. A gateway can serve traffic with no control plane
+// (static endpoints) and can be gated with no database (FLEET_API_KEYS), and
+// the two compose.
+type DatabaseConfig struct {
+	// URL is a libpq/pgx connection string. A URL rather than discrete fields
+	// because that is what every managed provider hands out.
+	URL string `yaml:"url"`
+	// Migrate applies the schema on boot.
+	//
+	// Off by default, and deliberately: applying DDL at startup means whoever
+	// starts the process needs schema privileges, which is more authority than
+	// a serving process should hold. Turn it on for a single-node deployment
+	// that owns its database; leave it off where migrations are a separate,
+	// reviewed step.
+	Migrate bool `yaml:"migrate"`
 }
 
 type ControlPlaneConfig struct {

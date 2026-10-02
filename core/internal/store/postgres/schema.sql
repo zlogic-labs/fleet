@@ -24,7 +24,7 @@
 -- projects and keys partition this budget; they never add to it. Without that
 -- rule, ten projects each declaring the tenant's full limit would give the
 -- tenant ten times the capacity, and the envelope would be decorative.
-CREATE TABLE tenants (
+CREATE TABLE IF NOT EXISTS tenants (
     id           text PRIMARY KEY,
     name         text        NOT NULL,
     -- Money caps are in quota units (see pkg/billing). Money is derived at
@@ -51,7 +51,7 @@ CREATE TABLE tenants (
 -- table), and no nesting: a project cannot contain projects. Every extra level
 -- multiplies the work in the limit arithmetic and in the rollups, and the
 -- ledger cannot be un-nested later.
-CREATE TABLE projects (
+CREATE TABLE IF NOT EXISTS projects (
     id            text PRIMARY KEY,
     tenant_id     text        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name          text        NOT NULL,
@@ -72,8 +72,8 @@ CREATE TABLE projects (
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX projects_tenant_name_idx ON projects (tenant_id, name);
-CREATE INDEX projects_tenant_idx ON projects (tenant_id);
+CREATE UNIQUE INDEX IF NOT EXISTS projects_tenant_name_idx ON projects (tenant_id, name);
+CREATE INDEX IF NOT EXISTS projects_tenant_idx ON projects (tenant_id);
 
 -- An API key is a credential, not a scope.
 --
@@ -86,7 +86,7 @@ CREATE INDEX projects_tenant_idx ON projects (tenant_id);
 -- be limited in, and the resulting asymmetry — some keys charged to a project
 -- and some only to the tenant — would make "how much can this project spend"
 -- depend on which credential the caller happened to hold.
-CREATE TABLE api_keys (
+CREATE TABLE IF NOT EXISTS api_keys (
     id           text PRIMARY KEY,
     tenant_id    text        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     project_id   text        NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -99,8 +99,8 @@ CREATE TABLE api_keys (
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX api_keys_tenant_idx  ON api_keys (tenant_id);
-CREATE INDEX api_keys_project_idx ON api_keys (project_id);
+CREATE INDEX IF NOT EXISTS api_keys_tenant_idx  ON api_keys (tenant_id);
+CREATE INDEX IF NOT EXISTS api_keys_project_idx ON api_keys (project_id);
 
 -- ── pricing ────────────────────────────────────────────────────────────
 
@@ -115,7 +115,7 @@ CREATE INDEX api_keys_project_idx ON api_keys (project_id);
 -- numbers operators recognise, and matching billing.UnitsPer. amounts_micro is
 -- NOT stored: the money figure is derived from the month's cost pool and
 -- cannot be known here.
-CREATE TABLE price_books (
+CREATE TABLE IF NOT EXISTS price_books (
     id            text PRIMARY KEY,
     model         text        NOT NULL,
     input_rate    bigint      NOT NULL CHECK (input_rate > 0),
@@ -136,11 +136,11 @@ CREATE TABLE price_books (
 -- not on the model alone. Exclude-in-progress is a standard partial index trick:
 -- without it, two open-ended books for one model could both exist and which one
 -- applies would depend on read order.
-CREATE UNIQUE INDEX price_books_one_open_per_model
+CREATE UNIQUE INDEX IF NOT EXISTS price_books_one_open_per_model
     ON price_books (model)
     WHERE effective_to IS NULL;
 
-CREATE INDEX price_books_lookup_idx ON price_books (model, effective_from DESC);
+CREATE INDEX IF NOT EXISTS price_books_lookup_idx ON price_books (model, effective_from DESC);
 
 -- ── the ledger ─────────────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ CREATE INDEX price_books_lookup_idx ON price_books (model, effective_from DESC);
 -- from the token columns and the price book, and it is stored anyway so that a
 -- report does not have to join a price book that may since have changed — the
 -- row is a self-contained statement of what this request cost.
-CREATE TABLE usage_events (
+CREATE TABLE IF NOT EXISTS usage_events (
     id            bigserial PRIMARY KEY,
     -- Dimensions as facts, per the file header.
     tenant_id     text        NOT NULL,
@@ -207,14 +207,14 @@ CREATE TABLE usage_events (
 -- One index cannot serve both "one tenant's spend this month" and "one model's
 -- total across all tenants"; two indexes on a table this large is the honest
 -- cost of not making the common report slow.
-CREATE INDEX usage_events_tenant_time_idx
+CREATE INDEX IF NOT EXISTS usage_events_tenant_time_idx
     ON usage_events (tenant_id, occurred_at DESC);
-CREATE INDEX usage_events_project_time_idx
+CREATE INDEX IF NOT EXISTS usage_events_project_time_idx
     ON usage_events (project_id, occurred_at DESC)
     WHERE project_id IS NOT NULL;
-CREATE INDEX usage_events_model_time_idx
+CREATE INDEX IF NOT EXISTS usage_events_model_time_idx
     ON usage_events (model, occurred_at DESC);
 -- Reconciliation looks for estimates it has not yet fixed up.
-CREATE INDEX usage_events_unestimated_idx
+CREATE INDEX IF NOT EXISTS usage_events_unestimated_idx
     ON usage_events (occurred_at)
     WHERE NOT usage_known;

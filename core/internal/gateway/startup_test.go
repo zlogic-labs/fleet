@@ -30,7 +30,7 @@ func TestBadKeySpecFailsStartup(t *testing.T) {
 		Listen:    "127.0.0.1:0",
 		MaxBodyMB: 1,
 		Auth:      AuthConfig{Required: true, Keys: []string{"missing-the-slash"}},
-	}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	}, nil, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err == nil {
 		t.Fatal("a malformed key spec must fail startup")
 	}

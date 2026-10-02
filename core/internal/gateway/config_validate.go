@@ -28,17 +28,8 @@ func (c Config) validate() error {
 	if c.ControlPlane.Every < 0 {
 		return fmt.Errorf("control_plane.refresh_every must not be negative")
 	}
-	// Required with no keys is a deployment that refuses every request, which
-	// looks like an outage rather than a misconfiguration. Caught here so it
-	// is a startup error naming the fix, not a 401 storm.
-	if c.Auth.Required && len(c.Auth.Keys) == 0 {
-		return fmt.Errorf("auth.required is set but auth.keys is empty: every request would be rejected")
-	}
-	// A configured key list with required off means the keys are being parsed
-	// and then ignored, which is the shape of a security setting someone
-	// believes is on.
-	if !c.Auth.Required && len(c.Auth.Keys) > 0 {
-		return fmt.Errorf("auth.keys is set but auth.required is false: the keys would be ignored")
+	if err := c.validateAuth(); err != nil {
+		return err
 	}
 	// The index, not the spec. A config with twenty keys and one typo is
 	// found by position; quoting the offending string leaves the operator
@@ -55,6 +46,30 @@ func (c Config) validate() error {
 		return err
 	}
 	return c.validateUpstreams()
+}
+
+// validateAuth checks that authentication can actually succeed.
+//
+// The two rules that matter are about what the operator believes, not about
+// what the process does. Required with no keys refuses every request, which
+// looks like an outage rather than a misconfiguration. Keys with required off
+// parses them and then ignores them, which is the shape of a security setting
+// someone believes is on.
+//
+// A database counts as a source of keys, so "required with no keys" is only an
+// error when there is nowhere at all to look one up. Without this the obvious
+// configuration — point Fleet at Postgres, let tenants live in it — would be
+// rejected by the very check that exists to catch a typo.
+func (c Config) validateAuth() error {
+	haveKeys := len(c.Auth.Keys) > 0 || c.Database.URL != ""
+	if c.Auth.Required && !haveKeys {
+		return fmt.Errorf("auth.required is set but there are no keys: set auth.keys or database.url, " +
+			"or every request would be rejected")
+	}
+	if !c.Auth.Required && haveKeys {
+		return fmt.Errorf("keys are configured but auth.required is false: they would be ignored")
+	}
+	return nil
 }
 
 func (c Config) validateUpstreams() error {
