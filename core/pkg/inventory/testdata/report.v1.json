@@ -1,0 +1,92 @@
+{
+  "contract": 1,
+  "cluster": {
+    "name": "k3s-dev",
+    "reachable": true,
+    "version": "v1.36.4+k3s1",
+    "nodeCount": 2,
+    "readyNodes": 2,
+    "gpuCount": 9,
+    "readyGpus": 9,
+    "cpuMillicores": 32400000,
+    "memoryMiB": 36798076,
+    "nodes": [
+      {
+        "name": "desktop-jkf1khq",
+        "ready": true,
+        "roles": [
+          "control-plane",
+          "worker"
+        ],
+        "gpu": {
+          "model": "NVIDIA GeForce GT 720",
+          "count": 1,
+          "totalMemoryMiB": 2048
+        },
+        "cpuMillicores": 16000,
+        "allocatableMemoryMiB": 36798076,
+        "kubeletVersion": "v1.36.4+k3s1",
+        "osImage": "Ubuntu 24.04.1 LTS",
+        "addresses": {
+          "InternalIP": "172.31.74.144"
+        },
+        "reportedAt": "2026-10-02T14:30:00Z"
+      },
+      {
+        "name": "gpu-node-a",
+        "ready": true,
+        "roles": [
+          "worker"
+        ],
+        "gpu": {
+          "model": "A100-SXM4-80GB",
+          "count": 8,
+          "totalMemoryMiB": 655360
+        },
+        "cpuMillicores": 128000,
+        "allocatableMemoryMiB": 980000000,
+        "kubeletVersion": "v1.36.4",
+        "osImage": "Ubuntu 22.04",
+        "addresses": {
+          "InternalIP": "10.0.0.5"
+        },
+        "reportedAt": "2026-10-02T14:30:00Z"
+      }
+    ],
+    "reportedAt": "2026-10-02T14:30:00Z"
+  },
+  "deployments": [
+    {
+      "name": "qwen-0-5b",
+      "namespace": "fleet",
+      "model": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+      "desiredReplicas": 1,
+      "readyReplicas": 1,
+      "tensorParallelSize": 1,
+      "pipelineParallelSize": 0,
+      "gpuPerReplica": 1,
+      "engine": "llama-cpp",
+      "state": "Available",
+      "updatedAt": "2026-10-02T14:30:00Z",
+      "selector": "qwen-0.5b-gguf",
+      "address": "10.43.19.18:8000",
+      "version": "b11146-7fe450e19",
+      "format": "gguf"
+    },
+    {
+      "name": "llama-70b",
+      "namespace": "fleet",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "desiredReplicas": 2,
+      "readyReplicas": 0,
+      "tensorParallelSize": 8,
+      "pipelineParallelSize": 2,
+      "gpuPerReplica": 16,
+      "engine": "vllm",
+      "state": "InsufficientCapacity",
+      "reason": "InsufficientCapacity: 1 of 16 GPUs schedulable",
+      "updatedAt": "2026-10-02T14:30:00Z",
+      "format": "safetensors"
+    }
+  ]
+}

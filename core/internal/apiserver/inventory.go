@@ -14,17 +14,27 @@ import (
 // ── operator reports ───────────────────────────────────────────
 
 func (s *Server) reportInventory(w http.ResponseWriter, r *http.Request) {
-	var report struct {
-		Cluster     registry.Cluster      `json:"cluster"`
-		Deployments []registry.Deployment `json:"deployments"`
-	}
+	// Decoded into the shared contract type rather than a re-declared struct,
+	// so the shape on the wire has exactly one definition in the tree — the one
+	// fleet-serving also compiles against.
+	var report inventory.Report
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&report); err != nil {
 		openai.WriteError(w, errs.InvalidArgument("body is not an inventory report: %s", err))
 		return
 	}
-	if report.Cluster.Name == "" {
-		openai.WriteError(w, errs.InvalidArgument("cluster.name is required"))
+	if err := report.Validate(); err != nil {
+		openai.WriteError(w, errs.InvalidArgument("%s", err))
 		return
+	}
+	// Version skew is worth a line in the log and nothing more. An operator
+	// newer than this build has sent fields that were ignored; an older one has
+	// sent fields that do not exist. Neither is a reason to drop a cluster's
+	// entire inventory on the floor, and refusing is what would make the
+	// upgrade order mandatory.
+	if report.Contract != inventory.ContractVersion {
+		s.log.Warn("inventory from a different contract version",
+			"cluster", report.Cluster.Name,
+			"got", report.Contract, "want", inventory.ContractVersion)
 	}
 	// The operator does not stamp the report time, and Memory.ReportCluster
 	// stamps a copy the caller cannot see. Without this the capacity sample has
@@ -37,10 +47,7 @@ func (s *Server) reportInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cost != nil {
-		if err := s.cost.RecordCapacity(r.Context(), inventory.Report{
-			Cluster:     report.Cluster,
-			Deployments: report.Deployments,
-		}); err != nil {
+		if err := s.cost.RecordCapacity(r.Context(), report); err != nil {
 			// The console state is already consistent; losing a cost sample is
 			// not a reason to tell the operator their inventory failed, and it
 			// shows up as a low coverage figure at close time.

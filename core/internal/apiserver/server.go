@@ -19,6 +19,7 @@ import (
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/inventory"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -49,6 +50,21 @@ type Config struct {
 	Version        string
 	Edition        string
 }
+
+const apiPrefix = "/api/v1"
+
+// mustRouteTheContract fails at startup, not silently in production, if the
+// route the control plane serves and the constant the operator PUTs to ever
+// disagree. The two live in different files because chi splits the path, and
+// a version bump that moved one and not the other would send every cluster's
+// inventory into a void that answers 404.
+func mustRouteTheContract() {
+	if apiPrefix+"/inventory" != inventory.Path {
+		panic("apiserver: the inventory route and inventory.Path disagree")
+	}
+}
+
+func init() { mustRouteTheContract() }
 
 // Server owns the control plane's dependencies.
 type Server struct {
@@ -120,7 +136,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	r.Get("/readyz", s.ready)
 
-	r.Route("/api/v1", func(r chi.Router) {
+	r.Route(apiPrefix, func(r chi.Router) {
 		// A wildcard, not a named parameter. A model name is owner/name, and
 		// chi's {name} and {name:.+} both stop at the first slash, so
 		// GET /models/Qwen/Qwen2.5 would 404 while
@@ -153,6 +169,9 @@ func (s *Server) Handler() http.Handler {
 		// The operator replaces what it observes. PUT rather than POST because
 		// the payload is the whole cluster state and posting it twice must
 		// leave the same state, not two copies.
+		//
+		// The path is split across this prefix and the leaf, while the operator
+		// PUTs to the single constant inventory.Path. See mustRouteTheContract.
 		r.Put("/inventory", s.reportInventory)
 		r.Get("/clusters", s.clusterStatus)
 		r.Get("/deployments", s.listDeployments)

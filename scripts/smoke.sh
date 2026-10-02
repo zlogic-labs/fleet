@@ -329,12 +329,43 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/inventory" \
 }')
 check "PUT /inventory" "204" "$code"
 
+# The contract is versioned and lives in another repository. These are the two
+# ways that can silently break: a report from a newer sender, and a field this
+# build does not recognise. Both must be tolerated — a receiver that rejected
+# unknown fields would take a cluster's inventory down whenever the operator
+# happened to be upgraded first. A separate cluster name so the counts asserted
+# below still describe the report above.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/inventory" \
+  -H 'Content-Type: application/json' \
+  -d '{"contract":99,"cluster":{"name":"from-the-future","reachable":true,"inventedByANewerOperator":[1,2,3]},
+       "deployments":[{"name":"future","namespace":"fleet","model":"Qwen/Qwen2.5-7B-Instruct",
+       "desiredReplicas":3,"readyReplicas":3,"state":"Available","address":"10.43.19.18:8000"}]}')
+check "a newer operator reporting an unknown field is still accepted" "204" "$code"
+check "and its deployment landed" "future" \
+  "$(curl -sS "$API/deployments" | jqp "[d for d in d if d['name']=='future'][0]['name']")"
+
+# A deployment with no identity has no key, so two of them collide and the
+# second overwrites the first.
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/inventory" \
+  -H 'Content-Type: application/json' \
+  -d '{"cluster":{"name":"k3s-dev"},"deployments":[{"name":"","namespace":""}]}')
+check "a deployment with no identity is refused" "400" "$code"
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/inventory" \
+  -H 'Content-Type: application/json' -d '{"cluster":{}}')
+check "a cluster with no name is refused" "400" "$code"
+
 C=$(curl -sS "$API/clusters")
 # The counts are recomputed on report, so the summary can never disagree with
-# the node list the operator actually sent.
-check "the cluster summary counts the nodes" "2" "$(printf '%s' "$C" | jqp "d['clusters'][0]['nodeCount']")"
-check "the cluster summary counts the GPUs" "9" "$(printf '%s' "$C" | jqp "d['clusters'][0]['gpuCount']")"
-check "the cluster summary counts ready GPUs" "9" "$(printf '%s' "$C" | jqp "d['clusters'][0]['readyGpus']")"
+# the node list the operator actually sent. Looked up by name rather than
+# position: the section above deliberately adds a second cluster, and "[0]"
+# would then describe whichever one sorted first.
+check "the cluster summary counts the nodes" "2" \
+  "$(printf '%s' "$C" | jqp "[c for c in d['clusters'] if c['name']=='k3s-dev'][0]['nodeCount']")"
+check "the cluster summary counts the GPUs" "9" \
+  "$(printf '%s' "$C" | jqp "[c for c in d['clusters'] if c['name']=='k3s-dev'][0]['gpuCount']")"
+check "the cluster summary counts ready GPUs" "9" \
+  "$(printf '%s' "$C" | jqp "[c for c in d['clusters'] if c['name']=='k3s-dev'][0]['readyGpus']")"
 
 D=$(curl -sS "$API/deployments")
 # Pending:InsufficientCapacity and Pending:Scheduling are different states and

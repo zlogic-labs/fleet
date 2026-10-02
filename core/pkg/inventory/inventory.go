@@ -123,8 +123,13 @@ type Deployment struct {
 // Key is the namespace-qualified identity.
 func (d Deployment) Key() string { return d.Namespace + "/" + d.Name }
 
-// Report is the body an operator POSTs to /api/v1/inventory.
+// Report is the body an operator PUTs to Path.
+//
+// Contract is the sender's ContractVersion. Zero means the sender predates the
+// field, which is not an error: everything else in the report is still
+// meaningful, and rejecting it would make the upgrade order mandatory.
 type Report struct {
+	Contract    int          `json:"contract,omitempty"`
 	Cluster     Cluster      `json:"cluster"`
 	Deployments []Deployment `json:"deployments"`
 }
