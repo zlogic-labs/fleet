@@ -1,4 +1,4 @@
-/** Calls against the control plane (fleet-apiserver). */
+/** Calls against the control plane (fleet-apiserver). Every collection is plural; an item id may contain a slash and is escaped whole. */
 
 import { request } from './client';
 import type {
@@ -8,24 +8,27 @@ import type {
   PullJob,
   RegistryModel,
   StorageInfo,
+  Tenant,
+  Project,
+  ApiKey,
+  BudgetRule,
 } from '../types';
 
 const BASE = '/api/v1';
+const item = (path: string, id: string) => `${BASE}/${path}/${encodeURIComponent(id)}`;
 
 export const models = {
   list: (signal?: AbortSignal) => request<RegistryModel[]>(`${BASE}/models`, { signal }),
-  get: (name: string, signal?: AbortSignal) =>
-    request<RegistryModel>(`${BASE}/models/${encodeURIComponent(name)}`, { signal }),
-  remove: (name: string) =>
-    request<void>(`${BASE}/models/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  get: (name: string, signal?: AbortSignal) => request<RegistryModel>(item('models', name), { signal }),
+  remove: (name: string) => request<void>(item('models', name), { method: 'DELETE' }),
   /**
-   * Check that the stored objects satisfy a named engine. The engine is part
-   * of the question, not a detail: a GGUF repository is complete for
-   * llama-cpp and broken for vLLM, and the answer without it is meaningless.
+   * Ask whether a repository is loadable by an engine. The engine is part of
+   * the question, not a detail: a GGUF repository is complete for llama-cpp
+   * and broken for vLLM.
    */
-  verify: (name: string, engine: string) =>
-    request<{ engine: string; objects: number; missing: string[]; ok: boolean }>(
-      `${BASE}/verify/${encodeURIComponent(name)}?engine=${encodeURIComponent(engine)}`,
+  usableBy: (name: string, engine: string) =>
+    request<{ name: string; engine: string; objects: number; missing: string[]; usable: boolean }>(
+      `${BASE}/repositories/${encodeURIComponent(name)}?engine=${encodeURIComponent(engine)}`,
     ),
 };
 
@@ -41,7 +44,6 @@ export interface PullRequest {
   tokenizerId?: string;
   contextLimit?: number;
   hfToken?: string;
-  /** Records the intent. The format itself is inferred from the files. */
   engine?: string;
 }
 
@@ -57,16 +59,53 @@ export const storage = {
 };
 
 export const cluster = {
-  get: (signal?: AbortSignal) => request<ClusterStatus>(`${BASE}/cluster`, { signal }),
+  get: (signal?: AbortSignal) => request<ClusterStatus>(`${BASE}/clusters`, { signal }),
 };
 
 export const deployments = {
   list: (signal?: AbortSignal) => request<Deployment[]>(`${BASE}/deployments`, { signal }),
   scale: (name: string, replicas: number) =>
-    request<void>(`${BASE}/deployments/${encodeURIComponent(name)}/scale`, {
-      method: 'POST',
-      body: { replicas },
+    request<void>(item('deployments', name), { method: 'PATCH', body: { replicas } }),
+  remove: (name: string) => request<void>(item('deployments', name), { method: 'DELETE' }),
+};
+
+export const tenants = {
+  list: (signal?: AbortSignal) => request<Tenant[]>(`${BASE}/tenants`, { signal }),
+  get: (id: string, signal?: AbortSignal) => request<Tenant>(item('tenants', id), { signal }),
+  create: (body: Partial<Tenant>) => request<void>(`${BASE}/tenants`, { method: 'POST', body }),
+  update: (id: string, body: Partial<Tenant>) =>
+    request<void>(item('tenants', id), { method: 'PATCH', body }),
+  remove: (id: string) => request<void>(item('tenants', id), { method: 'DELETE' }),
+};
+
+export const projects = {
+  list: (tenant?: string, signal?: AbortSignal) =>
+    request<Project[]>(`${BASE}/projects${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ''}`, {
+      signal,
     }),
-  remove: (name: string) =>
-    request<void>(`${BASE}/deployments/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  create: (body: Partial<Project>) => request<void>(`${BASE}/projects`, { method: 'POST', body }),
+  update: (id: string, body: Partial<Project>) =>
+    request<void>(item('projects', id), { method: 'PATCH', body }),
+  remove: (id: string) => request<void>(item('projects', id), { method: 'DELETE' }),
+};
+
+export const keys = {
+  list: (project?: string, signal?: AbortSignal) =>
+    request<ApiKey[]>(`${BASE}/keys${project ? `?project=${encodeURIComponent(project)}` : ''}`, {
+      signal,
+    }),
+  create: (projectId: string, label: string) =>
+    request<ApiKey & { secret: string }>(`${BASE}/keys`, {
+      method: 'POST',
+      body: { projectId, label },
+    }),
+  remove: (id: string) => request<void>(item('keys', id), { method: 'DELETE' }),
+};
+
+export const budgetRules = {
+  list: (scopeId: string, signal?: AbortSignal) =>
+    request<BudgetRule[]>(`${BASE}/budget-rules?scopeId=${encodeURIComponent(scopeId)}`, { signal }),
+  save: (body: Omit<BudgetRule, 'windowSeconds'>) =>
+    request<void>(`${BASE}/budget-rules`, { method: 'POST', body }),
+  remove: (id: string) => request<void>(item('budget-rules', id), { method: 'DELETE' }),
 };

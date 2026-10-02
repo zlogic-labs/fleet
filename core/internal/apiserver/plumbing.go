@@ -41,10 +41,18 @@ func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
 			} else if rec.status >= 400 {
 				level = slog.LevelWarn
 			}
-			log.Log(r.Context(), level, "request",
+			attrs := []any{
 				"method", r.Method, "path", r.URL.Path, "status", rec.status,
 				"bytes", strconv.FormatInt(rec.bytes, 10),
-				"duration_ms", time.Since(start).Milliseconds())
+				"duration_ms", time.Since(start).Milliseconds(),
+			}
+			// A 5xx with only a status is unactionable: the response says
+			// "internal error" precisely because the cause is not safe to
+			// hand the caller, which means it has to appear here or nowhere.
+			if rec.err != nil {
+				attrs = append(attrs, "error", rec.err)
+			}
+			log.Log(r.Context(), level, "request", attrs...)
 		})
 	}
 }
@@ -67,7 +75,13 @@ type recorder struct {
 	http.ResponseWriter
 	status int
 	bytes  int64
+	// err is the cause behind a 5xx, kept so the log can name it.
+	err error
 }
+
+// Fail records the cause of a server-side failure. Handlers call it before
+// answering; the response body still says nothing about it.
+func (r *recorder) Fail(err error) { r.err = err }
 
 func (r *recorder) WriteHeader(code int) {
 	r.status = code

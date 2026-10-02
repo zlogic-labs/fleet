@@ -97,7 +97,7 @@ func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	type status struct {
 		Edition      string           `json:"edition"`
 		Customer     string           `json:"customer,omitempty"`
-		ExpiresAt    string           `json:"expires_at,omitempty"`
+		ExpiresAt    string           `json:"expiresAt,omitempty"`
 		Version      string           `json:"version"`
 		Capabilities []string         `json:"capabilities"`
 		Endpoints    []endpointStatus `json:"endpoints"`
@@ -121,25 +121,25 @@ func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 
 type endpointStatus struct {
 	Model       string  `json:"model"`
-	BaseURL     string  `json:"base_url"`
+	BaseURL     string  `json:"baseUrl"`
 	Replicas    int     `json:"replicas"`
 	Healthy     bool    `json:"healthy"`
-	QueueDepth  int     `json:"queue_depth"`
-	RunningReqs int     `json:"running_requests"`
-	KVCacheUsed float64 `json:"kv_cache_used"`
+	QueueDepth  int     `json:"queueDepth"`
+	RunningReqs int     `json:"runningRequests"`
+	KVCacheUsed float64 `json:"kvCacheUsed"`
 }
 
 type recentSample struct {
 	Model      string `json:"model"`
 	Endpoint   string `json:"endpoint"`
 	Streamed   bool   `json:"streamed"`
-	TTFTMs     int64  `json:"ttft_ms"`
-	DurationMs int64  `json:"duration_ms"`
-	UsageKnown bool   `json:"usage_known"`
+	TTFTMs     int64  `json:"ttftMs"`
+	DurationMs int64  `json:"durationMs"`
+	UsageKnown bool   `json:"usageKnown"`
 
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	CachedTokens     int `json:"cached_tokens"`
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	CachedTokens     int `json:"cachedTokens"`
 	// Estimated marks a request settled from the request rather than from an
 	// engine usage field. It is the visible cost of a stream that ended early.
 	Estimated bool `json:"estimated"`

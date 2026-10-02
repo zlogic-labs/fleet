@@ -45,10 +45,10 @@ export function Fleet() {
   const names = Object.keys(CAPABILITIES);
   const missing = names.filter((n) => !granted.has(n));
 
-  const totalTok = data.recent.reduce((a, s) => a + s.completion_tokens, 0);
+  const totalTok = data.recent.reduce((a, s) => a + s.completionTokens, 0);
   const estimated = data.recent.filter((s) => s.estimated).length;
   const avgTtft = data.recent.length
-    ? Math.round(data.recent.reduce((a, s) => a + s.ttft_ms, 0) / data.recent.length)
+    ? Math.round(data.recent.reduce((a, s) => a + s.ttftMs, 0) / data.recent.length)
     : 0;
 
   return (
@@ -89,7 +89,7 @@ export function Fleet() {
             ) : (
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 {data.endpoints.map((ep) => (
-                  <EndpointRow key={`${ep.model}@${ep.base_url}`} ep={ep} />
+                  <EndpointRow key={`${ep.model}@${ep.baseUrl}`} ep={ep} />
                 ))}
               </Space>
             )}
@@ -164,21 +164,21 @@ export function Fleet() {
               width: 90,
               render: (s: boolean) => <Tag>{s ? 'stream' : 'blocking'}</Tag>,
             },
-            { title: 'TTFT', dataIndex: 'ttft_ms', width: 90, render: (v: number) => `${v} ms` },
+            { title: 'TTFT', dataIndex: 'ttftMs', width: 90, render: (v: number) => `${v} ms` },
             {
               title: 'Decode',
-              dataIndex: 'duration_ms',
+              dataIndex: 'durationMs',
               width: 100,
-              render: (v: number, r) => `${Math.max(0, v - r.ttft_ms)} ms`,
+              render: (v: number, r) => `${Math.max(0, v - r.ttftMs)} ms`,
             },
             {
               title: 'Tokens',
               width: 130,
-              render: (_, r) => `${r.prompt_tokens} → ${r.completion_tokens}`,
+              render: (_, r) => `${r.promptTokens} → ${r.completionTokens}`,
             },
             {
               title: 'Settlement',
-              dataIndex: 'usage_known',
+              dataIndex: 'usageKnown',
               width: 130,
               render: (known: boolean) =>
                 known ? <Tag color="green">billed</Tag> : <Tag color="warning">estimated</Tag>,
@@ -192,7 +192,7 @@ export function Fleet() {
           <Descriptions size="small" column={1} bordered>
             <Descriptions.Item label="Customer">{data.customer || '—'}</Descriptions.Item>
             <Descriptions.Item label="Licence expires">
-              {data.expires_at ? new Date(data.expires_at).toLocaleString() : 'perpetual'}
+              {data.expiresAt ? new Date(data.expiresAt).toLocaleString() : 'perpetual'}
             </Descriptions.Item>
             <Descriptions.Item label="Version">{data.version}</Descriptions.Item>
           </Descriptions>
@@ -203,7 +203,7 @@ export function Fleet() {
 }
 
 function EndpointRow({ ep }: { ep: EndpointStatus }) {
-  const kv = ep.kv_cache_used;
+  const kv = ep.kvCacheUsed;
   return (
     <div>
       <Space style={{ width: '100%', justifyContent: 'space-between' }}>
@@ -213,15 +213,15 @@ function EndpointRow({ ep }: { ep: EndpointStatus }) {
         <Badge status={ep.healthy ? 'success' : 'error'} text={ep.healthy ? 'healthy' : 'down'} />
       </Space>
       <Text type="secondary" style={{ fontSize: 12 }} ellipsis>
-        {ep.base_url}
+        {ep.baseUrl}
       </Text>
       <Space size="middle" style={{ marginTop: 8, width: '100%' }} align="center">
         <Tag>{ep.replicas}×</Tag>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          queue {ep.queue_depth}
+          queue {ep.queueDepth}
         </Text>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          running {ep.running_requests}
+          running {ep.runningRequests}
         </Text>
         {kv > 0 && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flex: 1 }}>

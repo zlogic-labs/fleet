@@ -123,7 +123,7 @@ type Deployment struct {
 // Key is the namespace-qualified identity.
 func (d Deployment) Key() string { return d.Namespace + "/" + d.Name }
 
-// Report is the body an operator POSTs to /api/v1/operator/inventory.
+// Report is the body an operator POSTs to /api/v1/inventory.
 type Report struct {
 	Cluster     Cluster      `json:"cluster"`
 	Deployments []Deployment `json:"deployments"`

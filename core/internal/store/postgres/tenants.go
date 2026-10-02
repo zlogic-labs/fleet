@@ -166,7 +166,7 @@ func (s *PolicySource) CreateTenant(ctx context.Context, t TenantRow) error {
 	           VALUES ($1,$2,$3,$4,$5)`
 	_, err := s.db.pool.Exec(ctx, q, t.ID, t.Name, t.RequestLimit, t.TokenLimit, t.Active)
 	if err != nil {
-		return fmt.Errorf("postgres: create tenant %s: %w", t.ID, err)
+		return wrap(err, "create tenant %s", t.ID)
 	}
 	return nil
 }
@@ -186,17 +186,17 @@ func (s *PolicySource) CreateProject(ctx context.Context, p ProjectRow) error {
 			return fmt.Errorf("postgres: read tenant envelope for %s: %w", p.TenantID, err)
 		}
 		if wider(p.RequestLimit, envReq) {
-			return fmt.Errorf("project %s/%s: request limit %d exceeds the tenant envelope %d",
+			return invalidf("project %s/%s: request limit %d exceeds the tenant envelope %d",
 				p.TenantID, p.Name, p.RequestLimit, envReq)
 		}
 		if wider(p.TokenLimit, envTok) {
-			return fmt.Errorf("project %s/%s: token limit %d exceeds the tenant envelope %d",
+			return invalidf("project %s/%s: token limit %d exceeds the tenant envelope %d",
 				p.TenantID, p.Name, p.TokenLimit, envTok)
 		}
 		const q = `INSERT INTO projects (id, tenant_id, name, request_limit, token_limit)
 		           VALUES ($1,$2,$3,$4,$5)`
 		if _, err := tx.Exec(ctx, q, p.ID, p.TenantID, p.Name, p.RequestLimit, p.TokenLimit); err != nil {
-			return fmt.Errorf("postgres: create project %s: %w", p.ID, err)
+			return wrap(err, "create project %s", p.ID)
 		}
 		return nil
 	})

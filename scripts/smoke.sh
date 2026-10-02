@@ -183,7 +183,7 @@ fi
 # ── the control plane ──────────────────────────────────────────────
 section "control plane: routes"
 
-for route in models pulls storage engines cluster deployments; do
+for route in models pulls storage engines clusters deployments; do
   check "GET /api/v1/$route" "200" \
     "$(curl -sS -o /dev/null -w '%{http_code}' "$API/$route")"
 done
@@ -287,12 +287,12 @@ check "every tokenizer id is a real encoding name" "True" \
 check "a finished pull reports progress 1.0" "True" \
   "$(printf '%s' "$ST" | jqp "all(p['progress']==1 for p in d if p['state']=='done')")"
 
-v() { curl -sS "$API/verify/$1?engine=$2"; }
+v() { curl -sS "$API/repositories/$1?engine=$2"; }
 
 check "the safetensors model satisfies vllm" "True" \
-  "$(v 'Qwen%2FQwen2.5-1.5B-Instruct' vllm | jqp "d['ok']")"
+  "$(v 'Qwen%2FQwen2.5-1.5B-Instruct' vllm | jqp "d['usable']")"
 check "the GGUF model satisfies llama-cpp" "True" \
-  "$(v 'bartowski%2FQwen2.5-0.5B-Instruct-GGUF' llama-cpp | jqp "d['ok']")"
+  "$(v 'bartowski%2FQwen2.5-0.5B-Instruct-GGUF' llama-cpp | jqp "d['usable']")"
 # A safetensors repository has no config.json, so the old hardcoded check
 # called it incomplete and an operator would re-download what was already fine.
 check "the GGUF model is refused by vllm, with a reason" "True" \
@@ -308,7 +308,7 @@ check "an unprofiled engine refuses rather than guessing" "True" \
 # ── operator reports ───────────────────────────────────────────────
 section "operator inventory"
 
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/operator/inventory" \
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/inventory" \
   -H 'Content-Type: application/json' -d '{
   "cluster":{"name":"k3s-dev","reachable":true,"version":"v1.36.4+k3s1",
     "cpuMillicores":32256,"memoryMiB":32768,
@@ -327,9 +327,9 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/operator/inventory"
      "desiredReplicas":2,"readyReplicas":0,"tensorParallelSize":8,"pipelineParallelSize":2,
      "gpuPerReplica":16,"state":"Scheduling","reason":"InsufficientCapacity"}]
 }')
-check "POST /operator/inventory" "204" "$code"
+check "PUT /inventory" "204" "$code"
 
-C=$(curl -sS "$API/cluster")
+C=$(curl -sS "$API/clusters")
 # The counts are recomputed on report, so the summary can never disagree with
 # the node list the operator actually sent.
 check "the cluster summary counts the nodes" "2" "$(printf '%s' "$C" | jqp "d['clusters'][0]['nodeCount']")"
@@ -511,6 +511,88 @@ else
 fi
 kill "$TOKEN_PID" 2>/dev/null || true
 wait "$TOKEN_PID" 2>/dev/null || true
+
+# ── tenancy, keys and budgets ──────────────────────────────────────
+# Only with a database: without one the control plane is deliberately still
+# running, and a check that skips itself is worse than no check. Run with
+# FLEET_DATABASE_URL pointing at a scratch database to exercise this.
+if curl -sS "$API/tenants" | grep -q '"code"'; then
+  section "tenancy (no database; skipped)"
+else
+  section "tenancy, keys and budgets"
+
+  T="smoke-$$"
+  code=$(curl -sS -o "$WORKDIR/t.json" -w '%{http_code}' -X POST "$API/tenants" \
+    -H 'content-type: application/json' \
+    -d "{\"id\":\"$T\",\"name\":\"Smoke\",\"requestLimit\":1000,\"tokenLimit\":200000}")
+  check "POST /tenants" "201" "$code"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/projects" \
+    -H 'content-type: application/json' \
+    -d "{\"tenantId\":\"$T\",\"name\":\"research\",\"requestLimit\":500,\"tokenLimit\":100000}")
+  check "POST /projects" "201" "$code"
+
+  check "GET /tenants/* includes the project" "$T/research" \
+    "$(curl -sS "$API/tenants/$T" | jqp "d['projects'][0]['id']")"
+
+  # A project above its tenant's envelope is a partition that would give the
+  # tenant more capacity than the envelope, so it is refused on write.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/projects" \
+    -H 'content-type: application/json' \
+    -d "{\"tenantId\":\"$T\",\"name\":\"greedy\",\"requestLimit\":9999}")
+  check "a project above the envelope is refused" "400" "$code"
+
+  K=$(curl -sS -X POST "$API/keys" -H 'content-type: application/json' \
+    -d "{\"projectId\":\"$T/research\",\"label\":\"smoke\"}")
+  check "the key secret is returned once" "True" \
+    "$(printf '%s' "$K" | jqp "d['secret'].startswith('sk-fleet-')")"
+  KID=$(printf '%s' "$K" | jqp "d['id']")
+
+  # Only a hash is stored, so a second read cannot return the secret. If it
+  # ever can, the key is readable from the database by anyone with a copy.
+  check "the key list never carries the secret" "False" \
+    "$(curl -sS "$API/keys?project=$T%2Fresearch" | jqp "'secret' in d[0]")"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/budget-rules" \
+    -H 'content-type: application/json' \
+    -d "{\"scopeKind\":\"tenant\",\"scopeId\":\"$T\",\"dimension\":\"tokens_total\",\"limit\":5000,\"window\":\"5h\"}")
+  check "POST /budget-rules" "204" "$code"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/budget-rules" \
+    -H 'content-type: application/json' \
+    -d "{\"scopeKind\":\"tenant\",\"scopeId\":\"$T\",\"dimension\":\"units\",\"limit\":10,\"window\":\"1mo\"}")
+  check "a second dimension over a second window is accepted" "204" "$code"
+
+  check "both rules are listed" "2" \
+    "$(curl -sS "$API/budget-rules?scopeId=$T" | jqp "len(d)")"
+
+  # A rule cannot be applied to a dimension that does not exist, and guessing
+  # one would silently bill against a counter nothing writes.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/budget-rules" \
+    -H 'content-type: application/json' \
+    -d "{\"scopeKind\":\"tenant\",\"scopeId\":\"$T\",\"dimension\":\"tokens_vibes\",\"limit\":1,\"window\":\"1h\"}")
+  check "an unknown dimension is refused" "400" "$code"
+
+  # "month" is 30 days, not a calendar month: a rolling window that is
+  # sometimes 28 days is not a budget a tenant can reason about.
+  check "a one-month window is 30 days" "2592000" \
+    "$(curl -sS "$API/budget-rules?scopeId=$T&scopeKind=tenant" | jqp "[r['windowSeconds'] for r in d if r['dimension']=='units'][0]")"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+    "$API/budget-rules/tenant/$T/tokens_total/5h")
+  check "DELETE /budget-rules/* removes only that window" "204" "$code"
+  check "the other rule survived" "1" \
+    "$(curl -sS "$API/budget-rules?scopeId=$T" | jqp "len(d)")"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$API/keys/$KID")
+  check "DELETE /keys/*" "204" "$code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$API/projects/$T/research")
+  check "DELETE /projects/*" "204" "$code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$API/tenants/$T")
+  check "DELETE /tenants/*" "204" "$code"
+  check "the tenant is gone" "404" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' "$API/tenants/$T")"
+fi
 
 # ── summary ────────────────────────────────────────────────────────
 printf '\n'

@@ -109,8 +109,8 @@ export function Models() {
       return;
     }
     try {
-      const r = await modelsApi.verify(m.name, target.name);
-      if (r.ok) {
+      const r = await modelsApi.usableBy(m.name, target.name);
+      if (r.usable) {
         message.success(`${m.name}: ${r.objects} objects satisfy ${r.engine}`);
       } else {
         message.error(`${m.name} is incomplete for ${r.engine}: ${r.missing.join(', ')}`);

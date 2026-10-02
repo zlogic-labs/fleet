@@ -78,7 +78,7 @@ done
 #   memoryMiB           32 GiB        -> 32768
 #   gpu.totalMemoryMiB  8x 80 GiB     -> 655360
 #   allocatableMemoryMiB  31 GiB      -> 31800
-code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/operator/inventory" \
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/inventory" \
   -H 'Content-Type: application/json' -d '{
   "cluster": {
     "name": "k3s-dev", "reachable": true, "version": "v1.36.4+k3s1",

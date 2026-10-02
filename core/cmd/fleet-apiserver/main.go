@@ -15,8 +15,10 @@ import (
 
 	"github.com/zlogic-labs/fleet/core/internal/apiserver"
 	"github.com/zlogic-labs/fleet/core/internal/blobstore"
+	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/hub"
 	"github.com/zlogic-labs/fleet/core/internal/registry"
+	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 )
 
 var version = "dev"
@@ -39,6 +41,8 @@ type flags struct {
 	dev            bool
 	devDelay       time.Duration
 	logLevel       string
+	databaseURL    string
+	migrate        bool
 	showVer        bool
 }
 
@@ -47,6 +51,10 @@ func run() error {
 	fs := flag.NewFlagSet("fleet-apiserver", flag.ExitOnError)
 	fs.StringVar(&f.listen, "listen", envOr("FLEET_APISERVER_LISTEN", ":8081"),
 		"address to serve the management API on")
+	fs.StringVar(&f.databaseURL, "database", envOr("FLEET_DATABASE_URL", ""),
+		"PostgreSQL URL; without one the control plane runs but has no tenancy")
+	fs.BoolVar(&f.migrate, "database-migrate", envBool("FLEET_DATABASE_MIGRATE", true),
+		"create the schema at startup; IF NOT EXISTS only creates what is absent")
 	fs.StringVar(&f.dataDir, "data", envOr("FLEET_DATA_DIR", "./fleet-data"),
 		"directory for the local object store, used when no S3 endpoint is configured")
 	fs.StringVar(&f.hubURL, "hub", envOr("FLEET_HUB_URL", "https://huggingface.co"),
@@ -93,6 +101,36 @@ func run() error {
 		"version", version, "listen", f.listen, "hub", note,
 		"pull_concurrency", f.pullConc)
 
+	// No URL means no tenancy. Everything else in the control plane works
+	// without a database, and refusing to start would make PostgreSQL a
+	// prerequisite for trying Fleet.
+	var db *sqlstore.DB
+	if f.databaseURL != "" {
+		db, err = sqlstore.Open(ctx, sqlstore.Config{
+			URL: f.databaseURL, ConnectTimeout: 10 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		if f.migrate {
+			if err := db.Migrate(ctx); err != nil {
+				return err
+			}
+		}
+	} else {
+		log.Warn("no --database; tenants, keys and budgets are unavailable")
+	}
+
+	var policySource *sqlstore.PolicySource
+	var keyStore *sqlstore.KeyStore
+	var quotaStore *sqlstore.Quota
+	if db != nil {
+		policySource = sqlstore.NewPolicySource(db, ratelimit.Policy{})
+		keyStore = sqlstore.NewKeyStore(db, sqlstore.NewTTLCache(5*time.Minute, 4096))
+		quotaStore = sqlstore.NewQuota(db)
+	}
+
 	srv, err := apiserver.NewServer(apiserver.Config{
 		Listen:          f.listen,
 		Blobs:           store,
@@ -101,6 +139,10 @@ func run() error {
 		FileConcurrency: f.fileConc,
 		AllowedOrigins:  f.allowedOrigins,
 		Version:         version,
+		DB:              db,
+		Policies:        policySource,
+		Keys:            keyStore,
+		Quota:           quotaStore,
 	}, registry.NewMemory(), log)
 	if err != nil {
 		return err
@@ -186,11 +228,4 @@ func newLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

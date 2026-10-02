@@ -48,7 +48,7 @@ func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) verifyModel(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getRepository(w http.ResponseWriter, r *http.Request) {
 	name := modelName(w, r)
 	if name == "" {
 		return
@@ -72,10 +72,11 @@ func (s *Server) verifyModel(w http.ResponseWriter, r *http.Request) {
 		missing = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"name":    name,
 		"engine":  engineName,
 		"objects": found,
 		"missing": missing,
-		"ok":      len(missing) == 0,
+		"usable":  len(missing) == 0,
 	})
 }
 

@@ -22,18 +22,26 @@ import (
 
 // Rule is one cap on one scope.
 type Rule struct {
-	ScopeKind ScopeKind
-	ScopeID   string
-	Dimension Dimension
+	ScopeKind ScopeKind `json:"scopeKind"`
+	ScopeID   string    `json:"scopeId"`
+	Dimension Dimension `json:"dimension"`
 	// Limit is in the dimension's own unit: tokens, or millionths of a quota
 	// unit for Units. Keeping it that way rather than normalising everything to
 	// one currency is what lets an operator state a budget in the terms they
 	// actually think in.
-	Limit int64
+	Limit int64 `json:"limit"`
 	// Window is how far back the rule looks. Rolling, not anchored: the last
 	// five hours means the last five hours, whenever the request arrives.
-	Window time.Duration
+	Window time.Duration `json:"-"`
 }
+
+// WindowSeconds is the window in seconds.
+//
+// Not a plain encoding of Window: a time.Duration marshals as nanoseconds, and
+// an operator reading 2592000000000 has to know it is nanoseconds to be
+// believed. Seconds is what the window was written as and what a reader
+// compares against.
+func (r Rule) WindowSeconds() int64 { return int64(r.Window / time.Second) }
 
 // Resolution is the bucket size this rule is enforced at. Derived from the
 // window and stored alongside it, so a rule keeps meaning the same thing even

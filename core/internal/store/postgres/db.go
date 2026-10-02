@@ -87,18 +87,21 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 
 // Migrate applies the schema.
 //
-// Idempotent, because every statement is CREATE ... IF NOT EXISTS and a
-// deployment that applies it on every boot should not need to know whether it
-// already ran. It is not a migration tool and does not pretend to be: there is
-// no down path, no version table, and no way to alter a column. Changing the
-// schema means writing a new statement and applying it deliberately.
+// Idempotent, so a deployment can apply it on every boot without knowing
+// whether it already ran. It is not a migration tool and does not pretend to
+// be: no down path, no version table.
 //
-// Note what idempotence does not give: an existing table with an old shape is
-// left exactly as it is. IF NOT EXISTS means "create if absent", not "make
-// match", so a column added to schema.sql after a deployment started does not
-// appear until someone alters the table. That is a deliberate trade for having
-// no migration tool at all — an ALTER that silently rewrites a ledger table is
-// worse than an operator running one by hand.
+// The rule for what belongs in here is that a statement must be additive and
+// must not rewrite existing rows. CREATE ... IF NOT EXISTS and ALTER TABLE ...
+// ADD COLUMN IF NOT EXISTS qualify; anything that rewrites a ledger table does
+// not, and that needs a real migration with a reviewed down path. The line is
+// drawn at "rewrites data", not at "changes the schema" — an operator who has
+// to run an ALTER by hand is an operator who forgets.
+//
+// The consequence to keep in mind: an existing table keeps its old columns.
+// IF NOT EXISTS means "create if absent", never "make match", so a column
+// added to schema.sql after a deployment started only appears for deployments
+// that ran the statement that adds it.
 func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := db.pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("postgres: apply schema: %w", err)

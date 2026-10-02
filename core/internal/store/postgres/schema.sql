@@ -94,9 +94,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
     key_hash     bytea       NOT NULL UNIQUE,
     key_prefix   text        NOT NULL,  -- for display: "sk-fleet-a3f2…"
     label        text        NOT NULL DEFAULT '',
+    -- Expiry and revocation are different states. An expired key could be
+    -- extended; a revoked one leaked, and letting it come back by moving
+    -- expires_at would turn a credential compromise into a scheduling
+    -- decision.
     expires_at   timestamptz,
+    revoked_at   timestamptz,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- Additive migrations, because CREATE TABLE IF NOT EXISTS is not one. It
+-- creates a table that is absent and leaves an existing one exactly as it was,
+-- so a column added after a deployment has shipped needs its own statement.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS api_keys_active_idx ON api_keys (project_id) WHERE revoked_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS api_keys_tenant_idx  ON api_keys (tenant_id);
 CREATE INDEX IF NOT EXISTS api_keys_project_idx ON api_keys (project_id);

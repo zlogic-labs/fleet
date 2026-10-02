@@ -11,7 +11,7 @@ export interface Model {
 export interface FleetStatus {
   edition: 'community' | 'enterprise';
   customer?: string;
-  expires_at?: string;
+  expiresAt?: string;
   version: string;
   capabilities: string[];
   endpoints: EndpointStatus[];
@@ -20,24 +20,24 @@ export interface FleetStatus {
 
 export interface EndpointStatus {
   model: string;
-  base_url: string;
+  baseUrl: string;
   replicas: number;
   healthy: boolean;
-  queue_depth: number;
-  running_requests: number;
-  kv_cache_used: number;
+  queueDepth: number;
+  runningRequests: number;
+  kvCacheUsed: number;
 }
 
 export interface RecentSample {
   model: string;
   endpoint: string;
   streamed: boolean;
-  ttft_ms: number;
-  duration_ms: number;
-  usage_known: boolean;
-  prompt_tokens: number;
-  completion_tokens: number;
-  cached_tokens: number;
+  ttftMs: number;
+  durationMs: number;
+  usageKnown: boolean;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
   estimated: boolean;
 }
 
@@ -176,5 +176,54 @@ export const CAPABILITIES: Record<string, string> = {
   policy: 'Request policy engine',
   multicluster: 'Multi-cluster control',
   ha: 'Replicated control plane',
-  cost_export: 'Scheduled cost export',
+  costExport: 'Scheduled cost export',
 };
+
+export interface Tenant {
+  id: string;
+  name: string;
+  requestLimit: number;
+  tokenLimit: number;
+  active: boolean;
+  createdAt: number;
+  projects?: Project[];
+}
+
+export interface Project {
+  id: string;
+  tenantId: string;
+  name: string;
+  requestLimit: number;
+  tokenLimit: number;
+  createdAt: number;
+}
+
+export interface ApiKey {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  label: string;
+  prefix: string;
+  createdAt: number;
+  revokedAt?: number;
+}
+
+export type BudgetDimension =
+  | 'tokens_total'
+  | 'tokens_input'
+  | 'tokens_output'
+  | 'tokens_cached'
+  | 'tokens_fresh'
+  | 'units';
+
+export interface BudgetRule {
+  scopeKind: 'tenant' | 'project';
+  scopeId: string;
+  dimension: BudgetDimension;
+  limit: number;
+  /** Serialised Go duration or Fleet alias: "5h", "1mo", "1w". */
+  window: string;
+  windowText?: string;
+  windowSeconds?: number;
+  resolutionSeconds?: number;
+}

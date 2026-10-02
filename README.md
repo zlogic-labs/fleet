@@ -155,6 +155,47 @@ moved, rather than being silently accepted with the numbers dropped.
 `/healthz` and `/health` stay unauthenticated, because a Kubernetes probe
 cannot hold a credential and a 401 there reports a healthy pod as dead.
 
+### Tenants, keys and budgets in PostgreSQL
+
+The env-var configuration above is for a gateway with no database. Connect one
+and tenants, keys and budgets become rows, created through the API:
+
+```sh
+export FLEET_DATABASE_URL='postgres://user:pass@host:5432/fleet?sslmode=disable'
+./scripts/dev.sh        # the control plane picks it up; the gateway is left alone
+```
+
+```sh
+A=http://127.0.0.1:8081/api/v1
+
+curl -X POST $A/tenants -H 'content-type: application/json'   -d '{"id":"acme","name":"Acme","requestLimit":1200,"tokenLimit":400000}'
+curl -X POST $A/projects -H 'content-type: application/json'   -d '{"tenantId":"acme","name":"research","requestLimit":600,"tokenLimit":200000}'
+
+# The secret is in this response and nowhere else: only its hash is stored.
+curl -X POST $A/keys -H 'content-type: application/json'   -d '{"projectId":"acme/research","label":"team-a"}'
+
+# A budget is a dimension over a window, not one number. Several rules apply
+# at once: 5M tokens per 5 hours AND 200 units per 30 days.
+curl -X POST $A/budget-rules -H 'content-type: application/json'   -d '{"scopeKind":"tenant","scopeId":"acme","dimension":"tokens_total","limit":5000000,"window":"5h"}'
+curl -X POST $A/budget-rules -H 'content-type: application/json'   -d '{"scopeKind":"tenant","scopeId":"acme","dimension":"units","limit":200,"window":"1mo"}'
+```
+
+Windows roll: `1mo` is 30 days, because a window that is sometimes 28 days is
+not a budget anyone can reason about. The calendar month still exists, for the
+cost pool in `docs/architecture.md` §6 — a different window, not a switch on
+this one.
+
+Dimensions are `tokens_total`, `tokens_input`, `tokens_output`, `tokens_cached`,
+`tokens_fresh` and `units`. `tokens_fresh` is the one that matters on a
+deployment with a warm prefix cache: total prompt tokens can be orders of
+magnitude above what was actually charged, so a budget on the total stops a
+tenant who has barely spent anything.
+
+The whole API is plural, top-level and slash-tolerant — see
+`docs/architecture.md` §11.6 for the three rules and why each one is there.
+A tenant or project that has billed requests cannot be deleted; set
+`active: false` instead, because usage refers to it.
+
 ### What each page does in the default run
 
 | Page | Backed by | Needs |

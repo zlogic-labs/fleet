@@ -21,6 +21,15 @@ GATEWAY_PORT=${GATEWAY_PORT:-8080}
 APISERVER_PORT=${APISERVER_PORT:-8081}
 DATA_DIR=${DATA_DIR:-$ROOT/.dev}
 
+# Taken and then dropped. Left in the environment, every child inherits it, and
+# the gateway reads a database as "keys are configured" — which it refuses to
+# start on unless auth is on. The dev gateway has no tenancy, so it must not
+# see one. Only the control plane is given the URL.
+DB_URL=${FLEET_DATABASE_URL:-}
+unset FLEET_DATABASE_URL
+DB_FLAG=""
+[ -n "$DB_URL" ] && DB_FLAG="--database $DB_URL"
+
 HUB_FLAG=--dev
 if [ "${1:-}" = "--real" ]; then
   HUB_FLAG=
@@ -37,8 +46,11 @@ mkdir -p "$DATA_DIR"
 # The dist directory must exist for the embed directive to compile, even when
 # it is only the placeholder.
 mkdir -p core/internal/gateway/webui/dist
-if [ ! -f core/internal/gateway/webui/dist/index.html ]; then
-  echo "==> console not built; building it now (first run only)"
+# Rebuilt whenever the source is newer than the bundle. Checking only for the
+# file's absence means a stale bundle is served indefinitely, and the console
+# then calls endpoints that were renamed and silently renders an error.
+if [ ! -f core/internal/gateway/webui/dist/index.html ]   || [ -n "$(find web/src -newer core/internal/gateway/webui/dist/index.html 2>/dev/null | head -1)" ]; then
+  echo "==> console out of date; building it now"
   if command -v npm >/dev/null 2>&1; then
     [ -d web/node_modules ] || npm --prefix web ci
     npm --prefix web run build
@@ -72,6 +84,7 @@ echo "==> control plane on :$APISERVER_PORT (data in $DATA_DIR)"
 FLEET_DATA_DIR="$DATA_DIR" go -C core run ./cmd/fleet-apiserver \
   --listen "127.0.0.1:$APISERVER_PORT" \
   --data "$DATA_DIR" \
+  $DB_FLAG \
   $HUB_FLAG &
 APISERVER_PID=$!
 

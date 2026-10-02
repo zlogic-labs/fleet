@@ -199,13 +199,14 @@ func (s *KeyStore) CreateKey(ctx context.Context, tenant, project, label string)
 		}
 
 		var projectID string
-		// ON CONFLICT DO NOTHING then SELECT, because an existing project is
-		// the common case: a team adds a second key, it does not add a second
-		// project. A plain INSERT would need the caller to know which it was.
+		// ON CONFLICT with no target, because a project is unique on both id
+		// and (tenant_id, name) and naming one constraint leaves the other to
+		// raise. An existing project is the common case anyway: a team adds a
+		// second key, it does not add a second project.
 		const insProject = `
 			INSERT INTO projects (id, tenant_id, name)
 			VALUES ($1, $2, $3)
-			ON CONFLICT (id) DO NOTHING`
+			ON CONFLICT DO NOTHING`
 		pid := tenant + "/" + project
 		if _, err := tx.Exec(ctx, insProject, pid, tenant, project); err != nil {
 			return fmt.Errorf("postgres: create project: %w", err)

@@ -411,6 +411,19 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 阶段 1–4 全部不依赖 Kubernetes，可以纯 Go 单测覆盖。**这是把模块边界划在 P7 的直接收益。**
 
+### 11.1 权重的分发策略不是一个全局开关
+
+原来这条是"共享存储（GPFS/Lustre）vs 节点本地 NVMe + 预热"二选一。引入 `weights.Format` 之后**问题变了**：策略随格式走，所以不该是一个全局选择。
+
+| 格式 | 典型体积 | 合理分发 |
+|---|---|---|
+| safetensors | DeepSeek-R1 671B = 1.3 TB | **只能**共享存储。复制到节点在物理上不成立。 |
+| GGUF（Q4） | 0.5B–70B = 0.4–45 GB | 复制到节点本地 NVMe + 预热可行，冷启动从分钟级降到秒级。 |
+
+也就是说：GGUF 部署的 autoscaler 冷启动可以做到可接受，safetensors 671B 部署的冷启动本质上是"加载 1.3 TB"的时间，扩缩容策略必须承认这个事实而不是假装可以预热。
+
+这直接影响 P/D 分离是否可行，也影响 `FleetDeploymentSpec` 要不要显式声明 `WeightDelivery: shared | nodeLocal`。**倾向**：显式声明，operator 据此选 init container 还是直接挂载——但两条路径都还在 operator 里，尚未实现。
+
 ### 11.2 认证与限流：十三处不显然的取舍
 
 阶段 2 已落地（`pkg/authn` + `internal/gateway/ratelimit`）。下面十三处决策看起来是小事，实际每一处都曾写错或差点写错，值得留下理由。
@@ -505,8 +518,6 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 ### 11.5 这一节的四条不变式
 
-### 11.5 这一节的四条不变式
-
 `internal/gateway/billing_test.go` 对着真 PostgreSQL 跑，断言的就是这四条：
 
 1. 记录归到**鉴权认出的**租户/project/key，不是请求体里的任何东西；
@@ -514,25 +525,26 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 3. token 用**引擎报的**，不是预留的上界（客户端要 4096 拿到 7 个，就只收 7 个）；
 4. 没价格的模型、没报 usage 的引擎，行都在，且标得出来。
 
-## 11. 待定
+### 11.6 API 风格：为什么只有三条规则
+
+整个控制面和网关的 `/fleet/status` 共用同一套形状，规则只有三条，其余都是从这三条推出来的：
+
+1. **集合一律复数、置于顶层。** `/tenants`、`/projects`、`/keys`、`/budget-rules`、`/models`、`/pulls`、`/deployments`、`/clusters`。没有 `/tenant/{id}/projects` 这种嵌套——嵌套深一层，删除一个父节点时子节点的归属就要单独回答一次。
+2. **条目的 id 允许含斜杠，所以条目路由以 `*` 结尾。** 租户是 `acme`，项目是 `acme/research`，预算是 `tenant/acme/tokens_total/5h`。chi 的 `{id}` 和 `{id:.+}` **都会在第一个斜杠停下**（实测三种 pattern 全部 404），`%2F` 编码形式却能通——于是同一份资源有两个地址，取决于客户端有没有编码。`*` 取整段再 unescape，两种写法落到同一行。
+3. **动词不是路由。** 曾经的 `GET/POST /verify/{name}` 是一个"对资源做某个动作"的写法，现在它是 `GET /repositories/{name}?engine=…`——能不能被某个引擎加载是资源的一个属性，返回的就是资源本身。同理 `POST /deployments/{name}/scale` 变成 `PATCH /deployments/{name}`，`POST /operator/inventory` 变成 `PUT /inventory`（上报的是整个集群状态，报两次必须是幂等的，而不是两份）。
+
+**没有数据库时，租户路由返回 400 而不是空列表。** 空列表读起来像"这个平台没有租户"，而真相是"你没接数据库"。让开发笔记本零配置可用，和让缺配置看起来像正常状态，是两件必须分开的事。
+
+**三个 500 是真的不够。** 存储层区分 not found / conflict / invalid 三类，对应 404 / 409 / 400：唯一约束冲突和"我们坏了"给出的补救方向正好相反，对前者返回 500 会让客户端一直重试。同时 5xx 的原因只进日志不进响应体——`errs.Internal` 正是为此存在的，而原因必须**落到某个地方**，否则排查只能靠猜。
+
+**迁移的边界画在"会不会重写数据"上，不在"会不会改表结构"。** `CREATE TABLE IF NOT EXISTS` 对已存在的表什么也不做，所以后来新增的列需要自己一条 `ALTER TABLE … ADD COLUMN IF NOT EXISTS`（本轮加 `api_keys.revoked_at` 就是）。会重写既有行（尤其是账本）的语句不放进 schema.sql，那需要真正的迁移工具和一条审过的 down 路径。
+
+## 12. 待定
 
 - `[待定]` 是否第一版就支持 Anthropic 原生协议，还是只做 OpenAI 兼容 + 一个转换层
 - `[待定]` 成本池的计价周期（自然月 vs 滚动窗口）与跨周期欠款处理
 
-### 11.1 权重的分发策略不是一个全局开关
-
-原来这条是"共享存储（GPFS/Lustre）vs 节点本地 NVMe + 预热"二选一。引入 `weights.Format` 之后**问题变了**：策略随格式走，所以不该是一个全局选择。
-
-| 格式 | 典型体积 | 合理分发 |
-|---|---|---|
-| safetensors | DeepSeek-R1 671B = 1.3 TB | **只能**共享存储。复制到节点在物理上不成立。 |
-| GGUF（Q4） | 0.5B–70B = 0.4–45 GB | 复制到节点本地 NVMe + 预热可行，冷启动从分钟级降到秒级。 |
-
-也就是说：GGUF 部署的 autoscaler 冷启动可以做到可接受，safetensors 671B 部署的冷启动本质上是"加载 1.3 TB"的时间，扩缩容策略必须承认这个事实而不是假装可以预热。
-
-这直接影响 P/D 分离是否可行，也影响 `FleetDeploymentSpec` 要不要显式声明 `WeightDelivery: shared | nodeLocal`。**倾向**：显式声明，operator 据此选 init container 还是直接挂载——但两条路径都还在 operator 里，尚未实现。
-
-## 12. 社区版与企业版
+## 13. 社区版与企业版
 
 ### 12.1 唯一的硬性规则：不 fork
 

@@ -16,6 +16,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/blobstore"
 	"github.com/zlogic-labs/fleet/core/internal/hub"
 	"github.com/zlogic-labs/fleet/core/internal/registry"
+	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
@@ -31,6 +32,13 @@ type Config struct {
 	Hub hub.Hub
 	// Token authenticates to gated Hub repositories.
 	Token string
+	// DB is where tenants, keys, budgets and the ledger live.
+	DB *sqlstore.DB
+	// Policies, Keys and Quota are the stores the tenancy routes write
+	// through. Required whenever DB is set.
+	Policies *sqlstore.PolicySource
+	Keys     *sqlstore.KeyStore
+	Quota    *sqlstore.Quota
 	// PullConcurrency is how many pulls may run at once.
 	PullConcurrency int
 	// FileConcurrency is how many files within one pull may download at once.
@@ -51,11 +59,22 @@ type Server struct {
 	puller   *Puller
 	worker   *registry.Worker
 	log      *slog.Logger
+	db       *sqlstore.DB
+	policies *sqlstore.PolicySource
+	keys     *sqlstore.KeyStore
+	quota    *sqlstore.Quota
 }
 
 func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, error) {
 	if store == nil {
 		store = registry.NewMemory()
+	}
+	// The database is optional. Without one the gateway, the console and the
+	// pull queue all work; only tenancy is missing, and its routes say so
+	// rather than answering with an empty list that reads as "no tenants".
+	// A laptop with no PostgreSQL is a supported way to try Fleet.
+	if cfg.DB != nil && (cfg.Policies == nil || cfg.Keys == nil || cfg.Quota == nil) {
+		return nil, errs.InvalidArgument("apiserver: Policies, Keys and Quota are required with DB")
 	}
 	blobs := cfg.Blobs
 	if blobs == nil {
@@ -78,6 +97,7 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	return &Server{
 		cfg: cfg, store: store, blobs: blobs, hub: h, profiles: profiles,
 		puller: puller, worker: worker, log: log,
+		db: cfg.DB, policies: cfg.Policies, keys: cfg.Keys, quota: cfg.Quota,
 	}, nil
 }
 
@@ -107,14 +127,15 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/models", s.listModels)
 		r.Get("/models/*", s.getModel)
 		r.Delete("/models/*", s.deleteModel)
-		// Verify lives under its own prefix rather than as /models/*/verify:
-		// a wildcard cannot be followed by a fixed segment, and
-		// /models/owner/verify would be ambiguous with a model named verify.
-		// GET is the real method — the check only lists objects — and the
-		// engine it targets arrives as a query parameter, which a link and a
-		// curl can carry and a body cannot.
-		r.Get("/verify/*", s.verifyModel)
-		r.Post("/verify/*", s.verifyModel)
+		// A repository is what is stored under a name: the weight set, whether
+		// or not an engine can load it. Asking whether it is usable is a
+		// property of that resource, so it is a GET returning the resource, not
+		// a verb-named route that performs an action.
+		//
+		// It cannot live at /models/*/usability: chi will not match a fixed
+		// segment after a wildcard, and /models/owner/usable would be
+		// ambiguous with a model named "usable".
+		r.Get("/repositories/*", s.getRepository)
 
 		r.Post("/pulls", s.startPull)
 		r.Get("/pulls", s.listPulls)
@@ -123,16 +144,40 @@ func (s *Server) Handler() http.Handler {
 
 		r.Get("/storage", s.storageInfo)
 
-		// The engine catalogue. It is data, and exposing it lets the console
-		// show which engines can load which model instead of offering a
-		// combination that will be refused at admission.
+		// The engine catalogue, so the console can show which engines can load
+		// which model instead of offering a combination refused at admission.
 		r.Get("/engines", s.listEngines)
 
-		// The operator reports here. Neither this nor the read side knows
-		// what Kubernetes is; the operator is the only component that does.
-		r.Post("/operator/inventory", s.reportInventory)
-		r.Get("/cluster", s.clusterStatus)
+		// The operator replaces what it observes. PUT rather than POST because
+		// the payload is the whole cluster state and posting it twice must
+		// leave the same state, not two copies.
+		r.Put("/inventory", s.reportInventory)
+		r.Get("/clusters", s.clusterStatus)
 		r.Get("/deployments", s.listDeployments)
+
+		// Tenancy. Every collection is top-level and plural; an item's id may
+		// contain a slash, so item routes end in "*" rather than "{id}" —
+		// chi's named parameters stop at the first slash, which would make
+		// acme/research unreachable while acme%2Fresearch worked.
+		r.Get("/tenants", s.listTenants)
+		r.Post("/tenants", s.createTenant)
+		r.Get("/tenants/*", s.getTenant)
+		r.Patch("/tenants/*", s.updateTenant)
+		r.Delete("/tenants/*", s.deleteTenant)
+
+		r.Get("/projects", s.listProjects)
+		r.Post("/projects", s.createProject)
+		r.Get("/projects/*", s.getProject)
+		r.Patch("/projects/*", s.updateProject)
+		r.Delete("/projects/*", s.deleteProject)
+
+		r.Get("/keys", s.listKeys)
+		r.Post("/keys", s.createKey)
+		r.Delete("/keys/*", s.deleteKey)
+
+		r.Get("/budget-rules", s.listBudgetRules)
+		r.Post("/budget-rules", s.putBudgetRule)
+		r.Delete("/budget-rules/*", s.deleteBudgetRule)
 	})
 
 	return r

@@ -70,8 +70,8 @@ func (r *Reporter) Send(ctx context.Context, rep inventory.Report) error {
 	if err != nil {
 		return errs.Internal(err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		r.URL+"/api/v1/operator/inventory", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		r.URL+"/api/v1/inventory", bytes.NewReader(body))
 	if err != nil {
 		return errs.Internal(err)
 	}
