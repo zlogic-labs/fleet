@@ -43,7 +43,7 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 	// skips validation gets a gateway that serves nobody while reporting itself
 	// healthy. Validating twice is free; the alternative is a check that only
 	// applies to the deployments that happened to use the loader.
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(db); err != nil {
 		return nil, nil, err
 	}
 
@@ -79,12 +79,15 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 	if err != nil {
 		return nil, nil, err
 	}
+	prices, ledger := billingFor(cfg, db)
 
 	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, handler.ChatOptions{
 		MaxBytes:         int64(cfg.MaxBodyMB) << 20,
 		PrefixRunes:      prefixRunes(cfg.Upstreams),
 		DefaultMaxTokens: cfg.DefaultMaxTokens,
 		Limiter:          limiter,
+		Pricer:           prices,
+		Recorder:         ledger,
 	})
 
 	current := refresher.Endpoints

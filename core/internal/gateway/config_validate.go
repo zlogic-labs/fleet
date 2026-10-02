@@ -3,6 +3,7 @@ package gateway
 import (
 	"fmt"
 
+	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 )
 
@@ -18,7 +19,12 @@ import (
 //
 // First, not all — an operator fixing a config file should correct one thing at
 // a time, and a list of twelve errors reads as twelve unrelated problems.
-func (c Config) validate() error {
+//
+// db is the database the process actually holds, which is not always the one
+// the config names: Build is callable with a pool a caller opened itself, and
+// validating against the URL alone would reject a configuration that is
+// perfectly able to authenticate. Pass nil when there is no database.
+func (c Config) validate(db *sqlstore.DB) error {
 	if c.Listen == "" {
 		return fmt.Errorf("listen address is empty")
 	}
@@ -28,7 +34,7 @@ func (c Config) validate() error {
 	if c.ControlPlane.Every < 0 {
 		return fmt.Errorf("control_plane.refresh_every must not be negative")
 	}
-	if err := c.validateAuth(); err != nil {
+	if err := c.validateAuth(db != nil); err != nil {
 		return err
 	}
 	// The index, not the spec. A config with twenty keys and one typo is
@@ -60,8 +66,12 @@ func (c Config) validate() error {
 // error when there is nowhere at all to look one up. Without this the obvious
 // configuration — point Fleet at Postgres, let tenants live in it — would be
 // rejected by the very check that exists to catch a typo.
-func (c Config) validateAuth() error {
-	haveKeys := len(c.Auth.Keys) > 0 || c.Database.URL != ""
+//
+// hasDB is the database the caller holds, which can be non-nil while the URL
+// is empty (a caller that opened the pool itself) and non-empty while no pool
+// was opened yet (Load, before Run gets to it). Either one is enough.
+func (c Config) validateAuth(hasDB bool) error {
+	haveKeys := len(c.Auth.Keys) > 0 || c.Database.URL != "" || hasDB
 	if c.Auth.Required && !haveKeys {
 		return fmt.Errorf("auth.required is set but there are no keys: set auth.keys or database.url, " +
 			"or every request would be rejected")

@@ -94,7 +94,7 @@ func TestProjectLimitAboveItsEnvelopeIsRejected(t *testing.T) {
 				Projects: []string{spec},
 			},
 		}
-		if err := cfg.validate(); err == nil {
+		if err := cfg.validate(nil); err == nil {
 			t.Errorf("validate accepted %q, want an error: it can never apply", spec)
 		}
 	}
@@ -108,7 +108,7 @@ func TestProjectLimitAboveItsEnvelopeIsRejected(t *testing.T) {
 			Projects: []string{"acme/research|rpm=100,tpm=5000"},
 		},
 	}
-	if err := ok.validate(); err != nil {
+	if err := ok.validate(nil); err != nil {
 		t.Errorf("validate rejected a partition equal to its envelope: %v", err)
 	}
 }
@@ -124,7 +124,7 @@ func TestProjectLimitIsAllowedUnderAnUnlimitedEnvelope(t *testing.T) {
 		// No envelope declared, but the server default is unlimited.
 		{Projects: []string{"acme/research|rpm=5,tpm=200"}},
 	} {
-		if err := (Config{Listen: "127.0.0.1:0", MaxBodyMB: 1, RateLimits: cfg}).validate(); err != nil {
+		if err := (Config{Listen: "127.0.0.1:0", MaxBodyMB: 1, RateLimits: cfg}).validate(nil); err != nil {
 			t.Errorf("validate rejected %+v: %v", cfg, err)
 		}
 	}
@@ -177,7 +177,7 @@ func TestDuplicateLimitDeclarationsAreRejected(t *testing.T) {
 	}
 	for name, rl := range cases {
 		cfg := Config{Listen: "127.0.0.1:0", MaxBodyMB: 1, RateLimits: rl}
-		if err := cfg.validate(); err == nil {
+		if err := cfg.validate(nil); err == nil {
 			t.Errorf("%s: validate succeeded, want an error", name)
 		}
 	}
@@ -197,7 +197,7 @@ func TestMalformedLimitDeclarationsAreRejected(t *testing.T) {
 	}
 	for name, rl := range cases {
 		cfg := Config{Listen: "127.0.0.1:0", MaxBodyMB: 1, RateLimits: rl}
-		if err := cfg.validate(); err == nil {
+		if err := cfg.validate(nil); err == nil {
 			t.Errorf("%s: validate succeeded, want an error", name)
 		}
 	}
@@ -211,7 +211,7 @@ func TestKeySpecsCarryingLimitsFailStartup(t *testing.T) {
 		Listen: "127.0.0.1:0", MaxBodyMB: 1,
 		Auth: AuthConfig{Required: true, Keys: []string{"acme/research/admin|rpm=10"}},
 	}
-	err := cfg.validate()
+	err := cfg.validate(nil)
 	if err == nil {
 		t.Fatal("validate accepted a key spec carrying limits")
 	}

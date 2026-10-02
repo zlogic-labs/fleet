@@ -95,11 +95,11 @@ func TestDatabaseSatisfiesTheKeyRequirement(t *testing.T) {
 		// No Build call: it would try to connect. This is validate alone,
 		// which is what Load calls and what the check lives in.
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.validate(nil); err == nil {
 		t.Error("required with no keys and no database was accepted")
 	}
 	cfg.Database.URL = "postgres://localhost/fleet"
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(nil); err != nil {
 		t.Errorf("required with a database and no key list was rejected: %v", err)
 	}
 }

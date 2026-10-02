@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
+	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // Price book storage.
@@ -115,6 +116,22 @@ func (s *PriceStore) Pricer(ctx context.Context) (*billing.Pricer, error) {
 		}
 	}
 	return s.pricer, nil
+}
+
+// Charge implements billing.Pricer.
+//
+// The refresh happens here rather than being left to the caller, because a
+// caller that remembered to refresh and one that did not would price the same
+// model two different ways, and only one of them would be in the ledger.
+//
+// A refresh that fails while a pricer already exists is ignored: stale prices
+// beat no prices. See Pricer.
+func (s *PriceStore) Charge(ctx context.Context, model string, u openai.Usage) (billing.Amount, error) {
+	p, err := s.Pricer(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return p.Charge(model, u)
 }
 
 // BookID returns the price book row id recorded on ledger events for a model.

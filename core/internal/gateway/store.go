@@ -8,6 +8,7 @@ import (
 
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
+	"github.com/zlogic-labs/fleet/core/pkg/billing"
 )
 
 // Where the gateway gets its tenants, keys and limits from.
@@ -48,6 +49,22 @@ func keyStore(cfg Config, db *sqlstore.DB) (authn.KeyStore, error) {
 		store.Put(p.Tenant+"/"+p.Project+"/"+p.KeyID, p, time.Time{})
 	}
 	return store, nil
+}
+
+// billingFor returns the price source and the ledger, both nil without a
+// database.
+//
+// Nil is what makes "keep no ledger" a supported configuration rather than a
+// crash: the handler treats a nil recorder as a deployment that does not bill,
+// so a laptop serves traffic with no database and a production deployment
+// serves the same code with one. The failure this avoids is the interesting
+// one — a gateway that recorded nothing while reporting itself healthy would
+// look exactly like a gateway that had billed correctly.
+func billingFor(cfg Config, db *sqlstore.DB) (billing.PricerSource, billing.Recorder) {
+	if db == nil {
+		return nil, nil
+	}
+	return sqlstore.NewPriceStore(db, cfg.Database.PriceRefresh), sqlstore.NewLedger(db)
 }
 
 // openDatabase connects when one is configured, and returns nil when it is not.

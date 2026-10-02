@@ -7,7 +7,6 @@ import (
 
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
-	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // ── end to end ─────────────────────────────────────────────────
@@ -58,22 +57,21 @@ func TestGatewayPathAgainstADatabase(t *testing.T) {
 	}
 
 	// settle and charge
-	usage := openai.Usage{PromptTokens: 1000, CompletionTokens: 200, TotalTokens: 1200}
-	amount, err := pricer.Charge("qwen-7b", usage)
+	u := usage(1000, 200, 0)
+	amount, err := pricer.Charge("qwen-7b", u)
 	if err != nil {
 		t.Fatalf("Charge: %v", err)
 	}
-	limiter.Settle(ctx, res, usage.TotalTokens)
+	limiter.Settle(ctx, res, u.TotalTokens)
 
 	ledger := NewLedger(db)
-	id, err := ledger.Append(ctx, Event{
+	id, err := ledger.Record(ctx, billing.Record{
 		Tenant: p.Tenant, Project: p.Project, KeyID: p.KeyID,
 		Model: "qwen-7b", PriceBook: prices.BookID("qwen-7b"),
-		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
-		AmountMicro: int64(amount), UsageKnown: true,
+		Usage: u, Amount: amount, UsageKnown: true,
 	})
 	if err != nil {
-		t.Fatalf("Append: %v", err)
+		t.Fatalf("Record: %v", err)
 	}
 	if id == 0 {
 		t.Error("the ledger returned no row id")

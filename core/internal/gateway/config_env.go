@@ -32,6 +32,7 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.ControlPlane.Token, "FLEET_CONTROL_PLANE_TOKEN")
 	setDuration(&cfg.ControlPlane.Every, "FLEET_CONTROL_PLANE_REFRESH")
 	setString(&cfg.Database.URL, "FLEET_DATABASE_URL")
+	setDuration(&cfg.Database.PriceRefresh, "FLEET_DATABASE_PRICE_REFRESH")
 
 	if v := os.Getenv("FLEET_DATABASE_MIGRATE"); v != "" {
 		cfg.Database.Migrate = v == "1" || strings.EqualFold(v, "true")

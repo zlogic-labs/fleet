@@ -11,6 +11,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
+	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
@@ -35,6 +36,13 @@ type Chat struct {
 	// request cost", which is the same question a quota answers per tenant.
 	DefaultMaxTokens int
 
+	// Pricer and Recorder are the billing side of a settled request, and both
+	// are nil when the deployment keeps no ledger. A gateway with neither still
+	// serves traffic and still enforces limits; it just cannot say afterwards
+	// what anything cost, which is a laptop, not a production shape.
+	Pricer   billing.PricerSource
+	Recorder billing.Recorder
+
 	samples *SampleLog
 }
 
@@ -45,6 +53,8 @@ type ChatOptions struct {
 	SampleBuffer     int
 	DefaultMaxTokens int
 	Limiter          ratelimit.Limiter
+	Pricer           billing.PricerSource
+	Recorder         billing.Recorder
 }
 
 // NewChat builds the handler and its rolling sample log, which the Fleet
@@ -71,6 +81,8 @@ func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver
 		MaxBytes:         opts.MaxBytes,
 		PrefixRunes:      opts.PrefixRunes,
 		DefaultMaxTokens: opts.DefaultMaxTokens,
+		Pricer:           opts.Pricer,
+		Recorder:         opts.Recorder,
 		samples:          NewSampleLog(opts.SampleBuffer),
 	}
 }
@@ -136,15 +148,13 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	result := tap.Result()
 
-	// Settle against what the engine reported, not what was asked for. P6:
-	// the engine's usage is the only authority, so a client claiming fewer
-	// tokens changes nothing, and a client that asked for 4096 and got 7 is
-	// refunded for the 4089 it did not use.
-	actual := promptTokens + maxOut
-	if result.UsageKnown && result.Usage != nil {
-		actual = result.Usage.TotalTokens
-	}
-	h.Limiter.Settle(r.Context(), reservation, actual)
+	// Settle against what the engine reported, not what was asked for. P6: the
+	// engine's usage is the only authority, so a client claiming fewer tokens
+	// changes nothing, and a client that asked for 4096 and got 7 is refunded
+	// for the 4089 it did not use. settle also prices the request and writes
+	// the ledger; see settle.go for the order and its reasons.
+	h.settle(r, reservation, ep, result, promptTokens, maxOut, req.Stream)
+
 	h.samples.Add(Sample{
 		Model:      req.Model,
 		Endpoint:   ep.ID,

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/zlogic-labs/fleet/core/pkg/billing"
 )
 
 // ── reports ────────────────────────────────────────────────────
@@ -17,14 +19,14 @@ func TestSpendReportCountsEstimatesSeparately(t *testing.T) {
 	ledger := NewLedger(db)
 
 	now := time.Now()
-	for _, e := range []Event{
-		{Tenant: "acme", Project: "research", Model: "m", PromptTokens: 100, CompletionTokens: 10, AmountMicro: 500, UsageKnown: true},
-		{Tenant: "acme", Project: "research", Model: "m", PromptTokens: 100, CompletionTokens: 10, CachedTokens: 60, AmountMicro: 300, UsageKnown: true},
-		{Tenant: "acme", Project: "sales", Model: "m", PromptTokens: 50, CompletionTokens: 5, AmountMicro: 700, UsageKnown: false},
+	for _, e := range []billing.Record{
+		{Tenant: "acme", Project: "research", Model: "m", Usage: usage(100, 10, 0), Amount: 500, UsageKnown: true},
+		{Tenant: "acme", Project: "research", Model: "m", Usage: usage(100, 10, 60), Amount: 300, UsageKnown: true},
+		{Tenant: "acme", Project: "sales", Model: "m", Usage: usage(50, 5, 0), Amount: 700, UsageKnown: false},
 	} {
 		e.OccurredAt = now
-		if _, err := ledger.Append(ctx, e); err != nil {
-			t.Fatalf("Append: %v", err)
+		if _, err := ledger.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
 		}
 	}
 
@@ -61,10 +63,10 @@ func TestWindowEndIsExclusive(t *testing.T) {
 	ledger := NewLedger(db)
 
 	boundary := time.Now().Truncate(time.Second)
-	if _, err := ledger.Append(ctx, Event{
-		Tenant: "acme", Model: "m", AmountMicro: 100, OccurredAt: boundary,
+	if _, err := ledger.Record(ctx, billing.Record{
+		Tenant: "acme", Model: "m", Usage: usage(1, 1, 0), Amount: 100, OccurredAt: boundary,
 	}); err != nil {
-		t.Fatalf("Append: %v", err)
+		t.Fatalf("Record: %v", err)
 	}
 
 	rows, err := db.SpendByTenant(ctx, "acme", Window{From: boundary, To: boundary})

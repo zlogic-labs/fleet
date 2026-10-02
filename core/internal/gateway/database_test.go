@@ -203,8 +203,11 @@ func buildWired(t *testing.T, db *sqlstore.DB, engineURL string) http.Handler {
 
 func truncateWired(t *testing.T, db *sqlstore.DB) {
 	t.Helper()
+	// price_books is in the list for a reason that cost a debugging session:
+	// without it a price written by one test is still in force for the next,
+	// and a test asserting "this model has no price" quietly fails.
 	if _, err := db.Pool().Exec(context.Background(),
-		"TRUNCATE api_keys, projects, tenants, usage_events CASCADE"); err != nil {
+		"TRUNCATE api_keys, projects, tenants, usage_events, price_books CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 }

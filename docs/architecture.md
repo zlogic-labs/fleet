@@ -172,13 +172,11 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `internal/gateway/routing` | endpoint 选择（rendezvous + 健康） | `Picker`, `Rendezvous` |
 | `internal/gateway/catalog` | 端点集合的活订阅：拉控制面 + 抓 load | `Refresher`, `Client` |
 | `internal/gateway/transport` | SSE 透传 + usage tap | `Proxy`, `Tap` |
-| `pkg/authn` | 凭据解析与主体（`internal/gateway/auth.go` 只是它的中间件接线） | `Principal`, `KeyStore`, `Lister`, `Limits` |
-| `internal/gateway/ratelimit` | 预留-结算式分层限流 | `Limiter`, `Policy`, `Limited` |
-| `internal/gateway/handler` | OpenAI 端点 handler | — |
-| `internal/gateway/usage` | UsageEvent 采集与落库 | `Sink` |
-| `internal/store/postgres` | 领域仓储 | 各 repository |
-| `internal/store/clickhouse` | 用量分析写入 | `Writer` |
-| `internal/billing` | 计价、账本、成本分摊 | `Pricer`, `Ledger` |
+| `pkg/authn` | 凭据解析与主体（`internal/gateway/auth.go` 只是它的中间件接线） | `Principal`, `KeyStore`, `Limits` |
+| `internal/gateway/ratelimit` | 预留-结算式分层限流 | `Limiter`, `Scope`, `Policies`, `Limited` |
+| `internal/gateway/handler` | OpenAI 端点 handler | `Chat`, `Samples` |
+| `pkg/billing` | 计价算术与账本行类型 | `Rate`, `Price`, `Pricer`, `Record`, `Recorder` |
+| `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流读路径、价格本、账本 | `DB`, `KeyStore`, `PolicySource`, `PriceStore`, `Ledger` |
 | `internal/apiserver` | 控制台 REST API | — |
 
 ### `operator`（module `.../fleet/operator`）
@@ -405,7 +403,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 | 1 | `pkg/*` + `internal/engine` + gateway transport | curl 打到 mock endpoint，SSE 完整透传，usage 能取到 |
 | 2 | auth + 限流 + 配额预留/结算 | 超限返回 429，预留正确回滚 |
 | 3 | routing：一致性哈希 + 健康 | 同前缀命中同端点，熔断能恢复 |
-| 4 | 计价 + 账本 + ClickHouse | 账实一致，对账任务能跑 |
+| 4 | 计价 + 账本 + ClickHouse | 账实一致，对账任务能跑（计价与 PostgreSQL 账本已落地，ClickHouse 明细与对账任务尚未） |
 | 5 | operator：CRD → K8s 原生 Deployment + Service | k3s 上 `kubectl apply` 能起一个引擎 |
 | 6 | 成本分摊 + 控制台 | 成本报表数字对得上 |
 | 7 | autoscaling + 调度器 | 队列深度驱动扩缩，无抖动 |
@@ -444,7 +442,40 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 配置：`FLEET_AUTH_REQUIRED`、`FLEET_API_KEYS`（分号分隔，`tenant/project/keyid`）、`FLEET_RATE_TENANTS`、`FLEET_RATE_PROJECTS`、`FLEET_RATE_RPM`、`FLEET_RATE_TPM`、`FLEET_DEFAULT_MAX_TOKENS`。启动时硬校验：要求鉴权却没给 key、不要求鉴权却给了 key、任何一条 key spec 解析失败或仍带限额、任何一条限额声明解析失败、project 限额高于其租户信封、同一 scope 声明两次——都拒绝启动。
 
-尚未实现：**配额与账本**。现在只有"每分钟多少请求/多少 token"，没有"这个租户这个月还能花多少"。P5 的预留-结算机制已经就位，配额是它的下一个消费者，`internal/billing` 的 `Ledger` 才是权威账本——限流计数器**不是**账本，重启即失忆，这是刻意的。
+接数据库后 `FLEET_API_KEYS` 就不再被读：key 存在 `api_keys` 表里，限流策略从 `tenants.request_limit` / `projects.request_limit` 读，价格从 `price_books` 读，账写 `usage_events`。`FLEET_DATABASE_URL` 设了就走数据库，不设全在内存——内存里没有账本，限流计数器也重启即失忆。配套的还有 `FLEET_DATABASE_MIGRATE`（启动时建表，`IF NOT EXISTS` 只保证"不存在才建"，不会把旧表改一致）和 `FLEET_DATABASE_PRICE_REFRESH`（默认 1 分钟，价格改了不用重启网关）。
+
+尚未实现：**配额**。现在只有"每分钟多少请求/多少 token"，没有"这个租户这个月还能花多少"。P5 的预留-结算机制已经就位，配额是它的下一个消费者。
+
+**限流计数器不是账本，重启即失忆，这是刻意的。** 它是一道闸，不是账。而账本已经落地：`internal/store/postgres` 的 `Ledger` 只增不改，`billing.Record` 是它的行类型，`internal/billing` 是计价算术。两者分开是因为生命周期不同——闸可以丢，账不能。
+
+### 11.3 结算路径：为什么是这三步、这个顺序
+
+阶段 4 的落账已经接到结算上（`internal/gateway/handler/settle.go`）。顺序本身是内容，不是实现细节：
+
+**限流先结算。** 它是三步里唯一持锁的一步，而租户的额度应该在它的请求结束那一刻就还回去——一次慢的价格查询不该让租户等完才能继续花钱。
+
+**计价第二，按引擎的 usage。** P6：引擎是 token 的唯一权威，所以价格查不到不会改变"花了多少"，只会改变"值多少"。
+
+**落账最后。** 它是三步里唯一可能失败的失败，而到这一步已经没有什么可以失败的了。响应此时已经写完。
+
+**响应写完之后才结算，而结算失败不影响响应。** 客户端已经拿到答案了，剩下的延迟是 Fleet 自己吸收的，上限 5 秒（`settleTimeout`）：够健康数据库用，又不至于让一个卡死的数据库把连接全占住——那会让**远多于一个请求**的流量失败。
+
+**结算用的 context 从请求 context 上摘下来。** 客户端中途断开不该取消一笔已经计费的请求的落账。token 是真的花掉了，与乎调用方有没有等着听完没有关系。
+
+**没有数据库 = 不记账，而不是报错。** `billingFor` 返回 nil，handler 把 nil 当"这套部署不记账"。笔记本和生产跑同一份代码，区别只有配置。
+
+**没有价格的模型照样落账，落成 0，并打 error 日志。** 有两个理由，第二个才是重点：第一，token 已经花掉了，行必须存在，否则用量凭空消失；第二，**一个模型在服务流量却没有价格，等于白送客户 GPU，系统里没有别的东西会说出来**。把"没有价格"报成 0 正是本包要消灭的失败模式，所以 `Charge` 的 error 意思是"这个模型没有价格"，永远不是"这个模型免费"。
+
+**账本记原始 token 数和拆开的 fresh/cached/reasoning，不记折算后的价。** 改定价规则时要能重跑历史，所以行里存的是事实和当时的价格本 id，`amounts_micro` 是那一笔真正收的数——报表不必去 join 一个可能已经改过的价格本。
+
+### 11.4 这一节的四条不变式
+
+`internal/gateway/billing_test.go` 对着真 PostgreSQL 跑，断言的就是这四条：
+
+1. 记录归到**鉴权认出的**租户/project/key，不是请求体里的任何东西；
+2. 记的是**端点实际解析到的**模型，不是客户端写的字符串（否则一个别名指向便宜模型就能改写上个月的账单）；
+3. token 用**引擎报的**，不是预留的上界（客户端要 4096 拿到 7 个，就只收 7 个）；
+4. 没价格的模型、没报 usage 的引擎，行都在，且标得出来。
 
 ## 11. 待定
 

@@ -63,6 +63,15 @@ type DatabaseConfig struct {
 	// that owns its database; leave it off where migrations are a separate,
 	// reviewed step.
 	Migrate bool `yaml:"migrate"`
+	// PriceRefresh is how often the effective price books are reloaded, so a
+	// price change reaches running gateways without a restart.
+	//
+	// A duration rather than a count because the two questions are different:
+	// "how fresh must a price be" and "how many are there" have no single
+	// answer between them. A minute is short enough that an operator does not
+	// have to think about it and long enough that the reload is not a query per
+	// request.
+	PriceRefresh time.Duration `yaml:"price_refresh"`
 }
 
 type ControlPlaneConfig struct {
@@ -175,5 +184,5 @@ func Load(path string) (Config, error) {
 	}
 
 	applyEnv(&cfg)
-	return cfg, cfg.validate()
+	return cfg, cfg.validate(nil)
 }
