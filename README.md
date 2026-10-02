@@ -196,6 +196,47 @@ The whole API is plural, top-level and slash-tolerant — see
 A tenant or project that has billed requests cannot be deleted; set
 `active: false` instead, because usage refers to it.
 
+### What the fleet actually cost
+
+Budgets are denominated in quota units because P8 says cost is fixed: an idle GPU
+burns money just as fast as a busy one, so what a request will cost cannot be
+known before the month closes. That leaves the question the platform exists to
+answer, which is what the period cost pool answers:
+
+```sh
+A=http://127.0.0.1:8081/api/v1
+
+# What one GPU-hour costs you. Fleet cannot know this — a cloud bill, a
+# colocation contract and a depreciated on-prem fleet have nothing in common.
+curl -X POST $A/cost-rates -H 'content-type: application/json'   -d '{"cluster":"k3s-dev","gpuHourMicro":3200000,"currency":"USD"}'
+
+# Close the month. 3.20 USD per GPU-hour.
+curl -X PUT "$A/cost-periods/2026-09"
+```
+
+The report reads as a sentence:
+
+| | |
+|---|---|
+| `pool` | what the fleet cost for the month |
+| `busy` | the part some request occupied |
+| `idle` | the difference — **the number P8 exists for** |
+| `allocated` | the pool, split across tenants by what they consumed |
+
+`busy + idle = pool` and `allocated = pool`, and both are true: idle capacity is
+a fixed cost, so it has to land on somebody's invoice. Allocating only the busy
+part would leave it unbilled and the operator would quietly absorb the exact
+problem the platform is supposed to surface.
+
+A closed period is immutable — closing twice is a 409, not a recalculation,
+because an invoice that can change after it was sent is not an invoice.
+
+Fleet refuses to close a month it did not watch. The capacity time series comes
+from the operator's own inventory reports, so on a fresh deployment a month is
+0% observed and the close answers 400 with the coverage it actually computed
+from. Publishing a pool of zero instead would be indistinguishable from a fleet
+that cost nothing. `?minCoverage=0` forces it, loudly.
+
 ### What each page does in the default run
 
 | Page | Backed by | Needs |

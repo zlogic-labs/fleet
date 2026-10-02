@@ -125,10 +125,12 @@ func run() error {
 	var policySource *sqlstore.PolicySource
 	var keyStore *sqlstore.KeyStore
 	var quotaStore *sqlstore.Quota
+	var costStore *sqlstore.CostStore
 	if db != nil {
 		policySource = sqlstore.NewPolicySource(db, ratelimit.Policy{})
 		keyStore = sqlstore.NewKeyStore(db, sqlstore.NewTTLCache(5*time.Minute, 4096))
 		quotaStore = sqlstore.NewQuota(db)
+		costStore = sqlstore.NewCostStore(db)
 	}
 
 	srv, err := apiserver.NewServer(apiserver.Config{
@@ -143,6 +145,7 @@ func run() error {
 		Policies:        policySource,
 		Keys:            keyStore,
 		Quota:           quotaStore,
+		Cost:            costStore,
 	}, registry.NewMemory(), log)
 	if err != nil {
 		return err

@@ -3,9 +3,11 @@ package apiserver
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/registry"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/inventory"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -24,9 +26,26 @@ func (s *Server) reportInventory(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, errs.InvalidArgument("cluster.name is required"))
 		return
 	}
+	// The operator does not stamp the report time, and Memory.ReportCluster
+	// stamps a copy the caller cannot see. Without this the capacity sample has
+	// no timestamp and the cost pool has no period to integrate over.
+	if report.Cluster.ReportedAt.IsZero() {
+		report.Cluster.ReportedAt = time.Now().UTC()
+	}
 	if err := s.store.ReportCluster(r.Context(), report.Cluster); err != nil {
 		openai.WriteError(w, errs.Internal(err))
 		return
+	}
+	if s.cost != nil {
+		if err := s.cost.RecordCapacity(r.Context(), inventory.Report{
+			Cluster:     report.Cluster,
+			Deployments: report.Deployments,
+		}); err != nil {
+			// The console state is already consistent; losing a cost sample is
+			// not a reason to tell the operator their inventory failed, and it
+			// shows up as a low coverage figure at close time.
+			s.log.Warn("capacity sample not recorded", "cluster", report.Cluster.Name, "error", err)
+		}
 	}
 	for _, d := range report.Deployments {
 		if err := s.store.UpsertDeployment(r.Context(), d); err != nil {

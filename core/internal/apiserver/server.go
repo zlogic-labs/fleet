@@ -39,6 +39,7 @@ type Config struct {
 	Policies *sqlstore.PolicySource
 	Keys     *sqlstore.KeyStore
 	Quota    *sqlstore.Quota
+	Cost     *sqlstore.CostStore
 	// PullConcurrency is how many pulls may run at once.
 	PullConcurrency int
 	// FileConcurrency is how many files within one pull may download at once.
@@ -63,6 +64,7 @@ type Server struct {
 	policies *sqlstore.PolicySource
 	keys     *sqlstore.KeyStore
 	quota    *sqlstore.Quota
+	cost     *sqlstore.CostStore
 }
 
 func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, error) {
@@ -73,8 +75,8 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	// pull queue all work; only tenancy is missing, and its routes say so
 	// rather than answering with an empty list that reads as "no tenants".
 	// A laptop with no PostgreSQL is a supported way to try Fleet.
-	if cfg.DB != nil && (cfg.Policies == nil || cfg.Keys == nil || cfg.Quota == nil) {
-		return nil, errs.InvalidArgument("apiserver: Policies, Keys and Quota are required with DB")
+	if cfg.DB != nil && (cfg.Policies == nil || cfg.Keys == nil || cfg.Quota == nil || cfg.Cost == nil) {
+		return nil, errs.InvalidArgument("apiserver: Policies, Keys, Quota and Cost are required with DB")
 	}
 	blobs := cfg.Blobs
 	if blobs == nil {
@@ -97,7 +99,7 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	return &Server{
 		cfg: cfg, store: store, blobs: blobs, hub: h, profiles: profiles,
 		puller: puller, worker: worker, log: log,
-		db: cfg.DB, policies: cfg.Policies, keys: cfg.Keys, quota: cfg.Quota,
+		db: cfg.DB, policies: cfg.Policies, keys: cfg.Keys, quota: cfg.Quota, cost: cfg.Cost,
 	}, nil
 }
 
@@ -178,6 +180,17 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/budget-rules", s.listBudgetRules)
 		r.Post("/budget-rules", s.putBudgetRule)
 		r.Delete("/budget-rules/*", s.deleteBudgetRule)
+
+		// The cost pool. Rates are what a GPU-hour costs the operator, which
+		// Fleet cannot know; periods are closed reports and are immutable.
+		r.Get("/cost-rates", s.listCostRates)
+		r.Post("/cost-rates", s.putCostRate)
+		r.Get("/cost-periods", s.listCostPeriods)
+		// PUT, not POST: closing creates the period resource at its own URL.
+		// A second close is a 409 rather than a silent replacement, because an
+		// invoice that can change after it was sent is not an invoice.
+		r.Put("/cost-periods/{period}", s.closeCostPeriod)
+		r.Get("/cost-periods/{period}", s.getCostPeriod)
 	})
 
 	return r

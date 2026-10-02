@@ -334,3 +334,71 @@ ALTER TABLE spend_counters ADD CONSTRAINT spend_counters_nonnegative CHECK (
     tokens_fresh_spent     >= 0 AND tokens_fresh_reserved  >= 0 AND
     units_spent_micro    >= 0 AND units_reserved_micro >= 0
 );
+-- What one GPU-hour costs the operator (P8).
+--
+-- Fleet cannot know this: a cloud bill, a colocation contract and a
+-- depreciated on-prem fleet have nothing in common. It is declared, per
+-- cluster, because a heterogeneous fleet does not have one rate.
+CREATE TABLE IF NOT EXISTS cost_rates (
+    cluster        text PRIMARY KEY,
+    gpu_hour_micro bigint      NOT NULL CHECK (gpu_hour_micro >= 0),
+    currency       text        NOT NULL DEFAULT 'USD',
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- Capacity as it was, over time.
+--
+-- This is what turns "we have eight GPUs" into "we had eight GPUs for three
+-- hours", and it only exists because the inventory report is append-only here.
+-- Without it the cost pool can be computed for the instant Fleet started
+-- watching and for no period at all.
+CREATE TABLE IF NOT EXISTS capacity_samples (
+    cluster   text        NOT NULL,
+    at        timestamptz NOT NULL,
+    gpu_count bigint      NOT NULL CHECK (gpu_count >= 0),
+    PRIMARY KEY (cluster, at)
+);
+
+CREATE TABLE IF NOT EXISTS deployment_samples (
+    deployment      text        NOT NULL,
+    cluster         text        NOT NULL,
+    at              timestamptz NOT NULL,
+    -- gpu_per_replica is kept beside the total so a request can be priced
+    -- against the shape of the deployment as it was when the request ran.
+    -- Joining the current shape instead would silently re-price a month every
+    -- time somebody scaled a replica.
+    gpu_per_replica integer     NOT NULL DEFAULT 1 CHECK (gpu_per_replica >= 0),
+    gpu_count       bigint      NOT NULL CHECK (gpu_count >= 0),
+    PRIMARY KEY (deployment, at)
+);
+
+CREATE INDEX IF NOT EXISTS deployment_samples_at_idx ON deployment_samples (at);
+CREATE INDEX IF NOT EXISTS usage_events_occurred_idx ON usage_events (occurred_at);
+
+-- A closed period, immutable.
+--
+-- Re-closing is refused rather than updated for the same reason the ledger is
+-- append-only: an invoice that can change after it was sent is not an invoice.
+-- A correction is a second row.
+CREATE TABLE IF NOT EXISTS cost_periods (
+    period           text PRIMARY KEY,
+    closed_at        timestamptz NOT NULL DEFAULT now(),
+    currency         text        NOT NULL DEFAULT '',
+    priced           boolean     NOT NULL DEFAULT false,
+    pool_micro       bigint      NOT NULL DEFAULT 0,
+    busy_micro       bigint      NOT NULL DEFAULT 0,
+    idle_micro       bigint      NOT NULL DEFAULT 0,
+    idle_percent     integer     NOT NULL DEFAULT 0,
+    coverage_percent integer     NOT NULL DEFAULT 0,
+    pool_gpu_seconds bigint      NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cost_allocations (
+    period       text NOT NULL,
+    scope        text NOT NULL,
+    gpu_seconds  bigint NOT NULL DEFAULT 0,
+    share        bigint NOT NULL DEFAULT 0,
+    amount_micro bigint NOT NULL DEFAULT 0,
+    usage_micro  bigint NOT NULL DEFAULT 0,
+    PRIMARY KEY (period, scope)
+);

@@ -594,6 +594,59 @@ else
     "$(curl -sS -o /dev/null -w '%{http_code}' "$API/tenants/$T")"
 fi
 
+# ── the cost pool ──────────────────────────────────────────────────
+# P8: what the fleet cost, what of it was used, and who is billed for it. Fleet
+# only started watching this cluster, so a month nobody reported on cannot be
+# closed — and refusing is the behaviour under test, not an obstacle to it.
+if curl -sS "$API/cost-rates" | grep -q '"code"'; then
+  section "cost pool (no database; skipped)"
+else
+  section "cost pool"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/cost-rates" \
+    -H 'content-type: application/json' -d '{"cluster":"","gpuHourMicro":1}')
+  check "a cost rate needs a cluster" "400" "$code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/cost-rates" \
+    -H 'content-type: application/json' -d '{"cluster":"c1","gpuHourMicro":-5}')
+  check "a cost rate cannot be negative" "400" "$code"
+
+  curl -sS -o /dev/null -X POST "$API/cost-rates" -H 'content-type: application/json' \
+    -d '{"cluster":"smoke-cluster","gpuHourMicro":3000000,"currency":"USD"}'
+  check "a declared rate reads back" "3000000" \
+    "$(curl -sS "$API/cost-rates" | jqp "d[0]['gpuHourMicro']")"
+
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/cost-periods/January")
+  check "a period is YYYY-MM" "400" "$code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/cost-periods/1999-02")
+  check "a period nobody closed is a 404" "404" "$code"
+
+  # A month Fleet has not been watching. The close must refuse: a pool of zero
+  # is indistinguishable from a fleet that cost nothing.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/cost-periods/1999-02")
+  check "an unwatched period will not close" "400" "$code"
+  msg=$(curl -sS -X PUT "$API/cost-periods/1999-02" | jqp "d['error']['message']")
+  check "and it says how much of it it saw" "yes" \
+    "$(case "$msg" in *observed*) echo yes;; *) echo "no: $msg";; esac)"
+
+  # Forcing the coverage gate closes a period for real, which is irreversible by
+  # design — so this run may see the conflict a previous one created, and both
+  # are correct. What is checked is the report either way.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/cost-periods/1999-01?minCoverage=0")
+  case "$code" in
+    201|409) ;;
+    *) check "a forced close creates the period, or reports the one already there" "201 or 409" "$code" ;;
+  esac
+
+  closed=$(curl -sS "$API/cost-periods/1999-01")
+  check "the closed period reads back" "1999-01" "$(printf '%s' "$closed" | jqp "d['period']")"
+  check "closed with no capacity, so unpriced" "False" "$(printf '%s' "$closed" | jqp "d['priced']")"
+  check "and it recorded no coverage rather than claiming all of it" "0" \
+    "$(printf '%s' "$closed" | jqp "d['coveragePercent']")"
+  check "an unpriced pool is zero, not missing" "0" "$(printf '%s' "$closed" | jqp "d['pool']")"
+  check "and it appears in the list" "True" \
+    "$(curl -sS "$API/cost-periods" | jqp "any(p['period']=='1999-01' for p in d)")"
+fi
+
 # ── summary ────────────────────────────────────────────────────────
 printf '\n'
 if [ "$fail" -eq 0 ]; then

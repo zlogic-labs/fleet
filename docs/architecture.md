@@ -166,6 +166,7 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `pkg/log` | slog 上下文封装 | `Logger` |
 | `internal/config` | 配置加载（env + yaml） | `Config` |
 | `internal/engine` | 引擎抽象：Adapter（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Capacity`, `Profile`, `Adapter`, `Scraper` |
+| `pkg/cost` | 成本池的时间积分与分摊，纯函数 | `Close`, `Integrate`, `Period` |
 | `pkg/weights` | 权重格式分类，决定谁能加载 | `Format`, `Of` |
 | `pkg/inventory` | operator → 控制面的上报契约（跨 module 共享，所以不能放 internal） | `Report`, `Cluster`, `Deployment` |
 | `pkg/prom` | Prometheus 文本解析（只读四个 gauge，不引 client 库） | `Parse`, `Sample` |
@@ -199,6 +200,7 @@ core/pkg/engine/engine.go          Adapter 接口（按协议）· Capability ·
 core/pkg/engine/profile.go         Profile · Profiles · vllm / llama-cpp 两个字面量
 core/pkg/engine/scrape.go          Scraper：一次 /metrics 同时读出 Load 与 Capacity
 core/pkg/engine/openai/            唯一实现：probe 走 Profile 的候选列表
+ core/pkg/cost/                      成本池：日历月、时间积分、分摊
  core/pkg/weights/                 Format 分类（safetensors / gguf / unknown）
  core/pkg/inventory/               operator → 控制面的上报契约
  core/pkg/prom/                    Prometheus 文本解析
@@ -539,10 +541,44 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 **迁移的边界画在"会不会重写数据"上，不在"会不会改表结构"。** `CREATE TABLE IF NOT EXISTS` 对已存在的表什么也不做，所以后来新增的列需要自己一条 `ALTER TABLE … ADD COLUMN IF NOT EXISTS`（本轮加 `api_keys.revoked_at` 就是）。会重写既有行（尤其是账本）的语句不放进 schema.sql，那需要真正的迁移工具和一条审过的 down 路径。
 
+### 11.7 成本池：闲置容量必须落在某张账单上（P8）
+
+P8 说计费是 GPU·小时的**固定成本分摊**，这句话有三条实现上的后果，每一条都和直觉相反。
+
+**一、成本池按日历月，预算按滚动窗口。** `cost.Period` 是 UTC 日历月，`quota.ParseDuration` 里的 `1mo` 是 30 天。两者不是同一个开关：预算是一个人盯着烧钱速度看的速率，发票是别人按月付钱的周期。混成一个开关的后果是成本池每天漂一点，月底谁也说不清"这个月"指哪一段。
+
+**二、Pool 全额分摊，Idle 单独报。** 这是一对容易搞反的加法：
+
+```
+Pool      = 池容量成本（全量）
+Busy      = 请求真正占用的那部分
+Idle      = Pool − Busy          ← P8 要的数：闲置率
+Allocated = Pool                 ← 分摊给租户
+```
+
+`Busy + Idle = Pool`，`Allocated = Pool`，两个等式不同但都对。**只按 Busy 分摊会把闲置留在账外**，于是运营方默默吸收了一个利用率问题——而"让闲置可见"正是这个平台存在的理由。闲置不是可以摊掉的成本，它是有人做错了决定的证据。
+
+**三、`1mo` 的月不是同一个月的月。** 预算里 `month = 30 天`，因为有时 28 天有时 31 天的窗口没人能算得清；成本池必须用真实日历月，否则跨月发票对不上。
+
+#### 让闲置可见的前提：容量必须有时间序列
+
+`capacity_samples` 和 `deployment_samples` 记的是**报表到达时的样子**，而不是当前的样子。这是唯一让"我们有两个 GPU 持续了 3 小时"成为一句话的存储。没有它，成本池只能在 Fleet 开始观察的那一瞬间计算，任何一个自然月都算不出来。
+
+写入有节流：值没变且距上一条不足 5 分钟就不写。operator 每 30 秒报一次，一个月 86,000 行；有了节流，一个从不变化的机群一个月只有几百行，而**变化立即落库**——否则一次 scale 事件会被抹平到它后面那段时间里，两分钟的突发容量被计费半小时。
+
+`deployment_samples` 保留 `gpu_per_replica` 而不只是总数，因为请求是按**当时的形状**计价的。拿今天的形状去算上个月的账，等于让每次 scale 都悄悄重写一次历史账单。这里用 as-of 约束的 `LATERAL` 查询实现，`TestAPriceRequestIsPricedAgainstTheShapeItRanOn` 和 `TestARequestBeforeAnySampleCostsNothingRatherThanGuessing` 盯的就是它。
+
+#### 覆盖率闸门
+
+样本只覆盖了 40% 的月份，报出来的"月度成本"就是错的，而且看起来完全正常——这是个数字，它比真相小，没有人会从输出里看出来。所以默认拒绝关闭一个覆盖率低于 90% 的周期，错误信息里写明看到了多少。`?minCoverage=` 可以调低，但必须**说出来**，而且无论调没调低，报告里都记着实际算它的覆盖率。
+
+没声明 GPU 单价的机群会得到一份 `priced: false` 的报告，`pool` 是 0，`poolGpuSeconds` 照常有值——**价格 Fleet 无从得知**（云账单、托管合同、自建折旧三样东西没有共同点），所以它是声明的。未定价不等于免费：调用方能同时看到"这个月有 744 GPU·小时"和"单价未定"，这两句合起来才是完整的事实。
+
 ## 12. 待定
 
 - `[待定]` 是否第一版就支持 Anthropic 原生协议，还是只做 OpenAI 兼容 + 一个转换层
 - `[待定]` 成本池的计价周期（自然月 vs 滚动窗口）与跨周期欠款处理
+  — 周期已定为 **UTC 日历月**（见 §11.7，与预算的滚动窗口是两件事）。仍未定的是**跨周期欠款**：一个租户在 3 月用超了预算，4 月的池子该不该先补 3 月的窟窿，以及关停一个租户时未结的账怎么结。
 
 ## 13. 社区版与企业版
 
