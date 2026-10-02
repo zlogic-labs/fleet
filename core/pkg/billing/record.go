@@ -83,4 +83,21 @@ type PricerSource interface {
 	Charge(ctx context.Context, model string, u openai.Usage) (Amount, error)
 	// BookID names the book in force for a model, or "" when it has none.
 	BookID(model string) string
+	// AnyPriced reports whether the book holds any price at all. It is how a
+	// caller tells "this model has no price" from "nothing is priced", which
+	// are different problems with different answers.
+	AnyPriced() bool
+	// Estimate is the upper bound on what a request that has not run yet may
+	// cost. It is what a budget reserves.
+	Estimate(model string, promptTokens, maxTokens int) Amount
+	// EstimateAtCheapest prices a token count at the lowest rate in force,
+	// regardless of model.
+	//
+	// This exists for one caller: reserving a budget for a model that has no
+	// price. Reserving nothing there would leave the budget unenforced for
+	// exactly the models nobody has priced yet, so the fallback has to be a
+	// real number. It is an over-estimate by construction, which means an
+	// unpriced model stops a tenant sooner rather than later — the direction
+	// where being wrong is recoverable.
+	EstimateAtCheapest(tokens int) Amount
 }

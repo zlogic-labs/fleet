@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
@@ -65,6 +66,19 @@ func billingFor(cfg Config, db *sqlstore.DB) (billing.PricerSource, billing.Reco
 		return nil, nil
 	}
 	return sqlstore.NewPriceStore(db, cfg.Database.PriceRefresh), sqlstore.NewLedger(db)
+}
+
+// budgetFor returns the spend limiter, nil without a database.
+//
+// Nil here means every tenant is uncapped, which is a supported configuration
+// rather than a missing feature: a deployment can run Fleet on rate limits
+// alone and turn budgets on per tenant later without a restart, because the
+// budgets are read per reservation rather than held in a compiled-in table.
+func budgetFor(db *sqlstore.DB) quota.Limiter {
+	if db == nil {
+		return nil
+	}
+	return sqlstore.NewQuota(db)
 }
 
 // openDatabase connects when one is configured, and returns nil when it is not.

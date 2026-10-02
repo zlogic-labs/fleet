@@ -141,6 +141,35 @@ func (s *PriceStore) Charge(ctx context.Context, model string, u openai.Usage) (
 // name whose price may since have changed.
 func (s *PriceStore) BookID(model string) string { return s.ids[model] }
 
+// AnyPriced and EstimateAtCheapest forward to the loaded pricer.
+//
+// They reload first for the same reason Charge does: the budget's fallback is
+// only meaningful against the current book, and a book that failed to load
+// must read as "nothing priced" so the reservation falls through to zero rather
+// than to a stale rate.
+func (s *PriceStore) AnyPriced() bool {
+	p, _ := s.Pricer(context.Background())
+	return p != nil && p.AnyPriced()
+}
+
+// EstimateAtCheapest prices a token count at the lowest rate in force.
+func (s *PriceStore) EstimateAtCheapest(tokens int) billing.Amount {
+	p, err := s.Pricer(context.Background())
+	if err != nil || p == nil {
+		return 0
+	}
+	return p.EstimateAtCheapest(tokens)
+}
+
+// Estimate is the budget's per-model upper bound. See billing.PricerSource.
+func (s *PriceStore) Estimate(model string, promptTokens, maxTokens int) billing.Amount {
+	p, err := s.Pricer(context.Background())
+	if err != nil || p == nil {
+		return 0
+	}
+	return p.Estimate(model, promptTokens, maxTokens)
+}
+
 // PutPrice inserts a price book, closing the previous open-ended one.
 //
 // The close happens in the same transaction as the insert because the partial

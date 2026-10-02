@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
@@ -42,6 +43,10 @@ type Chat struct {
 	// what anything cost, which is a laptop, not a production shape.
 	Pricer   billing.PricerSource
 	Recorder billing.Recorder
+	// Budget is nil when no spend budget is enforced, which is every
+	// deployment that has not set one and every gateway with no database. A
+	// tenant with no budget is not refused; it is simply not capped.
+	Budget quota.Limiter
 
 	samples *SampleLog
 }
@@ -55,6 +60,7 @@ type ChatOptions struct {
 	Limiter          ratelimit.Limiter
 	Pricer           billing.PricerSource
 	Recorder         billing.Recorder
+	Budget           quota.Limiter
 }
 
 // NewChat builds the handler and its rolling sample log, which the Fleet
@@ -83,6 +89,7 @@ func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver
 		DefaultMaxTokens: opts.DefaultMaxTokens,
 		Pricer:           opts.Pricer,
 		Recorder:         opts.Recorder,
+		Budget:           opts.Budget,
 		samples:          NewSampleLog(opts.SampleBuffer),
 	}
 }
@@ -143,6 +150,26 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The budget is reserved here rather than beside the rate limit above, and
+	// the reason is that it cannot be done earlier: pricing needs the resolved
+	// model, and the model is only known once an endpoint has been picked.
+	//
+	// The rate limit's reservation precedes Pick so an over-limit tenant costs
+	// no scheduling decision. A budget cannot have that, and the asymmetry is
+	// cheap — a Pick is a hash and a health check, not a connection — whereas
+	// pricing the *unresolved* name would estimate zero for anything not
+	// spelled exactly like a price book entry, and reserving zero reserves
+	// nothing.
+	booking, err := h.reserve(r.Context(), tenant, project, ep.Model, promptTokens, maxOut)
+	if err != nil {
+		// The rate limit reservation is released: nothing was generated, and
+		// holding it would spend a tenant's minute on a request the budget
+		// refused for an unrelated reason.
+		h.Limiter.Settle(r.Context(), reservation, 0)
+		outOfBudget(w, err)
+		return
+	}
+
 	tap := transport.NewTap(0, nil)
 	h.forward(w, r, ep, body, req, tap)
 
@@ -153,7 +180,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// changes nothing, and a client that asked for 4096 and got 7 is refunded
 	// for the 4089 it did not use. settle also prices the request and writes
 	// the ledger; see settle.go for the order and its reasons.
-	h.settle(r, reservation, ep, result, promptTokens, maxOut, req.Stream)
+	h.settle(r, reservation, booking, ep, result, promptTokens, maxOut, req.Stream)
 
 	h.samples.Add(Sample{
 		Model:      req.Model,

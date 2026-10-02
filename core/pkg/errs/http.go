@@ -18,6 +18,13 @@ func HTTPStatus(err error) int {
 		return http.StatusConflict
 	case KindRateLimited:
 		return http.StatusTooManyRequests
+	case KindBudgetExhausted:
+		// 402, not 429. A client that retries a 429 is behaving correctly; a
+		// client that retries this one is spending money proving it cannot
+		// succeed. 402 is also the only status that says "this is a billing
+		// problem, not a technical one", which is what an SDK's error
+		// handling branches on.
+		return http.StatusPaymentRequired
 	case KindUnavailable:
 		return http.StatusServiceUnavailable
 	case KindTimeout:

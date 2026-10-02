@@ -19,6 +19,14 @@ const (
 	KindNotFound
 	KindConflict
 	KindRateLimited
+	// KindBudgetExhausted is a tenant that has spent its allowance.
+	//
+	// It is not KindRateLimited, and keeping them apart is the point: a rate
+	// limit says come back in a moment and a client may retry immediately,
+	// while an exhausted budget says come back after the window or buy more.
+	// Answering both with 429 teaches a client to retry a request that cannot
+	// succeed, and the retry is what runs the GPU.
+	KindBudgetExhausted
 	KindUnavailable
 	KindTimeout
 	KindUpstream
@@ -128,6 +136,14 @@ func InvalidArgument(format string, args ...any) *Error {
 
 func RateLimited(format string, args ...any) *Error {
 	return New(KindRateLimited, "rate_limit_error", format, args...)
+}
+
+// BudgetExhausted is a spend budget with nothing left in it.
+//
+// The code is distinct from rate_limit_error so a client can tell the two apart
+// without reading prose: one is retried, the other is not.
+func BudgetExhausted(format string, args ...any) *Error {
+	return New(KindBudgetExhausted, "budget_exhausted", format, args...)
 }
 
 func NotFound(format string, args ...any) *Error {

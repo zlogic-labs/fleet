@@ -218,3 +218,47 @@ CREATE INDEX IF NOT EXISTS usage_events_model_time_idx
 CREATE INDEX IF NOT EXISTS usage_events_unestimated_idx
     ON usage_events (occurred_at)
     WHERE NOT usage_known;
+
+-- Running spend per scope per window: the input to the budget check.
+--
+-- This is the third thing that keeps mutable state, and the reason it is a
+-- table rather than more in-memory buckets like the rate limiter's is that a
+-- budget is money. A rate limit that forgets itself after a restart loses at
+-- most one minute of one burst; a budget that forgets itself lets a tenant spend
+-- its whole allowance again, every restart, forever.
+--
+-- spent and reserved are kept apart for the same reason the rate limiter keeps
+-- them apart: a request is committed when it reserves, and the reservation has
+-- to come back when the real charge is known. Summing them is what the check
+-- compares against the budget.
+--
+-- The window is a column rather than implicit in the query so a rolling window
+-- is a different value in the key, not a different SUM. Which window a tenant
+-- is billed over is still undecided (docs/architecture.md §11); this table does
+-- not take a position on it, it only has to hold whatever the caller passes.
+--
+-- scope is the tenant/project path, the same string ratelimit.Scope.Key()
+-- produces. Both levels are stored as their own row: a tenant envelope and a
+-- project partition are two counters, for the same reason they are two
+-- counters in the limiter — merging them is how a tenant's projects end up
+-- multiplying its capacity.
+CREATE TABLE IF NOT EXISTS spend_counters (
+    scope        text        NOT NULL,
+    window_start timestamptz NOT NULL,
+
+    -- Millionths of a quota unit, matching usage_events.amounts_micro so the
+    -- reconciliation pass can rebuild this table from the ledger by SUM.
+    spent_micro    bigint NOT NULL DEFAULT 0,
+    reserved_micro bigint NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (scope, window_start),
+
+    -- Neither may go negative. A counter that did would silently raise the
+    -- tenant's available budget, which is the one direction of error that pays
+    -- out money.
+    CHECK (spent_micro    >= 0),
+    CHECK (reserved_micro >= 0)
+);
+
+-- Rebuilding from the ledger scans usage_events for one window and one scope.
+-- The tenant-time index above already serves it.

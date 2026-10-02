@@ -174,6 +174,7 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `internal/gateway/transport` | SSE 透传 + usage tap | `Proxy`, `Tap` |
 | `pkg/authn` | 凭据解析与主体（`internal/gateway/auth.go` 只是它的中间件接线） | `Principal`, `KeyStore`, `Limits` |
 | `internal/gateway/ratelimit` | 预留-结算式分层限流 | `Limiter`, `Scope`, `Policies`, `Limited` |
+| `internal/gateway/quota` | 预留-结算式分层预算（tenant + project 两层） | `Limiter`, `Reservation`, `Exceeded`, `Window` |
 | `internal/gateway/handler` | OpenAI 端点 handler | `Chat`, `Samples` |
 | `pkg/billing` | 计价算术与账本行类型 | `Rate`, `Price`, `Pricer`, `Record`, `Recorder` |
 | `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流读路径、价格本、账本 | `DB`, `KeyStore`, `PolicySource`, `PriceStore`, `Ledger` |
@@ -401,7 +402,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 | 阶段 | 内容 | 可验证标准 |
 |---|---|---|
 | 1 | `pkg/*` + `internal/engine` + gateway transport | curl 打到 mock endpoint，SSE 完整透传，usage 能取到 |
-| 2 | auth + 限流 + 配额预留/结算 | 超限返回 429，预留正确回滚 |
+| 2 | auth + 限流 + 配额预留/结算 | 超限返回 429，预留正确回滚（已完成） |
 | 3 | routing：一致性哈希 + 健康 | 同前缀命中同端点，熔断能恢复 |
 | 4 | 计价 + 账本 + ClickHouse | 账实一致，对账任务能跑（计价与 PostgreSQL 账本已落地，ClickHouse 明细与对账任务尚未） |
 | 5 | operator：CRD → K8s 原生 Deployment + Service | k3s 上 `kubectl apply` 能起一个引擎 |
@@ -444,7 +445,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 接数据库后 `FLEET_API_KEYS` 就不再被读：key 存在 `api_keys` 表里，限流策略从 `tenants.request_limit` / `projects.request_limit` 读，价格从 `price_books` 读，账写 `usage_events`。`FLEET_DATABASE_URL` 设了就走数据库，不设全在内存——内存里没有账本，限流计数器也重启即失忆。配套的还有 `FLEET_DATABASE_MIGRATE`（启动时建表，`IF NOT EXISTS` 只保证"不存在才建"，不会把旧表改一致）和 `FLEET_DATABASE_PRICE_REFRESH`（默认 1 分钟，价格改了不用重启网关）。
 
-尚未实现：**配额**。现在只有"每分钟多少请求/多少 token"，没有"这个租户这个月还能花多少"。P5 的预留-结算机制已经就位，配额是它的下一个消费者。
+配额已落地（`internal/gateway/quota`），见 §11.4。仍未实现：**周期计价与成本分摊**——`budget_units` 是额度单位，月底要按当月成本池折成金额，那是 §6 的 P8。
 
 **限流计数器不是账本，重启即失忆，这是刻意的。** 它是一道闸，不是账。而账本已经落地：`internal/store/postgres` 的 `Ledger` 只增不改，`billing.Record` 是它的行类型，`internal/billing` 是计价算术。两者分开是因为生命周期不同——闸可以丢，账不能。
 
@@ -468,7 +469,40 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 **账本记原始 token 数和拆开的 fresh/cached/reasoning，不记折算后的价。** 改定价规则时要能重跑历史，所以行里存的是事实和当时的价格本 id，`amounts_micro` 是那一笔真正收的数——报表不必去 join 一个可能已经改过的价格本。
 
-### 11.4 这一节的四条不变式
+### 11.4 配额：预留-结算的第三个消费者
+
+`internal/gateway/quota` + `spend_counters`。形状与 `ratelimit` 相同（预留→结算），但**不合并进 `ratelimit`**，原因是两个计数器的生命周期不同：
+
+> **限流是一道闸，账本和预算是钱。** 限流重启即忘，最多丢一分钟的一次突发；预算重启即忘，就是让租户**每次重启都能把额度再花一遍**，永远。所以限流可以是内存环形桶，预算必须是表。
+
+新增 `spend_counters(scope, window_start, spent_micro, reserved_micro)`，`scope` 用 `ratelimit.Scope.Key()` 的同一串字符串。信封与分区各存一行——和限流同一个理由：合并成一个就是乘法陷阱。
+
+**预留是一条条件 UPDATE，不是一个 SELECT 加一个 UPDATE。**
+
+```sql
+INSERT INTO spend_counters (scope, window_start, reserved_micro)
+SELECT $1, $2, $3::bigint WHERE $3::bigint <= $4::bigint
+ON CONFLICT (scope, window_start) DO UPDATE
+   SET reserved_micro = spend_counters.reserved_micro + $3
+ WHERE spend_counters.spent_micro + spend_counters.reserved_micro + $3 <= $4
+RETURNING spent_micro + reserved_micro
+```
+
+零行返回 = 拒绝。读写在同一条语句里，没有留给并发去抢的间隙。
+
+**这里踩过一个真实的坑，值得单独记：只把 `WHERE` 写在 `DO UPDATE` 上是错的。** 那只覆盖"行已存在"的情况，于是每个 scope 的**第一个请求走 INSERT 分支，完全不检查**——建计数器的那个请求恰好是预算管不到的那一个。INSERT 因此必须自己也带 `WHERE`，两个分支问同一个问题：这一笔加得下吗。
+
+**预算预留发生在 `Pick` 之后，不是和限流一起。** 因为定价需要**已解析的模型**，而模型只有选了端点才知道。限流的预留能放在 Pick 之前（超限的租户不产生一次调度决策），预算做不到，这个不对称很便宜——Pick 是一次哈希加一次健康检查，不是一条连接；而拿**未解析**的名字去定价，任何不完全等于价格本条目名的写法都会估成 0，**预留 0 就是不预留**。
+
+**没有价格的模型按当前最低费率预留，不是预留 0。** 这条直接对着 `Estimate` 注释里那条警告：一个模型在服务流量却没价格，预算若对它估 0 就等于对它完全不设防，而预算和账本会**一致地**声称"没花钱"，两者描述的都是一次真的用了 GPU 的请求。兜底值是**高估**，方向上意味着未定价的模型会**提前**停掉租户而不是放行——那是可恢复的错误方向，因为给模型定价后租户就能继续。
+
+**拒绝返回 402 而不是 429。** 429 的语义是"马上重试"，客户端那么做是对的；402 的语义是"窗口结束后再来，或者加额度"，客户端紧循环重试 402 是在花钱证明自己不可能成功，而重试本身就在烧 GPU。新增 `errs.KindBudgetExhausted` 而不是复用 `KindRateLimited`，就是为了让客户端不看提示文字就能分支。预算库本身不可达时返回 503 而不是 402——那是故障，不是租户的问题，回答 402 会让付费客户去给一个只是连不上的数据库充值。
+
+**账与预算必须写自同一个数字。** `TestTheBudgetAndTheLedgerAgree` 直接断言二者相等，而不是相信调用顺序。
+
+**计价周期仍是待定项**（§11）。`quota.Window` 是参数不是猜测，`CalendarMonth`（UTC）只是当前默认实现，换成滚动窗口是一个函数的事。这条不因为配额落地而被"顺便决定"。
+
+### 11.5 这一节的四条不变式
 
 `internal/gateway/billing_test.go` 对着真 PostgreSQL 跑，断言的就是这四条：
 

@@ -2,6 +2,8 @@ package billing
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
@@ -35,6 +37,39 @@ func (a Amount) Units() float64 { return float64(a) / MicroPerUnit }
 
 // MicroPerUnit is the number of micro-units in one unit.
 const MicroPerUnit = 1_000_000
+
+// String renders an amount in units.
+//
+// Written out by hand rather than as %f of Units() because this ends up in
+// error messages and API responses about money, and a float conversion of a
+// large micro figure prints 1.0260000000000001 — a number that is not the
+// charge, in the one place the tenant is being told what the charge is. The
+// integer is divided and the remainder is carried as digits, so nothing rounds.
+func (a Amount) String() string {
+	if a == 0 {
+		return "0"
+	}
+	neg := a < 0
+	if neg {
+		a = -a
+	}
+	whole, frac := a/MicroPerUnit, a%MicroPerUnit
+
+	// Six digits is the precision a micro-unit carries, so the trailing zeros
+	// are always dropped rather than always printed.
+	digits := strconv.FormatInt(int64(frac), 10)
+	digits = strings.Repeat("0", 6-len(digits)) + digits
+	digits = strings.TrimRight(digits, "0")
+
+	out := strconv.FormatInt(int64(whole), 10)
+	if digits != "" {
+		out += "." + digits
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
+}
 
 // Pricer prices usage.
 //
@@ -138,4 +173,31 @@ func (p *Pricer) Estimate(model string, promptTokens, maxTokens int) Amount {
 	// (see architecture §7) — so an estimate that assumed a hit would
 	// under-reserve exactly when caching works best.
 	return units(promptTokens, rate.Input) + units(maxTokens, rate.Output)
+}
+
+// AnyPriced reports whether the book holds a price for anything.
+func (p *Pricer) AnyPriced() bool { return len(p.book.prices) > 0 }
+
+// EstimateAtCheapest prices a token count at the lowest input rate in force.
+//
+// It exists for the budget's reservation fallback and nothing else. Charging
+// this model is always wrong, so the name says what it is: an estimate, not a
+// charge. Zero means nothing is priced at all, which a caller has to be able to
+// tell apart from "priced at zero" — hence AnyPriced alongside it.
+//
+// Every token goes at the input rate, matching Estimate. Charging a completion
+// as input would over-reserve by up to the output/input ratio, which on a
+// cheap-input/expensive-output model is a large multiple of the tenant's real
+// per-request cost and would make a modest budget unusable.
+func (p *Pricer) EstimateAtCheapest(tokens int) Amount {
+	if len(p.book.prices) == 0 {
+		return 0
+	}
+	cheapest := p.book.prices[p.book.Models()[0]]
+	for _, m := range p.book.Models() {
+		if r := p.book.prices[m]; r.Input < cheapest.Input {
+			cheapest = r
+		}
+	}
+	return units(tokens, cheapest.Input)
 }

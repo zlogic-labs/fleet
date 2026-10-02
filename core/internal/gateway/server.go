@@ -80,6 +80,7 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		return nil, nil, err
 	}
 	prices, ledger := billingFor(cfg, db)
+	budget := budgetFor(db)
 
 	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, handler.ChatOptions{
 		MaxBytes:         int64(cfg.MaxBodyMB) << 20,
@@ -88,6 +89,7 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		Limiter:          limiter,
 		Pricer:           prices,
 		Recorder:         ledger,
+		Budget:           budget,
 	})
 
 	current := refresher.Endpoints

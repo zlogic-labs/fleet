@@ -47,6 +47,49 @@ func buildBillingTokenLimit(t *testing.T, db *sqlstore.DB, tokenLimit int,
 	return h, key
 }
 
+// buildBudgeted assembles a gateway whose tenant and project both hold the
+// given budget in whole units, and a key in that project.
+//
+// Both levels are set to the same figure so the partition never binds before
+// the envelope does, which keeps the test about one rule at a time.
+func buildBudgeted(t *testing.T, db *sqlstore.DB, budget int64, engineURL, label string) (http.Handler, string) {
+	t.Helper()
+	// seedTenant and seedKey create the tenant and the project; the budgets are
+	// set afterwards because neither takes one.
+	seedTenant(t, db, "acme", 100, 1_000_000)
+	key := seedKey(t, db, "acme", "research", label)
+	mustExecWired(t, db, `UPDATE tenants SET budget_units = $1 WHERE id = 'acme'`, budget)
+	mustExecWired(t, db, `UPDATE projects SET budget_units = $1 WHERE id = 'acme/research'`, budget)
+	cfg := Config{
+		Listen: "127.0.0.1:0", MaxBodyMB: 1,
+		Auth:      AuthConfig{Required: true},
+		Upstreams: []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: engineURL}},
+	}
+	h, _, err := Build(cfg, db, entitlement.Community(), discardLogger(), "test")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return h, key
+}
+
+// countRows is how many ledger rows exist, for the "nothing was billed" checks.
+func countRows(t *testing.T, db *sqlstore.DB) int {
+	t.Helper()
+	var n int
+	if err := db.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM usage_events`).Scan(&n); err != nil {
+		t.Fatalf("count the ledger: %v", err)
+	}
+	return n
+}
+
+func mustExecWired(t *testing.T, db *sqlstore.DB, q string, args ...any) {
+	t.Helper()
+	if _, err := db.Pool().Exec(context.Background(), q, args...); err != nil {
+		t.Fatalf("exec %q: %v", q, err)
+	}
+}
+
 // seedPrice writes a price book for demo: 1M input tokens at 1000 micro per
 // unit, 1M output at 2000.
 func seedPrice(t *testing.T, db *sqlstore.DB) {

@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
+	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -29,26 +31,24 @@ import (
 // request whose record is being written.
 const settleTimeout = 5 * time.Second
 
-// settle releases the reservation, prices the request, and records it.
+// settleContext is the context for everything that happens after the response.
 //
-// The order is not incidental:
+// Detached from the request on purpose: a client that disconnects mid-stream
+// must not cancel the write of a request that was billed. The work is Fleet's,
+// and the tokens were spent whether or not the caller stayed to hear the
+// answer.
+func settleContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), settleTimeout)
+}
+
+// settle releases both reservations, prices the request, and writes the ledger.
 //
-//  1. The limiter settles first. It is the only step holding a lock, and a
-//     tenant's quota is released the moment its request is done — a slow price
-//     lookup must not make the tenant wait before it can spend again.
-//  2. Charging is second, from the engine's own usage. P6: the engine is the
-//     only authority on tokens, so a price lookup that fails cannot change
-//     what was spent, only what it is worth.
-//  3. Recording is last, because it is the only step that can fail in a way
-//     the client would ever learn about — and by then there is nothing left to
-//     fail for.
-//
-// Everything is passed in rather than read off the handler. A handler serves
-// every request concurrently, so stashing the result on a field between
-// forward and settle would be a data race, and one that only appears under
-// load and only corrupts somebody's bill.
-func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, ep engine.Endpoint,
-	result transport.Result, promptTokens, maxOut int, streamed bool) {
+// The rate limiter settles first: it is in memory and holds a lock, and the
+// tenant's allowance should come back before a price lookup runs. The budget
+// settles immediately after, because by this point the amount is known and
+// leaving a reservation outstanding would spend money that was never used.
+func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, booking quota.Reservation,
+	ep engine.Endpoint, result transport.Result, promptTokens, maxOut int, streamed bool) {
 
 	actual := promptTokens + maxOut
 	if result.UsageKnown && result.Usage != nil {
@@ -56,6 +56,8 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, ep eng
 	}
 	h.Limiter.Settle(r.Context(), reservation, actual)
 
+	// A record is only built when something will store it, but the charge is
+	// needed either way, so it is computed once and shared.
 	rec := billing.Record{
 		Model:      ep.Model,
 		Endpoint:   ep.ID,
@@ -73,9 +75,7 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, ep eng
 	} else {
 		// No usage from the engine. The record still has to exist, marked as an
 		// estimate, because the tokens were really spent; charging it at
-		// max_tokens is P6's fallback and reconciliation finds it later. The
-		// prompt count is the gateway's own estimate and is labelled as one by
-		// UsageKnown being false.
+		// max_tokens is P6's fallback and reconciliation finds it later.
 		rec.Usage = openai.Usage{
 			PromptTokens:     promptTokens,
 			CompletionTokens: maxOut,
@@ -83,30 +83,16 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, ep eng
 		}
 	}
 
-	if h.Recorder == nil {
-		return
-	}
-	h.record(r, rec)
-}
-
-// record prices and stores one settled request.
-//
-// The context is detached from the request on purpose: a client that
-// disconnects mid-stream must not cancel the write of a request that was
-// billed. The work is Fleet's, and the tokens were spent whether or not the
-// caller stayed to hear the answer.
-func (h *Chat) record(r *http.Request, rec billing.Record) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), settleTimeout)
+	settleCtx, cancel := settleContext(r)
 	defer cancel()
 
 	if h.Pricer != nil {
-		amount, err := h.Pricer.Charge(ctx, rec.Model, rec.Usage)
-		if err != nil {
+		if amount, err := h.Pricer.Charge(settleCtx, rec.Model, rec.Usage); err != nil {
 			// An unpriced model is the operator's gap, not the tenant's fault.
 			// The request is still recorded — at zero — so the tokens are not
 			// lost, and the gap is logged loudly, because a model serving
-			// traffic with no price is a customer being given a GPU for free and
-			// nothing else in the system would say so.
+			// traffic with no price is a customer being given a GPU for free
+			// and nothing else in the system would say so.
 			h.Log.Error("no price for the model this request used",
 				"model", rec.Model, "endpoint", rec.Endpoint, "err", err)
 		} else {
@@ -115,6 +101,25 @@ func (h *Chat) record(r *http.Request, rec billing.Record) {
 		}
 	}
 
+	// The budget settles with the same figure the ledger records, so the
+	// budget and the invoice can never disagree about a request.
+	if h.Budget != nil {
+		h.Budget.Settle(settleCtx, booking, rec.Amount)
+	}
+
+	if h.Recorder == nil {
+		return
+	}
+	h.record(settleCtx, rec)
+}
+
+// record writes the ledger row.
+//
+// The context is detached from the request on purpose: a client that
+// disconnects mid-stream must not cancel the write of a request that was
+// billed. The work is Fleet's, and the tokens were spent whether or not the
+// caller stayed to hear the answer.
+func (h *Chat) record(ctx context.Context, rec billing.Record) {
 	if _, err := h.Recorder.Record(ctx, rec); err != nil {
 		// The one place Fleet loses money by failing. Logged with every
 		// dimension needed to reconstruct the row, because a record that
@@ -126,4 +131,30 @@ func (h *Chat) record(r *http.Request, rec billing.Record) {
 			"total_tokens", rec.Usage.TotalTokens,
 			"amount_micro", int64(rec.Amount), "err", err)
 	}
+}
+
+// outOfBudget answers a refused budget.
+//
+// 402 rather than 429. A rate limit says "come back in a moment"; a spent budget
+// says "come back after the window, or buy more", and a client that retries a
+// 402 in a tight loop is behaving wrongly — each retry is a request that costs
+// the platform a scheduling decision and, if it got through, a GPU. The
+// Retry-After carries the window's end either way, because a client that waits
+// for it is behaving correctly.
+//
+// The error is re-wrapped rather than passed through because the refusal came
+// out of the store, and its message is prose meant for a log. What the client
+// gets is the same prose with a code it can switch on.
+func outOfBudget(w http.ResponseWriter, err error) {
+	if e := quota.AsExceeded(err); e != nil {
+		if after := e.RetryAfter(); after != "" {
+			w.Header().Set("Retry-After", after)
+		}
+		openai.WriteError(w, errs.BudgetExhausted("%s", err.Error()))
+		return
+	}
+	// Not a refusal — the budget store itself failed. That is an outage, not a
+	// tenant problem, and answering 402 would tell a paying customer to go buy
+	// more credit for a database that is merely unreachable.
+	openai.WriteError(w, errs.Unavailable("the budget store is unavailable: %s", err.Error()))
 }

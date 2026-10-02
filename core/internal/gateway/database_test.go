@@ -207,7 +207,7 @@ func truncateWired(t *testing.T, db *sqlstore.DB) {
 	// without it a price written by one test is still in force for the next,
 	// and a test asserting "this model has no price" quietly fails.
 	if _, err := db.Pool().Exec(context.Background(),
-		"TRUNCATE api_keys, projects, tenants, usage_events, price_books CASCADE"); err != nil {
+		"TRUNCATE api_keys, projects, tenants, usage_events, price_books, spend_counters CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 }

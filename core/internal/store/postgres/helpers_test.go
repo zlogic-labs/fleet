@@ -94,6 +94,14 @@ func truncate(t *testing.T, db *DB, tables ...string) {
 	}
 }
 
+// mustExec runs a statement that returns no rows, for fixture setup.
+func mustExec(t *testing.T, db *DB, q string, args ...any) {
+	t.Helper()
+	if _, err := db.pool.Exec(context.Background(), q, args...); err != nil {
+		t.Fatalf("exec %q: %v", q, err)
+	}
+}
+
 func tableList(tables []string) string {
 	out := ""
 	for i, tb := range tables {
