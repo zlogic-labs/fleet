@@ -12,6 +12,9 @@ import type {
   Project,
   ApiKey,
   BudgetRule,
+  CostRate,
+  CostPeriodSummary,
+  CostReport,
 } from '../types';
 
 const BASE = '/api/v1';
@@ -108,4 +111,26 @@ export const budgetRules = {
   save: (body: Omit<BudgetRule, 'windowSeconds'>) =>
     request<void>(`${BASE}/budget-rules`, { method: 'POST', body }),
   remove: (id: string) => request<void>(item('budget-rules', id), { method: 'DELETE' }),
+};
+
+/**
+ * The cost pool. A rate is what a GPU-hour costs in a cluster — declared by an
+ * operator because Fleet cannot know it, and applied when a period is closed.
+ */
+export const costRates = {
+  list: (signal?: AbortSignal) => request<CostRate[]>(`${BASE}/cost-rates`, { signal }),
+  save: (body: CostRate) => request<CostRate>(`${BASE}/cost-rates`, { method: 'POST', body }),
+};
+
+/**
+ * Periods are closed, never edited. Closing is idempotent-but-exclusive: a
+ * period that is already closed answers 409, because a second invoice that
+ * silently overwrites the first is the failure mode invoicing has.
+ */
+export const costPeriods = {
+  list: (signal?: AbortSignal) => request<CostPeriodSummary[]>(`${BASE}/cost-periods`, { signal }),
+  get: (period: string, signal?: AbortSignal) =>
+    request<CostReport>(item('cost-periods', period), { signal }),
+  close: (period: string) =>
+    request<CostReport>(item('cost-periods', period), { method: 'PUT' }),
 };

@@ -229,3 +229,62 @@ export interface BudgetRule {
   windowSeconds?: number;
   resolutionSeconds?: number;
 }
+
+// ── the cost pool (P8) ─────────────────────────────────────────
+
+/** What a GPU-hour costs in one cluster. Declared, never inferred. */
+export interface CostRate {
+  cluster: string;
+  /** Millionths of a currency unit. */
+  gpuHourMicro: number;
+  currency: string;
+}
+
+export interface CostPeriodSummary {
+  period: string;
+  currency: string;
+  priced: boolean;
+  pool: number;
+  idle: number;
+  idlePercent: number;
+  coveragePercent: number;
+  poolGpuSeconds: number;
+  closedAt?: string;
+}
+
+export interface CostAllocation {
+  key: string;
+  /** A fraction of the pool in millionths. */
+  share: number;
+  gpuSeconds: number;
+  /** Allocated cost, micro-units. */
+  amount: number;
+  /** What the token ledger charged for the same traffic. */
+  usageMicro: number;
+}
+
+export interface CostDeployment {
+  name: string;
+  reservedGpuSeconds: number;
+  usedGpuSeconds: number;
+  idleGpuSeconds: number;
+  idlePercent: number;
+}
+
+export interface CostReport {
+  period: string;
+  from: string;
+  to: string;
+  currency: string;
+  priced: boolean;
+  pool: number;
+  busy: number;
+  idle: number;
+  idlePercent: number;
+  allocated: number;
+  coveragePercent: number;
+  poolGpuSeconds: number;
+  notes?: string[];
+  tenants: CostAllocation[];
+  deployments: CostDeployment[];
+}

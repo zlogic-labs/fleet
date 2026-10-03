@@ -96,10 +96,17 @@ func (s *CostStore) GetPeriod(ctx context.Context, period string) (cost.Report, 
 }
 
 // ListPeriods returns closed periods, newest first.
+//
+// It returns the same Report type as a single close because there is one shape
+// to learn. Every column the type carries is selected here: a list that filled
+// the summary fields and left coverage at zero made the console warn that a
+// fully observed month was 0% observed, which on an immutable invoice is worse
+// than showing nothing.
 func (s *CostStore) ListPeriods(ctx context.Context) ([]cost.Report, error) {
 	rows, err := s.db.pool.Query(ctx,
-		`SELECT period, currency, priced, pool_micro, busy_micro, idle_micro, idle_percent
-		 FROM cost_periods ORDER BY period DESC LIMIT 60`)
+		`SELECT period, currency, priced, pool_micro, busy_micro, idle_micro, idle_percent,
+		        coverage_percent, pool_gpu_seconds
+		   FROM cost_periods ORDER BY period DESC LIMIT 60`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list periods: %w", err)
 	}
@@ -108,7 +115,8 @@ func (s *CostStore) ListPeriods(ctx context.Context) ([]cost.Report, error) {
 	var out []cost.Report
 	for rows.Next() {
 		var r cost.Report
-		if err := rows.Scan(&r.Period, &r.Currency, &r.Priced, &r.Pool, &r.Busy, &r.Idle, &r.IdlePct); err != nil {
+		if err := rows.Scan(&r.Period, &r.Currency, &r.Priced, &r.Pool, &r.Busy, &r.Idle,
+			&r.IdlePct, &r.CoveragePercent, &r.PoolSeconds); err != nil {
 			return nil, fmt.Errorf("postgres: scan period: %w", err)
 		}
 		out = append(out, r)

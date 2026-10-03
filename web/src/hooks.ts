@@ -87,3 +87,73 @@ export function humanAge(iso: string | undefined, now: number): string {
   if (secs < 86400) return `${Math.round(secs / 3600)}h`;
   return `${Math.round(secs / 86400)}d`;
 }
+
+/**
+ * Micro-units as money.
+ *
+ * Integer division on purpose: these are exact amounts and the number that
+ * leaves this function is the one an operator puts on an invoice. Going through
+ * a float renders 1026000 micro-units as 1.0260000000000001, which is not a
+ * rounding artifact a reader dismisses — it reads as a broken invoice.
+ */
+export function humanMoney(micro: number, currency = '', fractionDigits?: number): string {
+  const negative = micro < 0;
+  const abs = Math.abs(micro);
+  // Two decimals is the smallest that can express anything a currency has;
+  // smaller amounts keep more digits so a near-zero line is not shown as zero.
+  const digits = fractionDigits ?? (abs < 1_000_000 ? 4 : 2);
+  const scale = 10 ** digits;
+  const whole = Math.floor(abs / 1_000_000);
+  const frac = Math.floor((abs % 1_000_000) / (1_000_000 / scale));
+  const body = digits === 0 ? String(whole) : `${whole}.${String(frac).padStart(digits, '0')}`;
+  return `${negative ? '-' : ''}${body}${currency ? ` ${currency}` : ''}`;
+}
+
+/** A fraction in millionths as a percentage with one decimal. */
+export function humanPct(perMillion: number): string {
+  return `${(perMillion / 10_000).toFixed(1)}%`;
+}
+
+/** GPU-seconds as GPU-hours, the unit a capacity conversation happens in. */
+export function humanGpuSeconds(secs: number): string {
+  if (secs <= 0) return '0 h';
+  const hours = secs / 3600;
+  if (hours < 100) return `${hours.toFixed(2)} h`;
+  return `${Math.round(hours).toLocaleString()} h`;
+}
+
+/**
+ * A budget window in the spelling an operator would have typed.
+ *
+ * The server sends seconds, because it must: it has one canonical duration and
+ * Go's nanoseconds do not survive JSON as something a person can read. Its own
+ * `windowText` is "720h0m0s", which is exact and unreadable, so the alias is
+ * recovered here.
+ *
+ * A month is 30 days, not a calendar month — a rolling window that is 28 days
+ * in February is not a budget a tenant can reason about. The calendar month is
+ * for the cost pool's invoice, which is a different thing.
+ */
+export function humanWindow(seconds: number | undefined): string {
+  if (!seconds || seconds <= 0) return '—';
+  // Exact division at every level, never a rounded one. This string is also
+  // the rule's delete id, so rounding is not cosmetic: 90 seconds printed as
+  // "2m" would delete a rule that is not the one on screen and leave the
+  // displayed one behind. The last branch handles anything that is not a whole
+  // minute rather than pretending otherwise.
+  if (seconds % 2592000 === 0) return `${seconds / 2592000}mo`;
+  if (seconds % 604800 === 0) return `${seconds / 604800}w`;
+  if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
+/** The same window, spelled out for a tooltip. */
+export function windowNote(seconds: number | undefined): string {
+  if (!seconds || seconds <= 0) return '';
+  if (seconds === 2592000) return '30 days, not a calendar month';
+  if (seconds === 604800) return 'seven days';
+  if (seconds === 86400) return '24 hours';
+  return `${humanWindow(seconds)} of rolling window`;
+}

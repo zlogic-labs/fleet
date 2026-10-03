@@ -153,24 +153,32 @@ func (s *Server) putBudgetRule(w http.ResponseWriter, r *http.Request) {
 // deleteBudgetRule takes the id "scopeKind/scopeId/dimension/window". The window
 // has to be in it because a dimension may be capped over several windows and
 // deleting one must not delete the others.
+//
+// The segments are taken from the ends rather than split into four, because a
+// project scopeId is itself "tenant/name" and carries a slash of its own.
+// Splitting positionally produced five segments for every project rule, so a
+// project budget could be set and read but never removed — which is the one
+// operation an operator needs when a cap turns out to be wrong.
 func (s *Server) deleteBudgetRule(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDB(w) {
 		return
 	}
 	parts := strings.Split(chi.URLParam(r, "*"), "/")
-	if len(parts) != 4 {
+	if len(parts) < 4 || parts[0] == "" || parts[len(parts)-2] == "" {
 		writeError(w, errs.InvalidArgument(
-			"id must be scopeKind/scopeId/dimension/window, for example tenant/acme/tokens_total/5h"))
+			"id must be scopeKind/scopeId/dimension/window, for example "+
+				"tenant/acme/tokens_total/5h or project/acme/research/tokens_total/5h"))
 		return
 	}
-	win, err := quota.ParseDuration(parts[3])
+	kind := quota.ScopeKind(parts[0])
+	scopeID := strings.Join(parts[1:len(parts)-2], "/")
+	dimension := quota.Dimension(parts[len(parts)-2])
+	win, err := quota.ParseDuration(parts[len(parts)-1])
 	if err != nil {
 		writeError(w, errs.InvalidArgument("window: %v", err))
 		return
 	}
-	err = s.quota.DeleteRule(r.Context(), quota.ScopeKind(parts[0]), parts[1],
-		quota.Dimension(parts[2]), win)
-	if err != nil {
+	if err := s.quota.DeleteRule(r.Context(), kind, scopeID, dimension, win); err != nil {
 		writeStoreErr(w, err)
 		return
 	}

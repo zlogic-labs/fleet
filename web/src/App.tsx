@@ -7,6 +7,8 @@ import { Playground } from './pages/Playground';
 import { Fleet } from './pages/Fleet';
 import { Models } from './pages/Models';
 import { Cluster } from './pages/Cluster';
+import { Tenancy } from './pages/Tenancy';
+import { Cost } from './pages/Cost';
 import { Settings } from './pages/Settings';
 import { listModels, fleetStatus } from './api/gateway';
 import { usePoll } from './hooks';
@@ -18,6 +20,8 @@ const { Text } = Typography;
 const NAV = [
   { key: '/playground', label: 'Playground' },
   { key: '/fleet', label: 'Fleet' },
+  { key: '/tenancy', label: 'Tenancy' },
+  { key: '/cost', label: 'Cost' },
   { key: '/models', label: 'Models' },
   { key: '/cluster', label: 'Cluster' },
 ];
@@ -135,6 +139,8 @@ function Shell() {
           <Route path="/fleet" element={<Fleet />} />
           <Route path="/models" element={<Models />} />
           <Route path="/cluster" element={<Cluster />} />
+          <Route path="/tenancy" element={<Tenancy />} />
+          <Route path="/cost" element={<Cost />} />
           <Route path="*" element={<Navigate to="/playground" replace />} />
         </Routes>
       </Content>

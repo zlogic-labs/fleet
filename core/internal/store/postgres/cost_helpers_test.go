@@ -65,14 +65,27 @@ func report(gpus, replicas int) inventory.Report {
 // something to integrate.
 func fillMonth(t *testing.T, s *CostStore, gpus, replicas int) {
 	t.Helper()
+	fillPeriod(t, s, period(t), gpus, replicas)
+}
+
+// fillPeriod writes capacity across one period, bounded by that period's own
+// length.
+//
+// Bounded rather than a fixed 31 days because a fixed month writes past the end
+// of a short one: filling June for 31 days lands samples in July, and since a
+// deployment sample is keyed on (deployment, at) the second fill collides with
+// the first. That collision is only visible in a test that closes more than one
+// month — and closing more than one month is the normal case.
+func fillPeriod(t *testing.T, s *CostStore, p cost.Period, gpus, replicas int) {
+	t.Helper()
 	ctx := context.Background()
 	// Six-hour spacing is enough: Integrate interpolates between samples, and a
 	// constant value integrates to the same total at any spacing.
-	for h := 0; h <= 31*24; h += 6 {
+	for at := p.Start; at.Before(p.End); at = at.Add(6 * time.Hour) {
 		r := report(gpus, replicas)
-		r.Cluster.ReportedAt = periodStart().Add(time.Duration(h) * time.Hour)
+		r.Cluster.ReportedAt = at
 		if err := s.RecordCapacity(ctx, r); err != nil {
-			t.Fatalf("record capacity at +%dh: %v", h, err)
+			t.Fatalf("record capacity at %s: %v", at, err)
 		}
 	}
 }

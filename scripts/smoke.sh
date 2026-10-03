@@ -619,10 +619,22 @@ else
     "$(curl -sS "$API/budget-rules?scopeId=$T&scopeKind=tenant" | jqp "[r['windowSeconds'] for r in d if r['dimension']=='units'][0]")"
 
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
-    "$API/budget-rules/tenant/$T/tokens_total/5h")
+     "$API/budget-rules/tenant/$T/tokens_total/5h")
   check "DELETE /budget-rules/* removes only that window" "204" "$code"
   check "the other rule survived" "1" \
     "$(curl -sS "$API/budget-rules?scopeId=$T" | jqp "len(d)")"
+
+  # A project scopeId is itself "tenant/name", so the delete id has five
+  # segments rather than four. Splitting it positionally made every project
+  # rule undeletable — the one operation an operator needs when a cap is wrong.
+  curl -sS -o /dev/null -X POST "$API/budget-rules" \
+    -H 'content-type: application/json' \
+    -d "{\"scopeKind\":\"project\",\"scopeId\":\"$T/research\",\"dimension\":\"units\",\"limit\":5,\"window\":\"1h\"}"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+     "$API/budget-rules/project/$T/research/units/1h")
+  check "a project rule is deletable despite the slash in its id" "204" "$code"
+  check "and it is really gone" "0" \
+    "$(curl -sS "$API/budget-rules?scopeId=$T/research" | jqp "len(d)")"
 
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$API/keys/$KID")
   check "DELETE /keys/*" "204" "$code"
@@ -652,8 +664,11 @@ else
 
   curl -sS -o /dev/null -X POST "$API/cost-rates" -H 'content-type: application/json' \
     -d '{"cluster":"smoke-cluster","gpuHourMicro":3000000,"currency":"USD"}'
+  # Selected by name, not by position. A seeded rate that sorts earlier lands
+  # at index 0, and the check then reads somebody else's number and calls it a
+  # failure — or, worse, passes against the wrong row.
   check "a declared rate reads back" "3000000" \
-    "$(curl -sS "$API/cost-rates" | jqp "d[0]['gpuHourMicro']")"
+    "$(curl -sS "$API/cost-rates" | jqp "[r['gpuHourMicro'] for r in d if r['cluster']=='smoke-cluster'][0]")"
 
   code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/cost-periods/January")
   check "a period is YYYY-MM" "400" "$code"
