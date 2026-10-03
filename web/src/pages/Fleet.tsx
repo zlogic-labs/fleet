@@ -141,7 +141,7 @@ export function Fleet() {
           size="small"
           rowKey={(_, i) => String(i)}
           pagination={false}
-          scroll={{ x: 860 }}
+          scroll={{ x: 1000 }}
           dataSource={data.recent.slice(0, 12)}
           columns={[
             {
@@ -165,9 +165,23 @@ export function Fleet() {
             { title: 'TTFT', dataIndex: 'ttftMs', width: 90, render: (v: number) => `${v} ms` },
             {
               title: 'Decode',
-              dataIndex: 'durationMs',
+              dataIndex: 'decodeMs',
               width: 100,
-              render: (v: number, r) => `${Math.max(0, v - r.ttftMs)} ms`,
+              render: (v: number) => `${v} ms`,
+            },
+            {
+              // Fleet's own measurement, derived from the two columns beside it:
+              // completion tokens over the time spent producing them.
+              //
+              // Not an engine-reported figure, and not presented as one. vLLM
+              // exports time-per-output-token as a histogram over every request
+              // it has served since start-up, so there is no per-request value
+              // in it to read — what is here is measured at the gateway, and it
+              // counts the tokens the client actually received.
+              title: 'Decode rate',
+              width: 110,
+              align: 'right',
+              render: (_, r) => <DecodeRate r={r} />,
             },
             {
               title: 'Tokens',
@@ -232,4 +246,16 @@ function EndpointRow({ ep }: { ep: EndpointStatus }) {
       </Space>
     </div>
   );
+}
+
+// Completion tokens per second of decoding.
+//
+// Blank rather than zero when there is nothing to divide: a blocking request
+// has no decode phase to speak of and a zero would be a claim about the model
+// that nobody measured.
+function DecodeRate({ r }: { r: RecentSample }) {
+  if (!r.streamed || r.decodeMs <= 0 || r.completionTokens <= 0) {
+    return <Text type="secondary">—</Text>;
+  }
+  return <>{((r.completionTokens * 1000) / r.decodeMs).toFixed(1)} tok/s</>;
 }

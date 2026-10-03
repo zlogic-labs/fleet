@@ -42,6 +42,8 @@ export interface RecentSample {
   streamed: boolean;
   ttftMs: number;
   durationMs: number;
+  /** durationMs minus ttftMs: the part that produced the answer. */
+  decodeMs: number;
   usageKnown: boolean;
   promptTokens: number;
   completionTokens: number;

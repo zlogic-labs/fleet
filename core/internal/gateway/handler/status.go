@@ -149,7 +149,17 @@ type recentSample struct {
 	Streamed   bool   `json:"streamed"`
 	TTFTMs     int64  `json:"ttftMs"`
 	DurationMs int64  `json:"durationMs"`
-	UsageKnown bool   `json:"usageKnown"`
+	// DecodeMs is the request's duration minus its time to first token: the
+	// part spent producing the answer rather than producing the first token.
+	//
+	// It is separated because the two answer different questions and conflating
+	// them hides the shape of the problem. Time to first token says how long
+	// the tenant waited for anything at all; decode says how fast the model was
+	// once it had started. A fleet with a slow queue has a large TTFT and a
+	// normal decode rate, and an operator cannot tell those apart from the two
+	// numbers alone.
+	DecodeMs   int64 `json:"decodeMs"`
+	UsageKnown bool  `json:"usageKnown"`
 
 	PromptTokens     int `json:"promptTokens"`
 	CompletionTokens int `json:"completionTokens"`
@@ -171,6 +181,7 @@ func recent(samples []Sample) []recentSample {
 			Streamed:   s.Streamed,
 			TTFTMs:     s.TTFT.Milliseconds(),
 			DurationMs: s.Duration.Milliseconds(),
+			DecodeMs:   decodeMs(s),
 			UsageKnown: s.UsageKnown,
 			Estimated:  !s.UsageKnown,
 		}
@@ -188,4 +199,18 @@ func recent(samples []Sample) []recentSample {
 		out = append(out, r)
 	}
 	return out
+}
+
+// decodeMs is the time spent producing the answer rather than the first token.
+//
+// Clamped at zero: a blocking request can report a duration shorter than its own
+// measured time to first token when the two clocks disagree by a millisecond,
+// and a negative decode would render as a decode rate of minus infinity, which
+// reads as a broken engine rather than as a rounding artefact.
+func decodeMs(s Sample) int64 {
+	d := s.Duration.Milliseconds() - s.TTFT.Milliseconds()
+	if d < 0 {
+		return 0
+	}
+	return d
 }

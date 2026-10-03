@@ -37,3 +37,6 @@ fleet-data/
 
 # Headless Chrome profile used for console screenshots.
 /.chrome-tmp/
+
+# Playwright MCP scratch
+/.playwright-mcp/
