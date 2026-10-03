@@ -17,7 +17,7 @@ import {
   MenuUnfoldOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { NAV, SETTINGS, groupOf } from './nav';
 import { Settings } from '../pages/Settings';
@@ -39,6 +39,7 @@ export interface ShellProps {
 
 export function Shell({ children, edition, status }: ShellProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [open, setOpen] = useState<string[]>([]);
@@ -86,6 +87,7 @@ export function Shell({ children, edition, status }: ShellProps) {
             selectedKeys={[selected]}
             openKeys={collapsed ? undefined : open}
             onOpenChange={setOpen}
+            onClick={(e) => navigate(e.key)}
             items={items}
             style={{ borderInlineEnd: 'none' }}
           />
@@ -100,7 +102,9 @@ export function Shell({ children, edition, status }: ShellProps) {
 
       <Layout>
         <Bar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} title={titleFor(selected)} />
-        <Content style={{ overflowY: 'auto' }}>{children}</Content>
+        <Content style={{ overflowY: 'auto', padding: selected === '/playground' ? 0 : 20 }}>
+          {children}
+        </Content>
       </Layout>
 
       <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
