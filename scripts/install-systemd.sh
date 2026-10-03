@@ -14,6 +14,18 @@ ROOT=${ROOT:-/mnt/d/Workspace/zlogic-fleet}
 SERVING=${FLEET_SERVING_DIR:-$ROOT/../fleet-serving}
 FLEET_HOME=${FLEET_HOME:-/root/fleet}
 NS=${NS:-fleet}
+# The name the operator reports the cluster under. It lands in usage_events and
+# the cost pool, so it is worth being explicit about rather than letting it
+# default to whatever the first node is called.
+CLUSTER_NAME=${CLUSTER_NAME:-k3s-dev}
+APISERVER=http://127.0.0.1:8081
+# The console and the control plane are bound to the wildcard address because
+# WSL's localhost forwarding is unreliable here, and a browser on Windows that
+# cannot reach the server looks exactly like the server being down. This is the
+# address they are reached on: the vEthernet adapter, which is host-local, so
+# this exposes them to this machine and not to the network it sits on. Set
+# FLEET_API_KEYS before exposing them anywhere else.
+WSL_ADDR=${WSL_ADDR:-$(hostname -I | awk '{print $1}')}
 UNIT_DIR=/etc/systemd/system
 SKIP_OPERATOR=
 
@@ -40,11 +52,11 @@ else
   SKIP_OPERATOR=1
 fi
 
-# The gateway's upstream is the Service the operator rendered. Its ClusterIP is
-# not known until something is deployed, and it changes if the Service is
-# recreated, so it is resolved at every start rather than baked into a unit.
-# Resolving it into a file the unit reads keeps the gateway's own environment
-# free of a shell that would otherwise have to be exec'd through.
+# Without an operator there is nothing to discover endpoints from, so the
+# gateway is pointed at whatever Service the operator last rendered. With one,
+# the operator reports the cluster and the gateway reads it, and this whole
+# mechanism is skipped: a ClusterIP baked into a file goes stale the moment the
+# Service is recreated, and the oneshot holding it never re-runs.
 say "writing the upstream resolver"
 cat > "$FLEET_HOME/upstream.sh" <<EOF
 #!/bin/sh
@@ -87,6 +99,14 @@ EOF
 chmod +x "$FLEET_HOME/upstream.sh"
 
 say "installing units"
+# Tenancy, budgets and the cost pool all live in PostgreSQL. Without a URL the
+# control plane still runs and the registry pages still work, which is what a
+# laptop with no database wants, so this stays optional rather than required.
+DATABASE_ARG=
+if [ -n "${DATABASE_URL:-}" ]; then
+  DATABASE_ARG=" --database $DATABASE_URL"
+fi
+if [ -n "$SKIP_OPERATOR" ]; then
 cat > "$UNIT_DIR/fleet-upstream.service" <<EOF
 [Unit]
 Description=Resolve the Fleet gateway's upstream from k3s
@@ -97,15 +117,20 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=$FLEET_HOME/upstream.sh
 EOF
+fi
 
 cat > "$UNIT_DIR/fleet-gateway.service" <<EOF
 [Unit]
 Description=Fleet gateway (OpenAI-compatible API and console)
-After=fleet-upstream.service
-Requires=fleet-upstream.service
+After=fleet-apiserver.service
+# Wants, not Requires: the gateway keeps serving the endpoints it already has
+# when the control plane is unreachable. A gateway that dies with the control
+# plane takes the traffic that is already in flight down with it, and the
+# catalog client can tell "no deployments" from "could not ask" precisely so
+# that this case does not have to be a restart.
+Wants=fleet-apiserver.service
 
 [Service]
-EnvironmentFile=$FLEET_HOME/state/upstream.env
 ExecStart=$FLEET_HOME/bin/fleet-gateway
 # Always, not on-failure: a server that exits cleanly without being asked has
 # stopped serving, and treating exit 0 as success leaves the gateway down with
@@ -113,6 +138,22 @@ ExecStart=$FLEET_HOME/bin/fleet-gateway
 Restart=always
 RestartSec=2
 WorkingDirectory=$ROOT
+Environment=FLEET_LISTEN=0.0.0.0:8080
+EOF
+
+if [ -z "$SKIP_OPERATOR" ]; then
+cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
+Environment=FLEET_CONTROL_PLANE_URL=$APISERVER
+Environment=FLEET_CONTROL_PLANE_REFRESH=5s
+EOF
+else
+cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
+Requires=fleet-upstream.service
+EnvironmentFile=$FLEET_HOME/state/upstream.env
+EOF
+fi
+
+cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
 
 [Install]
 WantedBy=multi-user.target
@@ -124,8 +165,8 @@ Description=Fleet control plane
 After=k3s.service
 
 [Service]
-ExecStart=$FLEET_HOME/bin/fleet-apiserver --listen 127.0.0.1:8081 \\
-  --data $FLEET_HOME/weights --hub stub
+ExecStart=$FLEET_HOME/bin/fleet-apiserver --listen 0.0.0.0:8081 \\
+  --allowed-origins http://$WSL_ADDR:8080 --data $FLEET_HOME/weights --hub stub${DATABASE_ARG}
 Restart=always
 RestartSec=2
 
@@ -137,12 +178,13 @@ if [ -z "$SKIP_OPERATOR" ]; then
 cat > "$UNIT_DIR/fleet-operator.service" <<EOF
 [Unit]
 Description=Fleet operator (reconciles FleetModel and FleetDeployment)
-After=k3s.service
+After=k3s.service fleet-apiserver.service
 
 [Service]
 Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ExecStart=$FLEET_HOME/bin/fleet-operator \\
-  --metrics-bind-address :9090 --health-probe-bind-address :9091 --namespace $NS
+  --metrics-bind-address :9090 --health-probe-bind-address :9091 --namespace $NS \\
+  --report-to $APISERVER --report-every 5s --cluster-name $CLUSTER_NAME
 Restart=always
 RestartSec=2
 
@@ -152,7 +194,7 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable fleet-apiserver fleet-upstream fleet-gateway >/dev/null
+systemctl enable fleet-apiserver fleet-gateway >/dev/null
 systemctl restart fleet-apiserver
 UNITS="fleet-apiserver fleet-gateway"
 if [ -z "$SKIP_OPERATOR" ]; then
@@ -167,8 +209,15 @@ if [ -z "$SKIP_OPERATOR" ]; then
     kubectl get fleetdeployment -n "$NS" >/dev/null 2>&1 && break
     sleep 2
   done
-  # The upstream oneshot is RemainAfterExit, so restarting the gateway does not
-  # re-run it and the gateway would keep whatever address was resolved last.
+  # Nothing resolves an address for the gateway now that it reads the control
+  # plane, and the unit from an earlier install would sit there looking like it
+  # still mattered. Remove it rather than leave it enabled and inert.
+  systemctl stop fleet-upstream >/dev/null 2>&1 || true
+  systemctl disable fleet-upstream >/dev/null 2>&1 || true
+  rm -f "$UNIT_DIR/fleet-upstream.service"
+  systemctl daemon-reload
+else
+  systemctl enable fleet-upstream >/dev/null
   systemctl restart fleet-upstream
 fi
 systemctl restart fleet-gateway
@@ -177,4 +226,5 @@ say "status"
 for u in $UNITS; do
   printf '  %-18s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"
 done
-printf '\n  console  http://127.0.0.1:8080\n'
+printf '\n  console  http://%s:8080\n' "$WSL_ADDR"
+printf '  control  http://%s:8081/api/v1\n' "$WSL_ADDR"
