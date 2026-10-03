@@ -23,7 +23,7 @@ func TestAPriceRequestIsPricedAgainstTheShapeItRanOn(t *testing.T) {
 	// the request that ran an hour ago.
 	shape(t, s, "fleet/llama", 4, p.Start.Add(3*time.Hour))
 
-	seconds := consumptionFor(t, s, p, "acme")
+	seconds := sweptFor(t, s, p, "acme")
 	if want := int64(3600 * 2); seconds != want {
 		t.Fatalf("priced %d GPU-seconds, want %d (the shape at request time)", seconds, want)
 	}
@@ -35,8 +35,47 @@ func TestARequestBeforeAnySampleCostsNothingRatherThanGuessing(t *testing.T) {
 	addUsageAt(t, s, "acme", "fleet/llama", 3600, 500_000, p.Start.Add(time.Hour))
 	shape(t, s, "fleet/llama", 2, p.Start.Add(4*time.Hour))
 
-	if got := consumptionFor(t, s, p, "acme"); got != 0 {
+	if got := sweptFor(t, s, p, "acme"); got != 0 {
 		t.Fatalf("priced %d GPU-seconds against a shape Fleet had not seen yet", got)
+	}
+}
+
+func TestConcurrentRequestsDoNotMultiplyWhatTheTenantIsCharged(t *testing.T) {
+	// Ten requests occupying the same single GPU for the same minute is one
+	// minute of that GPU. Summing wall clock bills ten, and the error scales
+	// with exactly the concurrency Fleet exists to absorb.
+	s := newCostStore(t)
+	p := period(t)
+	shape(t, s, "fleet/llama", 1, p.Start)
+	for range 10 {
+		addUsageAt(t, s, "acme", "fleet/llama", 60, 0, p.Start.Add(time.Minute))
+	}
+
+	if got, want := sweptFor(t, s, p, "acme"), int64(60); got != want {
+		t.Fatalf("billed %d GPU-seconds for ten concurrent minutes on one GPU, want %d", got, want)
+	}
+}
+
+func TestAnOverlappingDeploymentNeverCostsMoreThanItHeld(t *testing.T) {
+	// The clamp that used to hide this is gone, so the bound has to hold at the
+	// store boundary too, not just in the sweep's own tests.
+	s := newCostStore(t)
+	p := period(t)
+	shape(t, s, "fleet/llama", 2, p.Start)
+	for i := range 8 {
+		addUsageAt(t, s, "acme", "fleet/llama", 600, 0, p.Start.Add(time.Duration(i+1)*time.Minute))
+	}
+
+	rep, err := s.ClosePeriod(context.Background(), p, 0)
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if len(rep.Deployments) != 1 {
+		t.Fatalf("got %d deployments", len(rep.Deployments))
+	}
+	d := rep.Deployments[0]
+	if d.Idle < 0 || d.Used > d.Reserved {
+		t.Fatalf("reserved %d used %d idle %d", d.Reserved, d.Used, d.Idle)
 	}
 }
 
@@ -62,16 +101,17 @@ func addUsageAt(t *testing.T, s *CostStore, tenant, endpoint string, durationSec
 	}
 }
 
-func consumptionFor(t *testing.T, s *CostStore, p cost.Period, tenant string) int64 {
+// sweptFor runs what Close runs, per tenant, so a test can assert on the
+// number that ends up on an invoice rather than on the rows behind it.
+func sweptFor(t *testing.T, s *CostStore, p cost.Period, tenant string) int64 {
 	t.Helper()
-	uses, err := s.consumption(context.Background(), p, "tenant_id")
-	if err != nil {
-		t.Fatalf("consumption: %v", err)
+	in := cost.Input{Period: p}
+	if err := s.gather(context.Background(), p, &in); err != nil {
+		t.Fatalf("gather: %v", err)
 	}
-	for _, u := range uses {
-		if u.Key == tenant {
-			return u.GPUSeconds
-		}
+	var seconds int64
+	for deployment, group := range in.Spans {
+		seconds += cost.Sweep(in.Reserved[deployment], group, p.Start, p.End).ByKey[tenant]
 	}
-	return 0
+	return seconds
 }

@@ -2,6 +2,7 @@ package cost
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
@@ -96,17 +97,20 @@ type Input struct {
 	Rates  []Rate
 	// Capacity is GPUs present, per cluster, over time. It is the pool.
 	Capacity map[string][]Sample
-	// Reserved is per-deployment GPU capacity over time, and Used is per
-	// deployment GPU-seconds consumed.
+	// Reserved is per-deployment GPU capacity over time — the pool a deployment
+	// is holding open, paid for whether or not anybody asks.
 	Reserved map[string][]Sample
-	Used     map[string]int64
-	// Consumption is per-key GPU-seconds, for the allocation, and Spent is what
-	// the ledger charged those same keys. Both are reported per row because the
-	// gap between them is the price book's health: a tenant billed well above
-	// what the fleet cost is over-priced, and the platform cannot see that
-	// anywhere else.
-	Consumption []Use
-	Spent       map[string]billing.Amount
+	// Spans is per-deployment request intervals. Used and Consumption are
+	// derived from these by Sweep rather than summed from them: adding up each
+	// request's wall clock bills a GPU once per request per second, so a month
+	// under load costs more than the same month idle, and a tenant's bill goes
+	// down if they serialise their traffic.
+	Spans map[string][]Span
+	// Spent is what the ledger charged each key. It is reported beside each
+	// tenant's share because the gap between the two is the price book's
+	// health: a tenant billed well above what the fleet cost is over-priced,
+	// and the platform can see that nowhere else.
+	Spent map[string]billing.Amount
 	// MinCoverage is the fraction of the period the samples must account for.
 	MinCoverage float64
 }
@@ -176,63 +180,46 @@ func Close(in Input) (Report, error) {
 		return Report{}, &ErrIncomplete{Period: rep.Period, Coverage: cov.Fraction(), Want: in.MinCoverage}
 	}
 
-	rep.Deployments = perDeployment(in)
-	rep.Tenants, rep.Allocated = allocate(rep.Pool, in.Consumption, in.Spent)
-	rep.Busy = proportion(rep.Pool, consumed(in), poolSeconds)
+	used, consumption := occupied(in)
+	rep.Deployments = perDeployment(in, used)
+	rep.Tenants, rep.Allocated = allocate(rep.Pool, consumption, in.Spent)
+	rep.Busy = proportion(rep.Pool, usedSeconds(used), poolSeconds)
 	rep.Idle = rep.Pool - rep.Busy
 	rep.IdlePct = percent(int64(rep.Idle), int64(rep.Pool))
 	return rep, nil
 }
 
-func rateIndex(rates []Rate) map[string]Rate {
-	byCluster := make(map[string]Rate, len(rates))
-	for _, r := range rates {
-		byCluster[r.Cluster] = r
-	}
-	return byCluster
-}
-
-// priceSeconds converts GPU-seconds at a per-GPU-hour rate.
+// occupied sweeps every deployment, returning what each one used and who had it.
 //
-// The rate is already in micro-units, so the divisor is just an hour. Scaling by
-// MicroPerUnit here as well prices a month at a millionth of what it cost, which
-// is a plausible-looking number and wildly wrong.
-func priceSeconds(seconds, rateMicro int64) billing.Amount {
-	const gpuSecondsPerHour = 3600
-	num := seconds * rateMicro
-	return billing.Amount((num + gpuSecondsPerHour/2) / gpuSecondsPerHour)
+// Both figures come from one sweep so they cannot disagree: a deployment's used
+// time is by definition the sum of the key shares taken out of it.
+func occupied(in Input) (map[string]int64, []Use) {
+	names := deploymentNames(in)
+	used := make(map[string]int64, len(names))
+	totals := make(map[string]int64, len(names))
+
+	for _, name := range names {
+		b := Sweep(in.Reserved[name], in.Spans[name], in.Period.Start, in.Period.End)
+		used[name] = b.Seconds
+		for key, v := range b.ByKey {
+			totals[key] += v
+		}
+	}
+
+	uses := make([]Use, 0, len(totals))
+	for key, v := range totals {
+		if v > 0 {
+			uses = append(uses, Use{Key: key, GPUSeconds: v})
+		}
+	}
+	sort.Slice(uses, func(i, j int) bool { return uses[i].Key < uses[j].Key })
+	return used, uses
 }
 
-// proportion is part of pool, by part of whole, clamped to pool.
-func proportion(pool billing.Amount, part, whole int64) billing.Amount {
-	if pool <= 0 || whole <= 0 || part <= 0 {
-		return 0
+func usedSeconds(used map[string]int64) int64 {
+	var sum int64
+	for _, v := range used {
+		sum += v
 	}
-	if part >= whole {
-		return pool
-	}
-	return billing.Amount(int64(pool) * part / whole)
-}
-
-func consumed(in Input) int64 {
-	var total int64
-	for _, u := range in.Consumption {
-		total += u.GPUSeconds
-	}
-	return total
-}
-
-// percent is part/whole as a whole-number percentage, rounded half up.
-//
-// Half up rather than truncating because IdlePct is read as "78% idle", and
-// truncation calls a fleet that is 78.6% idle 78%, which flatters it.
-func percent(part, whole int64) int {
-	if whole <= 0 {
-		return 0
-	}
-	if part < 0 {
-		return -percent(-part, whole)
-	}
-	const hundred = 100
-	return int((part*hundred*2 + whole) / (whole * 2))
+	return sum
 }

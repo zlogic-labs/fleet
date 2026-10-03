@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/cost"
@@ -38,24 +39,12 @@ func (s *CostStore) gather(ctx context.Context, period cost.Period, in *cost.Inp
 		return fmt.Errorf("postgres: read deployment samples: %w", err)
 	}
 
-	uses, err := s.consumption(ctx, period, "tenant_id")
+	spans, err := s.spans(ctx, period)
 	if err != nil {
 		return err
 	}
-	in.Consumption = uses
-	in.Spent = make(map[string]billing.Amount, len(uses))
-	for _, u := range uses {
-		in.Spent[u.Key] = 0
-	}
-
-	byEndpoint, err := s.consumption(ctx, period, "endpoint_id")
-	if err != nil {
-		return err
-	}
-	in.Used = make(map[string]int64, len(byEndpoint))
-	for _, u := range byEndpoint {
-		in.Used[u.Key] = u.GPUSeconds
-	}
+	in.Spans = spans
+	in.Spent = map[string]billing.Amount{}
 	return s.spend(ctx, period, in.Spent)
 }
 
@@ -81,38 +70,56 @@ func (s *CostStore) capacity(ctx context.Context, period cost.Period) (map[strin
 	return out, rows.Err()
 }
 
-// consumption is GPU-seconds per whatever the caller named, with each request
-// priced against the shape of its deployment at the moment it ran.
+// spans reads every request in the period as an interval, grouped by endpoint.
 //
-// The as-of lookup matters: joining today's gpu_per_replica would re-price the
-// whole month every time somebody scales a replica, so a tenant's invoice would
-// change because an operator adjusted capacity — which is exactly the kind of
-// silent rewrite the ledger is built to make impossible.
-func (s *CostStore) consumption(ctx context.Context, period cost.Period, groupBy string) ([]cost.Use, error) {
-	const q = `SELECT %[1]s AS scope,
-	  COALESCE(SUM((u.duration_ms::bigint / 1000.0) * shape.gpu_per_replica), 0)::bigint
+// Intervals, not pre-summed seconds. The ledger records when a request
+// finished, so the occupied interval is reconstructed as
+// [occurred_at - duration, occurred_at]; recording a start time instead would
+// make this exact, at the price of a column that older rows would not have.
+//
+// Each request is priced against the shape of its deployment at the moment it
+// ran, because joining today's gpu_per_replica would re-price the whole month
+// every time somebody scaled a replica, and a tenant's invoice would then
+// change because an operator adjusted capacity — the silent rewrite the ledger
+// exists to make impossible.
+//
+// A request with no tenant still occupies the GPU; it is swept under the empty
+// key so it counts towards utilization and towards nobody's bill.
+func (s *CostStore) spans(ctx context.Context, period cost.Period) (map[string][]cost.Span, error) {
+	const q = `SELECT u.endpoint_id, u.tenant_id, u.occurred_at, u.duration_ms, shape.gpu_per_replica
 	FROM usage_events u
 	JOIN LATERAL (
 	  SELECT gpu_per_replica FROM deployment_samples d
 	  WHERE d.deployment = u.endpoint_id AND d.at <= u.occurred_at
 	  ORDER BY d.at DESC LIMIT 1
 	) shape ON true
-	WHERE u.occurred_at >= $1 AND u.occurred_at < $2 AND u.%[1]s <> ''
-	GROUP BY 1 ORDER BY 1`
+	WHERE u.occurred_at >= $1 AND u.occurred_at < $2
+	  AND u.endpoint_id <> '' AND u.duration_ms > 0`
 
-	rows, err := s.db.pool.Query(ctx, fmt.Sprintf(q, groupBy), period.Start, period.End)
+	rows, err := s.db.pool.Query(ctx, q, period.Start, period.End)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: consumption by %s: %w", groupBy, err)
+		return nil, fmt.Errorf("postgres: cost spans: %w", err)
 	}
 	defer rows.Close()
 
-	var out []cost.Use
+	out := map[string][]cost.Span{}
 	for rows.Next() {
-		var u cost.Use
-		if err := rows.Scan(&u.Key, &u.GPUSeconds); err != nil {
-			return nil, fmt.Errorf("postgres: scan consumption: %w", err)
+		var (
+			endpoint, tenant string
+			at               time.Time
+			duration         int64
+			gpus             int32
+		)
+		if err := rows.Scan(&endpoint, &tenant, &at, &duration, &gpus); err != nil {
+			return nil, fmt.Errorf("postgres: scan cost span: %w", err)
 		}
-		out = append(out, u)
+		span := cost.Span{
+			From: at.Add(-time.Duration(duration) * time.Millisecond),
+			To:   at,
+			Key:  tenant,
+			GPUs: int64(gpus),
+		}
+		out[endpoint] = append(out[endpoint], span)
 	}
 	return out, rows.Err()
 }

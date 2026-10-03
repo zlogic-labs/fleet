@@ -71,33 +71,47 @@ func allocate(pool billing.Amount, uses []Use, spent map[string]billing.Amount) 
 // clusters the per-row amount would be an assumption. The ratio between
 // reserved and used does not depend on any of that, and it is the part an
 // operator actually acts on.
-func perDeployment(in Input) []Deployment {
-	names := make([]string, 0, len(in.Reserved))
-	for name := range in.Reserved {
-		names = append(names, name)
-	}
-	for name := range in.Used {
-		if _, ok := in.Reserved[name]; !ok {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
+// perDeployment reports reserved, used and idle GPU-seconds per deployment.
+//
+// Seconds only, no money: a rate is declared per cluster and a deployment is
+// priced at the rate of whichever cluster's capacity it shares, so with several
+// clusters the per-row amount would be an assumption. The ratio between
+// reserved and used does not depend on any of that, and it is the part an
+// operator actually acts on.
+//
+// Idle is not clamped. Used is a sweep bounded by the capacity it was swept
+// against, so a negative here would mean the bound broke, and printing zero
+// over it would hide that.
+func perDeployment(in Input, used map[string]int64) []Deployment {
+	names := deploymentNames(in)
 
 	rows := make([]Deployment, 0, len(names))
 	for _, name := range names {
 		reserved, _ := Integrate(in.Reserved[name], in.Period.Start, in.Period.End)
-		used := in.Used[name]
-		idle := reserved - used
-		if idle < 0 {
-			idle = 0
-		}
+		u := used[name]
+		idle := reserved - u
 		rows = append(rows, Deployment{
 			Name:     name,
 			Reserved: reserved,
-			Used:     used,
+			Used:     u,
 			Idle:     idle,
 			IdlePct:  percent(idle, reserved),
 		})
 	}
 	return rows
+}
+
+// deploymentNames is every deployment with capacity or with traffic, sorted.
+func deploymentNames(in Input) []string {
+	names := make([]string, 0, len(in.Reserved))
+	for name := range in.Reserved {
+		names = append(names, name)
+	}
+	for name := range in.Spans {
+		if _, ok := in.Reserved[name]; !ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }

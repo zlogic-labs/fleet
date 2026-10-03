@@ -167,7 +167,7 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 | `pkg/log` | slog 上下文封装 | `Logger` |
 | `internal/config` | 配置加载（env + yaml） | `Config` |
 | `internal/engine` | 引擎抽象：Adapter（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Capacity`, `Profile`, `Adapter`, `Scraper` |
-| `pkg/cost` | 成本池的时间积分与分摊，纯函数 | `Close`, `Integrate`, `Period` |
+| `pkg/cost` | 成本池的时间积分与分摊，纯函数 | `Close`, `Sweep`, `Span`, `Integrate`, `Period` |
 | `pkg/weights` | 权重格式分类，决定谁能加载 | `Format`, `Of` |
 | `pkg/inventory` | operator → 控制面的上报契约（跨 module 共享，所以不能放 internal） | `Report`, `Cluster`, `Deployment` |
 | `pkg/prom` | Prometheus 文本解析（只读四个 gauge，不引 client 库） | `Parse`, `Sample` |
@@ -203,7 +203,7 @@ core/pkg/engine/engine.go          Adapter 接口（按协议）· Capability ·
 core/pkg/engine/profile.go         Profile · Profiles · vllm / llama-cpp 两个字面量
 core/pkg/engine/scrape.go          Scraper：一次 /metrics 同时读出 Load 与 Capacity
 core/pkg/engine/openai/            唯一实现：probe 走 Profile 的候选列表
- core/pkg/cost/                      成本池：日历月、时间积分、分摊
+ core/pkg/cost/                      成本池：日历月、并发扫描线、时间积分、分摊
  core/pkg/weights/                 Format 分类（safetensors / gguf / unknown）
  core/pkg/inventory/               fleet-serving → 控制面的上报契约
  core/pkg/prom/                    Prometheus 文本解析
@@ -559,7 +559,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 ### 11.7 成本池：闲置容量必须落在某张账单上（P8）
 
-P8 说计费是 GPU·小时的**固定成本分摊**，这句话有三条实现上的后果，每一条都和直觉相反。
+P8 说计费是 GPU·小时的**固定成本分摊**，这句话有四条实现上的后果，每一条都和直觉相反。
 
 **一、成本池按日历月，预算按滚动窗口。** `cost.Period` 是 UTC 日历月，`quota.ParseDuration` 里的 `1mo` 是 30 天。两者不是同一个开关：预算是一个人盯着烧钱速度看的速率，发票是别人按月付钱的周期。混成一个开关的后果是成本池每天漂一点，月底谁也说不清"这个月"指哪一段。
 
@@ -575,6 +575,27 @@ Allocated = Pool                 ← 分摊给租户
 `Busy + Idle = Pool`，`Allocated = Pool`，两个等式不同但都对。**只按 Busy 分摊会把闲置留在账外**，于是运营方默默吸收了一个利用率问题——而"让闲置可见"正是这个平台存在的理由。闲置不是可以摊掉的成本，它是有人做错了决定的证据。
 
 **三、`1mo` 的月不是同一个月的月。** 预算里 `month = 30 天`，因为有时 28 天有时 31 天的窗口没人能算得清；成本池必须用真实日历月，否则跨月发票对不上。
+
+**四、占用是并发积分，不是墙钟求和。** 这一条最反直觉，因为"每个请求 × 它的时长"看起来就是对的，而且单请求算出来的数一模一样。
+
+```
+十个并发请求跑十秒，共享一张卡：
+
+墙钟求和   10 × 10s × 1 GPU = 100 GPU·秒   ← 错，是并发本身
+扫描线     min(容量, 需求) × Δt  = 10 GPU·秒
+```
+
+差别不是舍入误差，**误差就是并发度**：它随负载增长，让一个已经打满的部署看起来比真正闲置的还忙，而且**给一个把流量串行化的租户发折扣**。这不是显示问题——错误的数字在被拿去和任何东西比较之前就已经错了，clamp 只会把它藏起来。所以 `cost.Sweep` 按每个时刻 `busy = min(capacity, demand)` 算，每个 key 拿 `busy × 自己的需求 / 总需求`，于是：
+
+```
+Σ key 的份额 = busy ≤ reserved
+```
+
+`perDeployment` 里的 `idle < 0` 钳制因此被删掉了——它当初正是在盖这个洞。现在 idle 为负就意味着这条不等式破了，那是故障而不是可以抹平的显示问题。
+
+分摊同理：两个租户各自压满同一张卡时，谁也不能因为"请求更多"就多拿，因为池子只有那么大。这也是 `rate` 必须**在 busy 变化时整体重算**的原因——份额是"占忙碌时间的比例"，不是"占自己需求的比例"。`TestSweepSharesAreOfTheBusyTimeNotOfTheDemand` 盯的就是这个：zeta 的需求全程没变过，acme 走了之后它的份额从一半变成全部。
+
+`Sweep` 还必须和 `Integrate` 用**同一个 `MaxGap`**。只在一处尊重它，会得到一个"reserved 一天、used 一个月"的部署，idle 一样是负的。
 
 #### 让闲置可见的前提：容量必须有时间序列
 

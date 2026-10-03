@@ -102,14 +102,25 @@ func steady(value, every int) []Sample {
 	return out
 }
 
-// fullMonth is one cluster with 8 GPUs sampled hourly across January.
+// held covers n hours of January with one tenant on the 8-GPU deployment.
+func held(key string, hours int) []Span {
+	return []Span{{
+		From: jan1,
+		To:   jan1.Add(time.Duration(hours) * time.Hour),
+		Key:  key,
+		GPUs: 8,
+	}}
+}
+
+// fullMonth is one cluster and one deployment, 8 GPUs sampled hourly across
+// January, with a quarter of that month actually serving traffic.
 func fullMonth() Input {
 	p, _ := ParsePeriod("2026-01")
-	capacity := map[string][]Sample{"c1": steady(8, 1)}
 	return Input{
 		Period:      p,
-		Capacity:    capacity,
-		Consumption: []Use{{Key: "acme/research", GPUSeconds: 100}},
+		Capacity:    map[string][]Sample{"c1": steady(8, 1)},
+		Reserved:    map[string][]Sample{"llama": steady(8, 1)},
+		Spans:       map[string][]Span{"llama": held("acme/research", januaryHours/4)},
 		MinCoverage: DefaultMinCoverage,
 	}
 }

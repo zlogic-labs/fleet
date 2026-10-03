@@ -81,6 +81,10 @@ func TestCloseChargesIdleCapacityToSomebody(t *testing.T) {
 	in := fullMonth()
 	in.Rates = []Rate{{Cluster: "c1", GPUHourMicro: 2_000_000}}
 	in.Capacity = map[string][]Sample{"c1": steady(4, 1)}
+	in.Reserved = map[string][]Sample{"llama": steady(4, 1)}
+	in.Spans = map[string][]Span{"llama": {
+		{From: jan1, To: jan1.Add(time.Hour), Key: "acme/research", GPUs: 4},
+	}}
 	rep, err := Close(in)
 	if err != nil {
 		t.Fatalf("close: %v", err)
@@ -99,8 +103,7 @@ func TestCloseChargesIdleCapacityToSomebody(t *testing.T) {
 func TestCloseReportsNoIdleOnAFullyConsumedFleet(t *testing.T) {
 	in := fullMonth()
 	in.Rates = []Rate{{Cluster: "c1", GPUHourMicro: 1_000_000}}
-	// Consume exactly the capacity there is.
-	in.Consumption = []Use{{Key: "acme", GPUSeconds: 8 * januaryHours * 3600}}
+	in.Spans = map[string][]Span{"llama": held("acme", januaryHours)}
 	rep, err := Close(in)
 	if err != nil {
 		t.Fatalf("close: %v", err)
@@ -116,7 +119,6 @@ func TestCloseReportsNoIdleOnAFullyConsumedFleet(t *testing.T) {
 func TestCloseReportsIdleBelowOneHundredPercent(t *testing.T) {
 	in := fullMonth()
 	in.Rates = []Rate{{Cluster: "c1", GPUHourMicro: 1_000_000}}
-	in.Consumption = []Use{{Key: "acme", GPUSeconds: 8 * januaryHours * 3600 / 4}}
 	rep, err := Close(in)
 	if err != nil {
 		t.Fatalf("close: %v", err)
@@ -129,7 +131,12 @@ func TestCloseReportsIdleBelowOneHundredPercent(t *testing.T) {
 func TestCloseSplitsThePoolByConsumptionNotByKeyOrder(t *testing.T) {
 	in := fullMonth()
 	in.Rates = []Rate{{Cluster: "c1", GPUHourMicro: 1_000_000}}
-	in.Consumption = []Use{{Key: "acme", GPUSeconds: 3}, {Key: "zeta", GPUSeconds: 1}}
+	// Three hours of acme for every one of zeta, back to back rather than
+	// overlapped, so the split is exactly 3:1.
+	in.Spans = map[string][]Span{"llama": {
+		{From: jan1, To: jan1.Add(186 * time.Hour), Key: "acme", GPUs: 8},
+		{From: jan1.Add(186 * time.Hour), To: jan1.Add(248 * time.Hour), Key: "zeta", GPUs: 8},
+	}}
 	rep, err := Close(in)
 	if err != nil {
 		t.Fatalf("close: %v", err)
@@ -147,9 +154,7 @@ func TestCloseSplitsThePoolByConsumptionNotByKeyOrder(t *testing.T) {
 
 func TestPerDeploymentReportsIdle(t *testing.T) {
 	in := fullMonth()
-	in.Reserved = map[string][]Sample{"llama": steady(1, 1)}
-	in.Used = map[string]int64{"llama": 3600}
-	rows := perDeployment(in)
+	rows := perDeployment(in, map[string]int64{"llama": 3600})
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows", len(rows))
 	}
@@ -158,14 +163,27 @@ func TestPerDeploymentReportsIdle(t *testing.T) {
 	}
 }
 
-func TestPerDeploymentNeverReportsNegativeIdle(t *testing.T) {
-	// Overlapping requests make per-deployment used exceed any one replica's
-	// reserved time. Clamping keeps the utilization report readable instead of
-	// printing an idle time of minus four days.
+func TestCloseReportsNoDeploymentWithMoreUsedThanReserved(t *testing.T) {
+	// Overlapping requests used to push a deployment's used time past its
+	// reserved time, and the old answer was to clamp it. Nothing clamps now: a
+	// negative here would mean the sweep stopped bounding usage by capacity.
 	in := fullMonth()
-	in.Reserved = map[string][]Sample{"llama": steady(1, 1)}
-	in.Used = map[string]int64{"llama": januaryHours*3600 + 1}
-	if idle := perDeployment(in)[0].Idle; idle != 0 {
-		t.Fatalf("idle %d, want 0", idle)
+	in.Rates = []Rate{{Cluster: "c1", GPUHourMicro: 1_000_000}}
+	in.Spans = map[string][]Span{"llama": nil}
+	for i := range 12 {
+		in.Spans["llama"] = append(in.Spans["llama"], Span{
+			From: jan1,
+			To:   jan1.Add(time.Duration(januaryHours) * time.Hour),
+			Key:  []string{"acme", "zeta"}[i%2],
+			GPUs: 8,
+		})
+	}
+	rep, err := Close(in)
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	d := rep.Deployments[0]
+	if d.Used > d.Reserved || d.Idle < 0 || d.IdlePct != 0 {
+		t.Fatalf("reserved %d used %d idle %d (%d%%)", d.Reserved, d.Used, d.Idle, d.IdlePct)
 	}
 }
