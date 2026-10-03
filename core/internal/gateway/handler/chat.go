@@ -24,8 +24,6 @@ type Chat struct {
 	Picker   routing.Picker
 	Proxy    *transport.Proxy
 	Tokens   tokenizer.Resolver
-	Limiter  ratelimit.Limiter
-	Log      *slog.Logger
 	MaxBytes int64
 	// PrefixRunes bounds the hashable prompt prefix.
 	PrefixRunes int
@@ -37,16 +35,15 @@ type Chat struct {
 	// request cost", which is the same question a quota answers per tenant.
 	DefaultMaxTokens int
 
-	// Pricer and Recorder are the billing side of a settled request, and both
-	// are nil when the deployment keeps no ledger. A gateway with neither still
-	// serves traffic and still enforces limits; it just cannot say afterwards
-	// what anything cost, which is a laptop, not a production shape.
-	Pricer   billing.PricerSource
-	Recorder billing.Recorder
-	// Budget is nil when no spend budget is enforced, which is every
-	// deployment that has not set one and every gateway with no database. A
-	// tenant with no budget is not refused; it is simply not capped.
-	Budget quota.Limiter
+	// Everything after the response: pricing, the budget and the ledger.
+	// Embedded rather than declared so that /v1/embeddings settles through the
+	// same code with the same failure policy. Limiter, Pricer, Recorder and
+	// Budget are all reachable as h.Limiter and so on; Pricer and Recorder are
+	// nil when the deployment keeps no ledger, and a gateway with neither still
+	// serves traffic and still enforces limits, it just cannot say afterwards
+	// what anything cost. Budget nil means no spend budget is enforced, and a
+	// tenant with no budget is not refused — it is simply not capped.
+	*settler
 
 	samples *SampleLog
 }
@@ -82,15 +79,17 @@ func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver
 		Picker:           p,
 		Proxy:            proxy,
 		Tokens:           tokens,
-		Limiter:          opts.Limiter,
-		Log:              log,
 		MaxBytes:         opts.MaxBytes,
 		PrefixRunes:      opts.PrefixRunes,
 		DefaultMaxTokens: opts.DefaultMaxTokens,
-		Pricer:           opts.Pricer,
-		Recorder:         opts.Recorder,
-		Budget:           opts.Budget,
-		samples:          NewSampleLog(opts.SampleBuffer),
+		settler: &settler{
+			Limiter:  opts.Limiter,
+			Pricer:   opts.Pricer,
+			Recorder: opts.Recorder,
+			Budget:   opts.Budget,
+			Log:      log,
+		},
+		samples: NewSampleLog(opts.SampleBuffer),
 	}
 }
 

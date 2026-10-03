@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -17,10 +18,27 @@ import (
 
 // Settlement: what a finished request cost, and where that number is recorded.
 //
-// Separate from chat.go because this is the part with a failure policy, and
-// that policy is the opposite of everything before it. Every earlier step can
-// still refuse a request; from here the request has been answered and Fleet is
-// the only party that can be harmed by failing.
+// Separate from the handlers because this is the part with a failure policy,
+// and that policy is the opposite of everything before it. Every earlier step
+// can still refuse a request; from here the request has been answered and Fleet
+// is the only party that can be harmed by failing.
+
+// settler is the part of a request's life that is the same whatever was asked
+// for.
+//
+// It is a type rather than a package of functions because every one of its
+// inputs is already on the handler, and a chat and an embeddings request share
+// the whole of it: same reservations, same price book, same ledger, same
+// failure policy. The one thing that differs is how many completion tokens the
+// request reserved, and that is a parameter rather than a second copy of this
+// file.
+type settler struct {
+	Limiter  ratelimit.Limiter
+	Pricer   billing.PricerSource
+	Recorder billing.Recorder
+	Budget   quota.Limiter
+	Log      *slog.Logger
+}
 
 // settleTimeout bounds the work done after the response is on the wire.
 //
@@ -47,17 +65,15 @@ func settleContext(r *http.Request) (context.Context, context.CancelFunc) {
 // tenant's allowance should come back before a price lookup runs. The budget
 // settles immediately after, because by this point the amount is known and
 // leaving a reservation outstanding would spend money that was never used.
-func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, booking quota.Reservation,
-	ep engine.Endpoint, result transport.Result, promptTokens, maxOut int, streamed bool) {
+func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, booking quota.Reservation,
+	ep engine.Endpoint, result transport.Result, promptTokens, completion int, streamed bool) {
 
-	actual := promptTokens + maxOut
+	actual := promptTokens + completion
 	if result.UsageKnown && result.Usage != nil {
 		actual = result.Usage.TotalTokens
 	}
-	h.Limiter.Settle(r.Context(), reservation, actual)
+	s.Limiter.Settle(r.Context(), reservation, actual)
 
-	// A record is only built when something will store it, but the charge is
-	// needed either way, so it is computed once and shared.
 	rec := billing.Record{
 		Model:      ep.Model,
 		Endpoint:   ep.ID,
@@ -86,11 +102,11 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, bookin
 		rec.Usage = *result.Usage
 	} else {
 		// No usage from the engine. The record still has to exist, marked as an
-		// estimate, because the tokens were really spent; charging it at
-		// max_tokens is P6's fallback and reconciliation finds it later.
+		// estimate, because the tokens were really spent; charging the
+		// reservation is P6's fallback and reconciliation finds it later.
 		rec.Usage = openai.Usage{
 			PromptTokens:     promptTokens,
-			CompletionTokens: maxOut,
+			CompletionTokens: completion,
 			TotalTokens:      actual,
 		}
 	}
@@ -98,35 +114,35 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, bookin
 	settleCtx, cancel := settleContext(r)
 	defer cancel()
 
-	if h.Pricer != nil {
-		if amount, err := h.Pricer.Charge(settleCtx, rec.Model, rec.Usage); err != nil {
+	if s.Pricer != nil {
+		if amount, err := s.Pricer.Charge(settleCtx, rec.Model, rec.Usage); err != nil {
 			// An unpriced model is the operator's gap, not the tenant's fault.
 			// The request is still recorded — at zero — so the tokens are not
 			// lost, and the gap is logged loudly, because a model serving
 			// traffic with no price is a customer being given a GPU for free
 			// and nothing else in the system would say so.
-			h.Log.Error("no price for the model this request used",
+			s.Log.Error("no price for the model this request used",
 				"model", rec.Model, "endpoint", rec.Endpoint, "err", err)
 		} else {
 			rec.Amount = amount
-			rec.PriceBook = h.Pricer.BookID(rec.Model)
+			rec.PriceBook = s.Pricer.BookID(rec.Model)
 		}
 	}
 
 	// The budget settles with the same figure the ledger records, so the
 	// budget and the invoice can never disagree about a request.
-	if h.Budget != nil {
-		h.Budget.Settle(settleCtx, booking, quota.Estimate{
+	if s.Budget != nil {
+		s.Budget.Settle(settleCtx, booking, quota.Estimate{
 			Usage:  rec.Usage,
 			Amount: rec.Amount,
 			Known:  rec.UsageKnown,
 		})
 	}
 
-	if h.Recorder == nil {
+	if s.Recorder == nil {
 		return
 	}
-	h.record(settleCtx, rec)
+	s.record(settleCtx, rec)
 }
 
 // record writes the ledger row.
@@ -135,13 +151,13 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, bookin
 // disconnects mid-stream must not cancel the write of a request that was
 // billed. The work is Fleet's, and the tokens were spent whether or not the
 // caller stayed to hear the answer.
-func (h *Chat) record(ctx context.Context, rec billing.Record) {
-	if _, err := h.Recorder.Record(ctx, rec); err != nil {
+func (s *settler) record(ctx context.Context, rec billing.Record) {
+	if _, err := s.Recorder.Record(ctx, rec); err != nil {
 		// The one place Fleet loses money by failing. Logged with every
 		// dimension needed to reconstruct the row, because a record that
 		// failed to write is recoverable only by someone who can tell which
 		// request it was.
-		h.Log.Error("the ledger write failed; this request is unrecorded and unbilled",
+		s.Log.Error("the ledger write failed; this request is unrecorded and unbilled",
 			"tenant", rec.Tenant, "project", rec.Project, "key", rec.KeyID,
 			"model", rec.Model, "endpoint", rec.Endpoint,
 			"total_tokens", rec.Usage.TotalTokens,

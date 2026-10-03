@@ -15,6 +15,15 @@ import (
 // removes effectively all decode cost from the hot path.
 var usageMarker = []byte(`"usage"`)
 
+// There is one decode path for every response shape, not one per endpoint.
+//
+// An embeddings reply is decoded as a chat completion and reads correctly:
+// `usage` sits at the top level of both with the same shape, and encoding/json
+// ignores the fields that differ (`data` and `object`). A second shape-specific
+// path was written here first, on the belief that a chat decode would find no
+// usage and silently fall back to billing the reservation. The test that
+// assumed the opposite failed, which is how it was found.
+
 // DefaultRetainCap bounds how many response bytes the tap keeps for a
 // non-streaming parse. Beyond it the tap stops accumulating and the billing
 // layer falls back to the P6 policy, which caps the request at max_tokens.

@@ -25,7 +25,7 @@ import (
 // It returns a no-op reservation when there is nothing to enforce — no budget
 // package, which is every gateway with no database — so the settle path does
 // not have to branch on whether budgeting is switched on.
-func (h *Chat) reserve(ctx context.Context, tenant, project, model string, promptTokens, maxOut int) (quota.Reservation, error) {
+func (h *settler) reserve(ctx context.Context, tenant, project, model string, promptTokens, maxOut int) (quota.Reservation, error) {
 	if h.Budget == nil {
 		return quota.Reservation{}, nil
 	}
@@ -60,7 +60,7 @@ func (h *Chat) reserve(ctx context.Context, tenant, project, model string, promp
 
 // predict asks the price source for this request's worst case, in tokens and
 // money together.
-func (h *Chat) predict(ctx context.Context, model string, promptTokens, maxOut int) (billing.Prediction, error) {
+func (h *settler) predict(ctx context.Context, model string, promptTokens, maxOut int) (billing.Prediction, error) {
 	if h.Pricer == nil {
 		return billing.Prediction{}, errNoPricer
 	}

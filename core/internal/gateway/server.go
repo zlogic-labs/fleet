@@ -82,7 +82,10 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 	prices, ledger := billingFor(cfg, db)
 	budget := budgetFor(db)
 
-	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, handler.ChatOptions{
+	// One options value for both handlers. A deployment cannot end up billing
+	// chat and forgetting embeddings, because there is nothing to forget: the
+	// pieces that cost money are constructed once and handed to both.
+	opts := handler.ChatOptions{
 		MaxBytes:         int64(cfg.MaxBodyMB) << 20,
 		PrefixRunes:      prefixRunes(cfg.Upstreams),
 		DefaultMaxTokens: cfg.DefaultMaxTokens,
@@ -90,7 +93,9 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		Pricer:           prices,
 		Recorder:         ledger,
 		Budget:           budget,
-	})
+	}
+	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, opts)
+	embeddings := handler.NewEmbeddings(picker, proxy, tokenizer.NewResolver(0), log, opts)
 
 	current := refresher.Endpoints
 
@@ -116,6 +121,7 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		r.Route("/v1", func(r chi.Router) {
 			r.Get("/models", handler.NewModels(current).ServeHTTP)
 			r.Post("/chat/completions", chat.ServeHTTP)
+			r.Post("/embeddings", embeddings.ServeHTTP)
 		})
 
 		r.Get("/fleet/status", (&handler.Fleet{

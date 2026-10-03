@@ -157,6 +157,53 @@ check "an unknown model returns an error envelope" "True" \
      -d '{"model":"nope","messages":[]}' \
      | jqp "'error' in d and 'type' in d['error']")"
 
+# ── embeddings ─────────────────────────────────────────────────────
+section "gateway: embeddings"
+
+EMB='{"model":"demo/Qwen2.5-1.5B-Instruct","input":"the quick brown fox"}'
+E=$(curl -sS -X POST "$GATEWAY/v1/embeddings" -H 'Content-Type: application/json' -d "$EMB")
+check "an embedding comes back" "True" \
+  "$(printf '%s' "$E" | jqp "len(d['data'][0]['embedding']) > 0")"
+check "the object is a list, not a completion" "list" \
+  "$(printf '%s' "$E" | jqp "d['object']")"
+# P6 again, on a second shape. Without usage the request is charged from what
+# it reserved, and for an embedding the reservation is the input — close enough
+# that only a direct comparison catches it.
+check "embeddings report a nonzero usage" "True" \
+  "$(printf '%s' "$E" | jqp "d['usage']['total_tokens'] > 0")"
+check "an embedding spends no completion tokens" "0" \
+  "$(printf '%s' "$E" | jqp "d['usage']['completion_tokens']")"
+
+BATCH=$(curl -sS -X POST "$GATEWAY/v1/embeddings" -H 'Content-Type: application/json' \
+  -d '{"model":"demo/Qwen2.5-1.5B-Instruct","input":[[1,2,3],[4,5],[6,7,8,9]]}')
+check "a batch returns one vector per input" "3" \
+  "$(printf '%s' "$BATCH" | jqp "len(d['data'])")"
+# One usage for the whole batch, summing the ids. Per-item usage would make
+# this 3; taking the largest item would make it 4. Only the sum is 9.
+check "a batch is metered as the sum, not the largest item" "9" \
+  "$(printf '%s' "$BATCH" | jqp "d['usage']['prompt_tokens']")"
+check "indices are contiguous from zero" "True" \
+  "$(printf '%s' "$BATCH" | jqp "[i['index'] for i in d['data']] == list(range(len(d['data'])))")"
+
+# Token ids are counted from the ids: there is no text for a tokenizer to
+# count, so a gateway that tokenized would report zero and reserve nothing.
+check "token ids are counted, not ignored" "True" \
+  "$(printf '%s' "$BATCH" | jqp "d['usage']['prompt_tokens'] > 0")"
+
+# Every unusable input is refused. Accepting any of them would count zero
+# tokens, reserve zero, and hand a caller a path through every limit.
+for bad in '{"model":"m"}' \
+           '{"input":"x"}' \
+           '{"model":"m","input":[]}' \
+           '{"model":"m","input":123}' \
+           '{"model":"m","input":""}' \
+           '{"model":"m","input":["a",[1,2]]}'
+do
+  check "refused: ${bad:0:34}" "400" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$GATEWAY/v1/embeddings" \
+       -H 'Content-Type: application/json' -d "$bad")"
+done
+
 # ── the console is embedded and its assets resolve ──────────────────
 section "console"
 
