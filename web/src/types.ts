@@ -301,3 +301,47 @@ export interface CostReport {
   tenants: CostAllocation[];
   deployments: CostDeployment[];
 }
+
+export interface OpenSpendScope {
+  /** "tenant/project", or bare "tenant" when the request carried no project. */
+  id: string;
+  tenant?: string;
+  project?: string;
+  unitsMicro: number;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  estimated: number;
+}
+
+export interface OpenSpendModel {
+  model: string;
+  unitsMicro: number;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  estimatedRequests: number;
+}
+
+/**
+ * The calendar month still running.
+ *
+ * Not a CostReport and deliberately shaped unlike one: there is no pool, no
+ * allocation and no idle share, because this month's capacity is not a
+ * measurement yet. `priced` says whether a GPU-hour rate is declared — the
+ * figures below are token charges and exist either way.
+ */
+export interface OpenSpend {
+  period: string;
+  from: string;
+  to: string;
+  asOf: string;
+  scopes: OpenSpendScope[];
+  models: OpenSpendModel[];
+  totalsMicro: number;
+  requests: number;
+  estimated: number;
+  priced: boolean;
+}

@@ -80,6 +80,34 @@ func (db *DB) SpendByTenant(ctx context.Context, tenant string, w Window) ([]Spe
 	return db.spend(ctx, q, tenant, w.From, w.To)
 }
 
+// SpendByScope totals spend grouped by tenant and project, across every tenant.
+//
+// This is SpendByTenant without the filter, and it exists because
+// SpendByTenant("") does not mean "all tenants": its predicate is an equality
+// test, so the empty string matches only genuinely unattributed rows. An
+// operator-level report needs the unfiltered grouping, and the only honest way
+// to get it is a query that does not have the predicate at all.
+//
+// The returned Key is "tenant/project", or bare "tenant" for unattributed
+// spend. It is the ledger's own scope string rather than a second format, so a
+// row in this report joins to the same key a request was written under.
+func (db *DB) SpendByScope(ctx context.Context, w Window) ([]Spend, error) {
+	if err := w.valid(); err != nil {
+		return nil, err
+	}
+	const q = `
+		SELECT CASE WHEN project_id IS NULL OR project_id = ''
+		            THEN tenant_id ELSE project_id END AS scope,
+		       SUM(amounts_micro), COUNT(*),
+		       SUM(prompt_tokens), SUM(completion_tokens), SUM(cached_tokens),
+		       COUNT(*) FILTER (WHERE NOT usage_known)
+		  FROM usage_events
+		 WHERE occurred_at >= $1 AND occurred_at < $2
+		 GROUP BY 1
+		 ORDER BY SUM(amounts_micro) DESC`
+	return db.spend(ctx, q, w.From, w.To)
+}
+
 // SpendByModel totals spend grouped by model, across every tenant.
 //
 // The model is the resolved one recorded on the ledger, so this answers "what

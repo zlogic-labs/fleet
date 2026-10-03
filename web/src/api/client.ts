@@ -44,13 +44,37 @@ export const origins = {
  * operator has not set one by hand.
  *
  * A stored value wins because it is a deliberate choice, including the choice
- * to point at nothing. Writing it through also means the guess above stops
- * mattering after the first load, so a deployment whose two processes are on
- * different hosts works without anyone visiting Settings.
+ * to point at nothing.
+ *
+ * A loopback host in the advertised address is rewritten to the host this page
+ * was served from. The gateway answers with the address *it* uses, which is
+ * usually the right answer for it and useless here: a gateway inside WSL talks
+ * to 127.0.0.1:8081 happily while a browser on the Windows side cannot reach
+ * 127.0.0.1 at all. The console is served by the gateway, so its own origin is
+ * the one thing known to be reachable from both — same host, control plane's
+ * port. Without this the page reports "the control plane is not answering" on a
+ * deployment where the control plane is up and the gateway is using it.
  */
 export function adoptControlPlane(url: string | undefined) {
   if (!url || localStorage.getItem('fleet.controlUrl')) return;
-  setOrigin('control', url);
+  setOrigin('control', reachableFrom(url));
+}
+
+function reachableFrom(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url; // Not a URL; leave it and let the request fail visibly.
+  }
+  if (!isLoopbackHost(parsed.hostname)) return url;
+  parsed.hostname = window.location.hostname || parsed.hostname;
+  return parsed.origin;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h === '::1' || /^127\./.test(h);
 }
 
 export function setOrigin(group: 'gateway' | 'control', value: string) {

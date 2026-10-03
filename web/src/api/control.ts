@@ -15,6 +15,7 @@ import type {
   CostRate,
   CostPeriodSummary,
   CostReport,
+  OpenSpend,
 } from '../types';
 
 const BASE = '/api/v1';
@@ -133,4 +134,16 @@ export const costPeriods = {
     request<CostReport>(item('cost-periods', period), { signal }),
   close: (period: string) =>
     request<CostReport>(item('cost-periods', period), { method: 'PUT' }),
+};
+
+/**
+ * The calendar month still running: token charges so far, per scope and per
+ * model.
+ *
+ * A separate collection, not a period. It has no pool and no idle share, because
+ * this month's capacity is not a measurement yet — so do not expect a CostReport
+ * shape here even though the two look similar.
+ */
+export const spend = {
+  open: (signal?: AbortSignal) => request<OpenSpend>(`${BASE}/spend`, { signal }),
 };

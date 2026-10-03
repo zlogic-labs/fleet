@@ -51,13 +51,23 @@ export function usePoll<T>(
     void run();
     if (intervalMs <= 0) return () => { cancelled = true; controller.abort(); };
 
-    const timer = window.setInterval(run, intervalMs);
+    // Retry quickly while there is still nothing to show.
+    //
+    // A poll whose first attempt fails before the console has been told where
+    // the control plane is — the ordering on a first visit to a fresh browser
+    // — would otherwise show "not answering" for a full interval after the
+    // address has been adopted and the service is in fact reachable. Thirty
+    // seconds of confidently wrong is worse than a few extra requests.
+    const hadData = data !== undefined;
+    const delay = !hadData && error ? Math.min(intervalMs, 2000) : intervalMs;
+
+    const timer = window.setInterval(run, delay);
     return () => {
       cancelled = true;
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [intervalMs, nonce]);
+  }, [intervalMs, nonce, data, error]);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
   return { data, error, loading, refresh };

@@ -4,7 +4,7 @@ import { Pool } from './overview/Pool';
 import { Serving } from './overview/Serving';
 import { Spend } from './overview/Spend';
 import { usePoll } from '../hooks';
-import { cluster as clusterApi, deployments as deploymentsApi, costPeriods } from '../api/control';
+import { cluster as clusterApi, deployments as deploymentsApi, costPeriods, spend } from '../api/control';
 import { fleetStatus } from '../api/gateway';
 
 const { Text } = Typography;
@@ -24,6 +24,10 @@ export function Overview() {
   const clusters = usePoll((signal) => clusterApi.get(signal), 5000);
   const deps = usePoll((signal) => deploymentsApi.list(signal), 10000);
   const periods = usePoll((signal) => costPeriods.list(signal), 30000);
+  // Faster than the closed periods: this figure moves with traffic, and an
+  // operator watching spend would rather see it stale by seconds than by a
+  // minute.
+  const running = usePoll((signal) => spend.open(signal), 10000);
 
   const report = clusters.data?.clusters?.[0];
   const list = periods.data ?? [];
@@ -34,7 +38,13 @@ export function Overview() {
       <Serving status={status.data} />
       <Spend
         periods={list}
-        currency={list.find((p) => p.currency)?.currency ?? ''}
+        open={running.data}
+        currency={
+          list.find((p) => p.currency)?.currency ??
+          // Nothing closed yet, so the open figure is the only thing that can
+          // name a currency. A rate declared but not yet applied still counts.
+          'USD'
+        }
       />
 
       {(clusters.error || periods.error) && (

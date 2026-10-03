@@ -210,6 +210,11 @@ func (s *Server) Handler() http.Handler {
 		// invoice that can change after it was sent is not an invoice.
 		r.Put("/cost-periods/{period}", s.closeCostPeriod)
 		r.Get("/cost-periods/{period}", s.getCostPeriod)
+		// The period still running. A separate collection rather than a query
+		// on /cost-periods because it is not a period: there is no resource
+		// here to close, get or delete, and it answers a question the closed
+		// ones cannot.
+		r.Get("/spend", s.getOpenSpend)
 	})
 
 	return r
