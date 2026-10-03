@@ -183,6 +183,8 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.settle(r, reservation, booking, ep, result, promptTokens, maxOut, req.Stream)
 
 	h.samples.Add(Sample{
+		Tenant:     tenant,
+		Project:    project,
 		Model:      req.Model,
 		Endpoint:   ep.ID,
 		TTFT:       result.TTFT,
@@ -195,7 +197,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Streamed:   req.Stream,
 	})
 	h.Log.Debug("chat completion",
-		"model", req.Model, "endpoint", ep.ID,
+		"model", req.Model, "endpoint", ep.ID, "tenant", tenant, "project", project,
 		"ttft_ms", result.TTFT.Milliseconds(), "duration_ms", result.Duration.Milliseconds(),
 		"usage_known", result.UsageKnown, "prompt_est", promptTokens)
 }

@@ -130,6 +130,11 @@ type endpointStatus struct {
 }
 
 type recentSample struct {
+	// Tenant and Project are omitempty rather than always present: a gateway
+	// running without authentication has no scope to report, and an empty
+	// string in every row is noise the console would have to filter out.
+	Tenant     string `json:"tenant,omitempty"`
+	Project    string `json:"project,omitempty"`
 	Model      string `json:"model"`
 	Endpoint   string `json:"endpoint"`
 	Streamed   bool   `json:"streamed"`
@@ -150,6 +155,8 @@ func recent(samples []Sample) []recentSample {
 	for i := len(samples) - 1; i >= 0 && len(out) < 16; i-- {
 		s := samples[i]
 		r := recentSample{
+			Tenant:     s.Tenant,
+			Project:    s.Project,
 			Model:      s.Model,
 			Endpoint:   s.Endpoint,
 			Streamed:   s.Streamed,

@@ -427,6 +427,15 @@ if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
        -H 'Content-Type: application/json' -d "$CHAT")"
 
+  # The rolling log is what the console answers "who spent this" from. Without
+  # the scope on it, that panel is a performance graph and an operator with a
+  # bill to allocate has nowhere to look. The two halves are separate fields
+  # so the console can group by either; the id is their composition.
+  check "a served request says which project spent it" "acme/research" \
+    "$(curl -sS "$AUTH_GATEWAY/fleet/status" \
+       -H 'Authorization: Bearer acme/research/admin' \
+       | jqp "next('/'.join([r['tenant'], r['project']]) for r in d['recent'] if r.get('project'))")"
+
   check "an unknown key is refused" "401" \
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
        -H 'Content-Type: application/json' -H 'Authorization: Bearer nope' -d "$CHAT")"

@@ -153,9 +153,19 @@ export function Fleet() {
           size="small"
           rowKey={(_, i) => String(i)}
           pagination={false}
-          scroll={{ x: 720 }}
+          scroll={{ x: 860 }}
           dataSource={data.recent.slice(0, 12)}
           columns={[
+            {
+              title: 'Project',
+              width: 180,
+              ellipsis: true,
+              // The two halves arrive separately so either can be grouped or
+              // filtered on; a project is only named within its tenant, so the
+              // id is their composition — the same string the API deletes by.
+              render: (_, r) =>
+                r.project ? `${r.tenant}/${r.project}` : <Text type="secondary">unauthenticated</Text>,
+            },
             { title: 'Model', dataIndex: 'model', ellipsis: true },
             { title: 'Endpoint', dataIndex: 'endpoint', ellipsis: true, width: 140 },
             {

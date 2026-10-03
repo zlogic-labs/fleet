@@ -29,6 +29,8 @@ export interface EndpointStatus {
 }
 
 export interface RecentSample {
+  tenant?: string;
+  project?: string;
   model: string;
   endpoint: string;
   streamed: boolean;

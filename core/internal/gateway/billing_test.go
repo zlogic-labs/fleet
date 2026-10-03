@@ -35,8 +35,13 @@ func TestSettlementWritesTheLedgerRow(t *testing.T) {
 	}
 
 	rec := onlyRecord(t, db)
-	if rec.Tenant != "acme" || rec.Project != "research" {
-		t.Errorf("attributed to %s/%s, want acme/research", rec.Tenant, rec.Project)
+	// The project is recorded as its id, not its bare name. Two tenants may
+	// each have a "research" project, and the ledger has to be able to tell
+	// them apart — it is also the column the control plane counts when it
+	// refuses to delete a project that has already been billed.
+	if rec.Tenant != "acme" || rec.Project != "acme/research" {
+		t.Errorf("attributed to tenant %q project %q, want acme / acme/research",
+			rec.Tenant, rec.Project)
 	}
 	// The key id is the stored row's id, which is the full tenant/project/label
 	// path. It is recorded so one key can be traced without joining anything.

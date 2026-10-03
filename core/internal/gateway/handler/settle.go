@@ -68,7 +68,19 @@ func (h *Chat) settle(r *http.Request, reservation ratelimit.Reservation, bookin
 		OccurredAt: time.Now(),
 	}
 	if p, ok := authn.FromContext(r.Context()); ok {
+		// The ledger records the project *id*, not its bare name, so that
+		// usage_events.project_id and api_keys.project_id mean the same thing
+		// and the two tables can be joined on it. The bare name is what the
+		// limiter and the budget key on, and those are queries over
+		// projects.name rather than stored columns.
+		//
+		// Recording the name instead was not a harmless spelling difference:
+		// deleting a project counts usage_events by project id, so the check
+		// that refuses to erase a project's ledger never found anything.
 		rec.Tenant, rec.Project, rec.KeyID = p.Tenant, p.Project, p.KeyID
+		if p.Project != "" {
+			rec.Project = p.Tenant + "/" + p.Project
+		}
 	}
 	if result.UsageKnown && result.Usage != nil {
 		rec.Usage = *result.Usage

@@ -161,8 +161,12 @@ func (d *DB) deleteCascade(ctx context.Context, kind, id, stmt string) error {
 			return fmt.Errorf("postgres: count usage for %s %s: %w", kind, id, err)
 		}
 		if used > 0 {
-			return fmt.Errorf("postgres: %s %s has %d billed requests; set it inactive instead",
-				kind, id, used)
+			// conflict, not a fault: the resource exists, and its state is what
+			// the request cannot proceed past. Returning a bare error here made
+			// the refusal a 500, which tells the caller the platform is broken
+			// when in fact it is working exactly as intended.
+			return fmt.Errorf("%w: %s %s has %d billed requests; set it inactive instead",
+				conflict, kind, id, used)
 		}
 		if _, err := tx.Exec(ctx, stmt, id); err != nil {
 			return fmt.Errorf("postgres: delete %s %s: %w", kind, id, err)

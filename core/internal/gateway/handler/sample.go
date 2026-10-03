@@ -14,7 +14,13 @@ import (
 // only state the chat handler keeps.
 
 // Sample is one completed request, as the console shows it.
+//
+// Tenant and Project are carried because the console answers "who spent this"
+// and a rolling log that cannot say is only a performance panel. The ledger
+// has it; this is the one that survives without a database.
 type Sample struct {
+	Tenant     string
+	Project    string
 	Model      string
 	Endpoint   string
 	TTFT       time.Duration
