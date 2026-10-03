@@ -87,7 +87,7 @@ func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 			Model:       ep.Model,
 			BaseURL:     ep.BaseURL,
 			Replicas:    ep.Replicas,
-			Healthy:     !ep.Load.Stale(now, 2*time.Minute) || ep.Load.UpdatedAt.IsZero(),
+			Healthy:     ep.Ready(now),
 			QueueDepth:  ep.Load.QueueDepth,
 			RunningReqs: ep.Load.RunningReqs,
 			KVCacheUsed: ep.Load.KVCacheUsed,

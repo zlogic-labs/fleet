@@ -7,16 +7,15 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/catalog"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/handler"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
-	"github.com/zlogic-labs/fleet/core/internal/gateway/webui"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
+	"github.com/zlogic-labs/fleet/core/pkg/metrics"
 	"github.com/zlogic-labs/fleet/core/pkg/tokenizer"
 )
 
@@ -53,18 +52,28 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 	}
 	auth := &authn.Authenticator{Store: keys, Lic: lic}
 
+	// One registry for the whole process. Declared here rather than in each
+	// component because /metrics is one document: two registries would publish
+	// two families with the same name, and a Prometheus server rejects that.
+	registry := metrics.New()
+	obs := newObserver(registry)
+	obs.version(version, "community")
+
 	picker := routing.NewRendezvous(static)
 	refresher := &catalog.Refresher{
 		Client:   catalog.NewClient(cfg.ControlPlane.URL, cfg.ControlPlane.Token),
+		Discover: cfg.ControlPlane.URL != "",
 		Profiles: engine.BuiltinProfiles(),
 		Log:      log,
 		Interval: cfg.ControlPlane.Every,
 		// Discovered endpoints are added to, never substituted for, the
 		// static ones. An operator pointing at a control plane should not
 		// silently lose a laptop llama.cpp declared in the config file.
-		Merge: static,
-		Apply: picker.Replace,
+		Merge:  static,
+		Apply:  picker.Replace,
+		Report: obs.publishEndpoints,
 	}
+
 	// The refresher starts with the static set, so a gateway with no control
 	// plane configured behaves exactly as it did before any of this existed.
 	refresher.Set(static)
@@ -94,47 +103,20 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		Recorder:         ledger,
 		Budget:           budget,
 	}
+	opts.Observed = obs
 	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, opts)
 	embeddings := handler.NewEmbeddings(picker, proxy, tokenizer.NewResolver(0), log, opts)
 
-	current := refresher.Endpoints
-
-	r := chi.NewRouter()
-	// Order matters and is the order it is in: recoverer is outermost so a
-	// panic in any later middleware still becomes an envelope; authentication
-	// runs before the body is read so an invalid key costs nothing.
-	r.Use(recoverer(log), requestLog(log))
-
-	// Health is registered before the authenticated subrouter rather than
-	// exempted from the middleware. A Kubernetes probe cannot hold a
-	// credential, so a /healthz that returns 401 reports the pod as failing
-	// while it is serving perfectly well — and the operator's response to that
-	// is to remove the probe, not to fix the probe.
-	r.Get("/healthz", ok)
-	// Liveness for the engine side, matching what vLLM and llama.cpp serve, so
-	// an operator can curl either endpoint with the same command.
-	r.Get("/health", ok)
-
-	r.Group(func(r chi.Router) {
-		r.Use(authenticate(auth))
-
-		r.Route("/v1", func(r chi.Router) {
-			r.Get("/models", handler.NewModels(current).ServeHTTP)
-			r.Post("/chat/completions", chat.ServeHTTP)
-			r.Post("/embeddings", embeddings.ServeHTTP)
-		})
-
-		r.Get("/fleet/status", (&handler.Fleet{
-			Endpoints: current,
-			Samples:   chat.Samples,
-			Lic:       lic,
-			Version:   version,
-		}).ServeHTTP)
-	})
-
-	r.Mount("/", webui.Handler())
-
-	return r, refresher, nil
+	return routes(routesDeps{
+		log:       log,
+		auth:      auth,
+		lic:       lic,
+		version:   version,
+		registry:  registry,
+		chat:      chat,
+		embedding: embeddings,
+		current:   refresher.Endpoints,
+	}), refresher, nil
 }
 
 func ok(w http.ResponseWriter, _ *http.Request) {
@@ -188,16 +170,20 @@ func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Log
 		return err
 	}
 
-	if cfg.ControlPlane.URL != "" {
-		// The picker the chat handler holds is the one the refresher pushes
-		// into, so a discovered deployment is routable on the next request
-		// rather than the next restart.
-		go func() {
-			if err := refresher.Run(ctx); err != nil {
-				log.Error("endpoint refresh stopped", "err", err)
-			}
-		}()
-	}
+	// Always runs, with or without a control plane. These used to be one
+	// decision -- "is there a control plane to poll" -- but they are two:
+	// the endpoint list can be static while the load samples still want
+	// scraping, and a hand-configured fleet publishes no endpoint metrics at
+	// all when this loop is conditional.
+	//
+	// The picker the chat handler holds is the one the refresher pushes into,
+	// so a discovered deployment is routable on the next request rather than
+	// the next restart.
+	go func() {
+		if err := refresher.Run(ctx); err != nil {
+			log.Error("endpoint refresh stopped", "err", err)
+		}
+	}()
 
 	if ps := prunersFor(db); len(ps) > 0 {
 		go startPruner(ctx, log, ps...)

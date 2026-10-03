@@ -177,9 +177,23 @@ func parseLabels(part string) map[string]string {
 		if !ok {
 			continue
 		}
-		out[unescape(strings.TrimSpace(k))] = unescape(strings.Trim(strings.TrimSpace(v), `"`))
+		out[unescape(strings.TrimSpace(k))] = unescape(unquote(strings.TrimSpace(v)))
 	}
 	return out
+}
+
+// unquote removes exactly one surrounding pair of double quotes.
+//
+// Not strings.Trim(v, `"`), which strips a *run* of them: a value that ends in
+// an escaped quote ends in `\""`, and trimming both trailing quotes leaves a
+// dangling backslash. A label value ending in a quote is rare in an engine's
+// metrics and was, until this was written, silently corrupted by the parser
+// Fleet trusts to read them.
+func unquote(v string) string {
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 // splitLabels splits on commas that are not inside a quoted value, because a

@@ -13,6 +13,7 @@
 
 set -uo pipefail
 
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GATEWAY=${GATEWAY:-http://127.0.0.1:8080}
 CONTROL=${CONTROL:-http://127.0.0.1:8081}
 API=$CONTROL/api/v1
@@ -92,6 +93,10 @@ try:
 except Exception as e:
     print('<<error: %s>>' % e)
 " "$1"
+}
+
+pq() {
+  "$PY" "$HERE/exposition.py" "$1"
 }
 
 section "waiting for both processes"
@@ -442,7 +447,7 @@ CHAT='{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content"
 # into one figure the tenant would get the sum, and the envelope would be
 # decorative. The checks below spend one project and then reach for the other.
 FLEET_AUTH_REQUIRED=true \
-FLEET_API_KEYS='acme/research/admin;acme/batch/second;other/third/third' \
+FLEET_API_KEYS='acme/research/admin;acme/batch/second;other/third/third;embed/one/embed' \
 FLEET_RATE_TENANTS='acme|rpm=3' \
 FLEET_RATE_PROJECTS='acme/research|rpm=3;acme/batch|rpm=3' \
   go -C core run ./cmd/fleet-gateway --listen "127.0.0.1:$AUTH_PORT" --demo \
@@ -541,6 +546,87 @@ if curl -fsS "$AUTH_GATEWAY/healthz" >/dev/null 2>&1; then
     "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$AUTH_GATEWAY/v1/chat/completions" \
        -H 'Content-Type: application/json' \
        -H 'Authorization: Bearer other/third/third' -d "$CHAT")"
+  # -- what Fleet publishes about itself ------------------------------
+  #
+  # Inside the authenticated section rather than after it: that gateway is
+  # killed the moment its own checks finish, and it is the only one of the
+  # three with a tenant to attribute spending to. With authentication off there
+  # is no tenant, and a series carrying an empty tenant label answers none of
+  # the questions these exist for.
+  section "gateway: metrics"
+
+  # other/third, not acme/research: the checks above deliberately exhaust
+  # acme's three-per-minute envelope, so a request under acme here would be
+  # refused with a 429 and the assertion would be measuring the limiter.
+  MK='other/third/third'
+  # Not exempt from authentication, unlike /healthz. The exposition carries
+  # per-tenant token counts and spend, which is billing data; a probe needs no
+  # credential, a scraper carries one.
+  check "metrics need a credential" "401" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' "$AUTH_GATEWAY/metrics")"
+  check "a scraper with a key gets the exposition" "200" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $MK" "$AUTH_GATEWAY/metrics")"
+  # Headers off a GET, not -I: chi routes GET and does not answer HEAD, so a
+  # HEAD here is a 405 with no headers and proves nothing at all.
+  check "it is the text format, versioned" "True" \
+    "$(curl -sS -D - -o /dev/null -H "Authorization: Bearer $MK" "$AUTH_GATEWAY/metrics" \
+       | grep -i '^content-type:' | grep -qi 'version=0.0.4' && echo True || echo False)"
+
+  curl -sS -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $MK" \
+    -d '{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":16}'
+
+  # A tenant of its own, because the completion assertion is about the
+  # embedding alone, and sharing a tenant with the chat request above would
+  # make it untrue of the combined series.
+  EK='embed/one/embed'
+  curl -sS -o /dev/null -X POST "$AUTH_GATEWAY/v1/embeddings" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $EK" \
+    -d '{"model":"demo/Qwen2.5-1.5B-Instruct","input":"a document"}'
+
+  M=$(curl -sS -H "Authorization: Bearer $MK" "$AUTH_GATEWAY/metrics")
+  check "a served request is counted" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_requests_total' and s['value']>0 for s in samples)")"
+  # The tenant the key resolved to, and the bare project name rather than the
+  # qualified id the ledger row stores.
+  check "and it names the tenant that spent it" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_requests_total' and s['labels'].get('tenant')=='other' and s['labels'].get('project')=='third' for s in samples)")"
+  # Split by which side of the bill they are on: fresh, cached and completion
+  # are billed at three different rates and a single sum destroys that.
+  check "tokens are split by billing side" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_tokens_total' and s['labels'].get('kind')=='fresh' for s in samples)")"
+  check "cached tokens have their own series" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_tokens_total' and s['labels'].get('kind')=='cached' for s in samples)")"
+  # Every kind gets a series on every request, including at zero, so this is a
+  # statement about the value: an embedding has prompt tokens and none at all
+  # on the completion side.
+  check "an embedding spends no completion tokens" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_tokens_total' and s['labels'].get('kind')=='prompt' and s['labels'].get('tenant')=='embed' and s['value']>0 for s in samples) and any(s['name']=='fleet_tokens_total' and s['labels'].get('kind')=='completion' and s['labels'].get('tenant')=='embed' and s['value']==0 for s in samples)")"
+  check "latency is a histogram ending at +Inf" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_request_duration_seconds_bucket' and s['labels'].get('le')=='+Inf' for s in samples)")"
+  # Cumulative means monotone: +Inf is the total and no narrower bucket may
+  # exceed it. Per-bucket counts would decrease, which every server accepts and
+  # every dashboard then renders as a shrinking distribution.
+  check "and the buckets never decrease" "True" \
+    "$(printf '%s' "$M" | pq "(all(b[i] <= b[i+1] for i in range(len(b)-1)) and len(b)>0) if (b := [x['value'] for x in sorted([s for s in samples if s['name']=='fleet_request_duration_seconds_bucket' and s['labels'].get('tenant')=='other'], key=lambda x: float(x['labels']['le'].replace('+Inf','1e99')))]) else False")"
+  check "endpoints are counted by health" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_endpoints' for s in samples)")"
+  check "the build identifies itself" "True" \
+    "$(printf '%s' "$M" | pq "any(s['name']=='fleet_build_info' and s['labels'].get('edition')=='community' for s in samples)")"
+  # Keys rotate; a key label is a series that appears and vanishes forever.
+  check "no series is labelled with a key" "False" \
+    "$(printf '%s' "$M" | pq "any('key' in s['labels'] for s in samples)")"
+
+  # A refused request has to be visible, or a fleet that began rejecting keys
+  # looks exactly like a fleet with no traffic.
+  curl -sS -o /dev/null -X POST "$AUTH_GATEWAY/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'Authorization: Bearer sk-fleet-not-real' \
+    -d '{"model":"demo/Qwen2.5-1.5B-Instruct","messages":[]}'
+  check "and a refused request shows up as a refusal" "True" \
+    "$(curl -sS -H "Authorization: Bearer $MK" "$AUTH_GATEWAY/metrics" \
+       | pq "any(s['name']=='fleet_refused_total' and s['value']>0 for s in samples)")"
+
+
 else
   printf '%s no authenticated gateway on :%s — see %s\n' \
     "$(red 'ERROR')" "$AUTH_PORT" "$WORKDIR/auth-gateway.log" >&2

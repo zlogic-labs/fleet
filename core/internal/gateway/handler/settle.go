@@ -12,7 +12,6 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
-	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -38,6 +37,39 @@ type settler struct {
 	Recorder billing.Recorder
 	Budget   quota.Limiter
 	Log      *slog.Logger
+
+	// Observed records the request into the process's own metrics. It is the
+	// *only* place a request turns into a monitoring signal, which is why it
+	// lives here rather than being sprinkled through the handlers: settlement
+	// is the point at which the model, the tokens and the amount are all known
+	// and consistent with each other.
+	Observed Observer
+}
+
+// Observer is the metric surface the handlers write to. Declared here rather
+// than as a concrete registry so the handlers do not depend on pkg/metrics, and
+// so a test can observe without a registry at all.
+type Observer interface {
+	Served(rec billing.Record, duration, ttft time.Duration, streamed bool)
+	Refused(reason string)
+}
+
+// newSettler builds the shared half of a handler.
+//
+// One function rather than a struct literal in each constructor because a
+// literal in two places is a wiring that can be completed in one of them. It
+// was: the chat handler was left without an observer and a gateway that
+// published endpoint and build metrics but no request metrics, which is not an
+// error anywhere -- it looks exactly like a gateway that served no traffic.
+func newSettler(opts ChatOptions, log *slog.Logger) *settler {
+	return &settler{
+		Limiter:  opts.Limiter,
+		Pricer:   opts.Pricer,
+		Recorder: opts.Recorder,
+		Budget:   opts.Budget,
+		Log:      log,
+		Observed: opts.Observed,
+	}
 }
 
 // settleTimeout bounds the work done after the response is on the wire.
@@ -139,6 +171,18 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 		})
 	}
 
+	if s.Observed != nil {
+		ttft := result.TTFT
+		if !streamed {
+			// A non-streamed response has one delivery event, so "time to
+			// first token" is the whole request. Reported as absent rather than
+			// as the duration, because the two mean different things on a
+			// latency graph.
+			ttft = -1
+		}
+		s.Observed.Served(rec, result.Duration, ttft, streamed)
+	}
+
 	if s.Recorder == nil {
 		return
 	}
@@ -177,16 +221,3 @@ func (s *settler) record(ctx context.Context, rec billing.Record) {
 // The error is re-wrapped rather than passed through because the refusal came
 // out of the store, and its message is prose meant for a log. What the client
 // gets is the same prose with a code it can switch on.
-func outOfBudget(w http.ResponseWriter, err error) {
-	if e := quota.AsExceeded(err); e != nil {
-		if after := e.RetryAfter(); after != "" {
-			w.Header().Set("Retry-After", after)
-		}
-		openai.WriteError(w, errs.BudgetExhausted("%s", err.Error()))
-		return
-	}
-	// Not a refusal — the budget store itself failed. That is an outage, not a
-	// tenant problem, and answering 402 would tell a paying customer to go buy
-	// more credit for a database that is merely unreachable.
-	openai.WriteError(w, errs.Unavailable("the budget store is unavailable: %s", err.Error()))
-}

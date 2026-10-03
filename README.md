@@ -88,7 +88,7 @@ synthetic repository. Everything lands in `.dev/`, which is gitignored.
 ./scripts/smoke.sh        # in a second terminal, with dev.sh running
 ```
 
-62 assertions, and it exits non-zero on the first failure. It is safe to re-run.
+128 assertions, and it exits non-zero on the first failure. It is safe to re-run.
 What it covers, and why each check exists:
 
 | Area | Checks |
@@ -101,6 +101,7 @@ What it covers, and why each check exists:
 | Operator inventory | counts recomputed from the node list, and `Scheduling` with a reason kept distinct from `Pending` |
 | Authentication | health without a key, a valid key served, a missing and an unknown key both 401, and the 401 advertising `WWW-Authenticate` |
 | Rate limiting | a per-minute request ceiling, a token ceiling that bites before the request ceiling, `Retry-After` on the refusal, one tenant's keys sharing a bucket, and another tenant staying unaffected |
+| Metrics | `/metrics` needs a credential while `/healthz` does not, the exposition is the versioned text format, a served request is attributed to the tenant that spent it, tokens are split into the three sides that are billed at three rates, an embedding spends no completion tokens, histogram buckets never decrease, and no series is labelled with a key |
 
 The last two rows run against a **second** gateway the script starts itself, on
 port 8099 and 8098. The main gateway on :8080 has authentication off — a

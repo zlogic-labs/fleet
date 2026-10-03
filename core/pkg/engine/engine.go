@@ -55,6 +55,28 @@ func (l Load) Stale(now time.Time, maxAge time.Duration) bool {
 	return l.UpdatedAt.IsZero() || now.Sub(l.UpdatedAt) > maxAge
 }
 
+// StaleAfter is how long a load sample stays actionable.
+//
+// Two minutes is generous against a five-minute scrape interval and short
+// enough that an engine which stopped answering stops being routed to within
+// the time an operator is still watching a dashboard.
+const StaleAfter = 2 * time.Minute
+
+// Ready reports whether the endpoint is answering.
+//
+// A sample that was never taken is not evidence of failure: an engine whose
+// profile declares no metrics publishes nothing at all, and every engine is
+// briefly un-sampled at startup and after a scrape error. So an absent sample
+// counts as ready and a *stale* one does not.
+//
+// The distinction lives here rather than at each call site because two views of
+// "is this endpoint answering" that disagree are worse than either: the
+// console would show a green endpoint that the router has already stopped
+// sending traffic to.
+func (e Endpoint) Ready(now time.Time) bool {
+	return e.Load.UpdatedAt.IsZero() || !e.Load.Stale(now, StaleAfter)
+}
+
 // Capability describes what a running engine actually supports, as opposed to
 // what its documentation claims. vLLM renames CLI flags and Prometheus metric
 // names between releases, so the controller must feature-detect (P4) instead

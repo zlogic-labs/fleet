@@ -57,26 +57,20 @@ func NewEmbeddings(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Re
 		MaxBytes:    opts.MaxBytes,
 		PrefixRunes: opts.PrefixRunes,
 		Log:         log,
-		settler: &settler{
-			Limiter:  opts.Limiter,
-			Pricer:   opts.Pricer,
-			Recorder: opts.Recorder,
-			Budget:   opts.Budget,
-			Log:      log,
-		},
+		settler:     newSettler(opts, log),
 	}
 }
 
 func (h *Embeddings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.MaxBytes))
 	if err != nil {
-		writeRefusal(w, errs.InvalidArgument("request body unreadable or over the size limit"))
+		h.refuse(w, ReasonBodyTooLarge, errs.InvalidArgument("request body unreadable or over the size limit"))
 		return
 	}
 
 	req, err := openai.DecodeEmbeddingRequest(body)
 	if err != nil {
-		writeRefusal(w, errs.InvalidArgument("body is not a valid embeddings request: %s", err))
+		h.refuse(w, ReasonBadRequest, errs.InvalidArgument("body is not a valid embeddings request: %s", err))
 		return
 	}
 
@@ -86,14 +80,14 @@ func (h *Embeddings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	count := h.Tokens.Resolve(req.Model, "").Count
 	promptTokens, err := req.PromptTokens(count)
 	if err != nil {
-		writeRefusal(w, errs.InvalidArgument("%s", err))
+		h.refuse(w, ReasonBadRequest, errs.InvalidArgument("%s", err))
 		return
 	}
 	if promptTokens <= 0 {
 		// A zero-token request still costs a forward pass on the engine.
 		// Reserving zero reserves nothing, so a caller could send a million
 		// empty inputs and pass any limit.
-		writeRefusal(w, errs.InvalidArgument("input has no tokens to charge for"))
+		h.refuse(w, ReasonBadRequest, errs.InvalidArgument("input has no tokens to charge for"))
 		return
 	}
 
@@ -103,7 +97,7 @@ func (h *Embeddings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Tokens: promptTokens,
 	})
 	if err != nil {
-		writeRefusal(w, err)
+		h.refuse(w, ReasonRateLimited, err)
 		return
 	}
 
@@ -112,13 +106,16 @@ func (h *Embeddings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Settled on the way out, as in chat: the reservation was taken and
 		// nothing will return it.
 		h.Limiter.Settle(r.Context(), reservation, 0)
-		writeRefusal(w, err)
+		h.refuse(w, ReasonNoEndpoint, err)
 		return
 	}
 
 	booking, err := h.reserve(r.Context(), tenant, project, ep.Model, promptTokens, 0)
 	if err != nil {
 		h.Limiter.Settle(r.Context(), reservation, 0)
+		if h.Observed != nil {
+			h.Observed.Refused(ReasonBudget)
+		}
 		outOfBudget(w, err)
 		return
 	}

@@ -625,6 +625,40 @@ embedding 请求走和 chat 完全相同的生命周期（预留 → 选副本 �
 
 **demo 引擎的 `approxTokens` 故意和网关启发式同量级。** 它报 1 个 token 的话，P6 的估算回退路径就没法测了——看起来像一次灾难性的少计，而不是"引擎报了个小数字"。
 
+### 11.9 `/metrics`：Fleet 自己的数字
+
+网关一直**读**引擎的 `/metrics`（`pkg/prom` 解析 vLLM 的容量信号），但从不**导出**自己的。任何跑 Fleet 的人都要回答两个问题：闲置率是多少，谁在花。这个端点就是为了让这两个问题不必翻账本。
+
+**手写 `pkg/metrics` 而不用 `client_golang`**：和 `pkg/prom` 同一个理由——解析端已经证明 200 行够用，而导出端只需要 counter / gauge / histogram 三样。引入 `client_golang` 会给一个 25 MB 的单二进制再加 8 MB 和一整套注册表语义，而我们只用到其中一小块。
+
+**指标集**：
+
+| 指标 | 类型 | 标签 | 为什么有它 |
+|---|---|---|---|
+| `fleet_requests_total` | counter | tenant, project, model, outcome | 谁在用 |
+| `fleet_request_duration_seconds` | histogram | 同上 | 延迟 |
+| `fleet_request_first_token_seconds` | histogram | 同上 | **只有流式才有** |
+| `fleet_tokens_total` | counter | 同上 + **kind** | 见下 |
+| `fleet_spend_micro_total` | counter | 同上 | 计费口径 |
+| `fleet_usage_estimated_total` | counter | 同上 | 哪些账是估的（P6） |
+| `fleet_refused_total` | counter | **reason** | 被拒的原因 |
+| `fleet_endpoints` | gauge | **state** | healthy / unhealthy |
+| `fleet_endpoint_queue_depth` 等 | gauge | endpoint, model | 路由输入 |
+| `fleet_build_info` | gauge | version, edition | 发行版 |
+
+**token 按 kind 拆开，不求和**：fresh / cached / prompt / completion / reasoning 是**三种不同的费率**，求和之后得到的数字没人能用。这正是 P6 要求的形状。
+
+**每个 kind 都出 series，包括值为 0 的**：一个停在 0 的 counter 说明"这个量存在且还没涨"，缺失的 series 说明不了任何事。
+
+**没有任何 series 带 `key` 标签**：key 会轮换、带 key 的 series 会永远地出现又消失。账本里记 key，监控里不记。
+
+**`reason` 是关闭的集合**，不是错误消息：把错误消息变成标签值，基数是无界的，而且会泄露上游返回了什么。
+
+**project 标签是裸名，不是 `tenant/name`**：账本行存的是限定 id，因为那是它的外键；标签不是外键，tenant 标签已经带了作用域，再让 project 带上租户前缀会让每个按项目的查询变成前缀匹配而不是等值。
+
+**`/metrics` 在鉴权之后，`/healthz` 在鉴权之前**：探针不该需要凭据，但这个端点带的是每租户的 token 数和金额。发一个失效的凭据去 scrape，会出现在 `fleet_refused_total` 里，而不是让整个 fleet 看起来"没流量了"。
+
+**不带控制面的网关也要跑刷新循环**：端点列表可以是静态的，而负载采样依然值得抓。这两件事过去被合成一个判断（"有没有控制面可轮询"），结果是手工配置的 fleet 一个端点指标都不发布——在面板上读起来像"没有端点"，而不是"没在看"。
 ## 12. 待定
 
 - `[待定]` 是否第一版就支持 Anthropic 原生协议，还是只做 OpenAI 兼容 + 一个转换层

@@ -58,6 +58,9 @@ type ChatOptions struct {
 	Pricer           billing.PricerSource
 	Recorder         billing.Recorder
 	Budget           quota.Limiter
+	// Observed is nil for a gateway built without a registry, and every
+	// metric call is then a no-op rather than a nil check at each site.
+	Observed Observer
 }
 
 // NewChat builds the handler and its rolling sample log, which the Fleet
@@ -82,14 +85,8 @@ func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver
 		MaxBytes:         opts.MaxBytes,
 		PrefixRunes:      opts.PrefixRunes,
 		DefaultMaxTokens: opts.DefaultMaxTokens,
-		settler: &settler{
-			Limiter:  opts.Limiter,
-			Pricer:   opts.Pricer,
-			Recorder: opts.Recorder,
-			Budget:   opts.Budget,
-			Log:      log,
-		},
-		samples: NewSampleLog(opts.SampleBuffer),
+		settler:          newSettler(opts, log),
+		samples:          NewSampleLog(opts.SampleBuffer),
 	}
 }
 
@@ -134,7 +131,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Tokens: promptTokens + maxOut,
 	})
 	if err != nil {
-		writeRefusal(w, err)
+		h.refuse(w, ReasonRateLimited, err)
 		return
 	}
 
@@ -165,6 +162,9 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// holding it would spend a tenant's minute on a request the budget
 		// refused for an unrelated reason.
 		h.Limiter.Settle(r.Context(), reservation, 0)
+		if h.Observed != nil {
+			h.Observed.Refused(ReasonBudget)
+		}
 		outOfBudget(w, err)
 		return
 	}
@@ -215,8 +215,12 @@ func (h *Chat) forward(w http.ResponseWriter, r *http.Request, ep engine.Endpoin
 	h.Proxy.Serve(w, r, ep, tap)
 }
 
+// fail answers a failed pick. "No endpoint" is its own reason: an unknown
+// model, an empty fleet and a health check that rejected every replica are all
+// "there was nowhere to send this", and a dashboard that splits them into three
+// series tells an operator less than one that says "nowhere".
 func (h *Chat) fail(w http.ResponseWriter, _ *http.Request, err error) {
-	writeRefusal(w, err)
+	h.refuse(w, ReasonNoEndpoint, err)
 }
 
 // writeRefusal answers a refused reservation and says when to come back.

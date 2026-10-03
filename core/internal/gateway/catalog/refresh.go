@@ -17,7 +17,10 @@ import (
 // all: it would show a queue depth belonging to a deployment that no longer
 // exists.
 type Refresher struct {
-	Client   *Client
+	Client *Client
+	// Discover polls the control plane for deployments. Set by Run when a
+	// control plane address is configured.
+	Discover bool
 	Profiles *engine.Profiles
 	Log      *slog.Logger
 	// Interval is how often to refresh. Short enough that a scale is visible
@@ -36,6 +39,10 @@ type Refresher struct {
 	// starts them — two constructors both making a picker is how one of them
 	// silently ends up unused.
 	Apply func([]engine.Endpoint)
+	// Report is told each published endpoint set, and is how /metrics sees the
+	// same queue depths the router reads. Publishing from anywhere else would
+	// be a second opinion about the same engines.
+	Report func([]engine.Endpoint)
 
 	mu        sync.RWMutex
 	endpoints []engine.Endpoint
@@ -84,6 +91,16 @@ func (r *Refresher) Run(ctx context.Context) error {
 		default:
 		}
 
+		if !r.Discover {
+			// No control plane to ask. The endpoint set stays as it was
+			// declared, and the load samples below still get refreshed, which
+			// is the half of this loop that matters for a hand-configured
+			// fleet: the engines are real either way.
+			r.scrapeIfDue(ctx, i)
+			sleep(ctx, r.Interval)
+			continue
+		}
+
 		deps, err := r.Client.Deployments(ctx)
 		switch {
 		case err != nil:
@@ -98,15 +115,34 @@ func (r *Refresher) Run(ctx context.Context) error {
 				"deployments", len(deps), "routable", len(eps))
 		}
 
-		if i%r.ScrapeEvery == 0 {
-			r.scrapeAll(ctx)
+		// Reported on every pass, not only after a successful discovery. A
+		// gateway with no control plane configured never discovers anything,
+		// and a report inside the success branch meant it published no endpoint
+		// metrics at all -- which reads to a dashboard as a fleet with no
+		// endpoints rather than as a gateway that is not looking.
+		if r.Report != nil {
+			r.Report(r.Endpoints())
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(r.Interval):
-		}
+		r.scrapeIfDue(ctx, i)
+		sleep(ctx, r.Interval)
+	}
+}
+
+// Discover turns the deployment fetch on. Off when no control plane is
+// configured, which is not an error: a gateway with three hand-written
+// upstreams has everything it needs to route and nothing to ask.
+func (r *Refresher) scrapeIfDue(ctx context.Context, i int) {
+	if i%r.ScrapeEvery != 0 {
+		return
+	}
+	r.scrapeAll(ctx)
+}
+
+func sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
 	}
 }
 
@@ -181,6 +217,9 @@ func (r *Refresher) scrapeAll(ctx context.Context) {
 	// would show a queue depth and the router would behave as if it were idle.
 	if r.Apply != nil {
 		r.Apply(eps)
+	}
+	if r.Report != nil {
+		r.Report(eps)
 	}
 }
 
