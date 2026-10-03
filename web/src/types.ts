@@ -274,6 +274,8 @@ export interface CostAllocation {
   gpuSeconds: number;
   /** Allocated cost, micro-units. */
   amount: number;
+  /** The part of amount collected on behalf of a corrected earlier period. */
+  adjustment: number;
   /** What the token ledger charged for the same traffic. */
   usageMicro: number;
 }
@@ -297,11 +299,26 @@ export interface CostReport {
   idle: number;
   idlePercent: number;
   allocated: number;
+  /** 1 unless the period was recomputed after later data arrived. */
+  revision: number;
   coveragePercent: number;
   poolGpuSeconds: number;
+  /** Corrections carried in from earlier periods, and their net. */
+  adjustments: CostAdjustment[];
+  adjustmentTotal: number;
+  /** The movements this period's revision caused, and who collects them. */
+  amended: CostAdjustment[];
   notes?: string[];
   tenants: CostAllocation[];
   deployments: CostDeployment[];
+}
+
+export interface CostAdjustment {
+  scope: string;
+  /** The period on the other end: corrected for amendments, collecting for adjustments. */
+  forPeriod: string;
+  gpuSeconds: number;
+  amount: number;
 }
 
 export interface OpenSpendScope {

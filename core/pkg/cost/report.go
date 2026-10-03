@@ -39,6 +39,10 @@ type Tenant struct {
 	Share      int64          `json:"share"`
 	GPUSeconds int64          `json:"gpuSeconds"`
 	Amount     billing.Amount `json:"amount"`
+	// Adjustment is the part of Amount that came from a correction to an earlier
+	// period rather than from this period's pool. Reported separately so a
+	// tenant can see why this month's figure does not match their share.
+	Adjustment billing.Amount `json:"adjustment"`
 	UsageMicro billing.Amount `json:"usageMicro"`
 }
 
@@ -76,6 +80,12 @@ type Report struct {
 	Idle      billing.Amount `json:"idle"`
 	IdlePct   int            `json:"idlePercent"`
 	Allocated billing.Amount `json:"allocated"`
+	// Revision counts how many times this period has been computed. It is 1 for
+	// a period closed once, and higher only when an operator recomputed it after
+	// reporting data that had been missing. Earlier revisions stay readable: an
+	// invoice that changes with no trace of its previous value is not an audit
+	// trail, it is an apology.
+	Revision int `json:"revision"`
 	// CoveragePercent is how much of the month the samples account for. A
 	// report over a third of a month says so here rather than in a log line.
 	CoveragePercent int `json:"coveragePercent"`
@@ -87,48 +97,15 @@ type Report struct {
 
 	Tenants     []Tenant     `json:"tenants"`
 	Deployments []Deployment `json:"deployments"`
-}
-
-// Input is everything a close needs. Nothing here is read lazily, so a close is
-// a pure function of its inputs and the same input always produces the same
-// report — which is what makes the result checkable afterwards.
-type Input struct {
-	Period Period
-	Rates  []Rate
-	// Capacity is GPUs present, per cluster, over time. It is the pool.
-	Capacity map[string][]Sample
-	// Reserved is per-deployment GPU capacity over time — the pool a deployment
-	// is holding open, paid for whether or not anybody asks.
-	Reserved map[string][]Sample
-	// Spans is per-deployment request intervals. Used and Consumption are
-	// derived from these by Sweep rather than summed from them: adding up each
-	// request's wall clock bills a GPU once per request per second, so a month
-	// under load costs more than the same month idle, and a tenant's bill goes
-	// down if they serialise their traffic.
-	Spans map[string][]Span
-	// Spent is what the ledger charged each key. It is reported beside each
-	// tenant's share because the gap between the two is the price book's
-	// health: a tenant billed well above what the fleet cost is over-priced,
-	// and the platform can see that nowhere else.
-	Spent map[string]billing.Amount
-	// MinCoverage is the fraction of the period the samples must account for.
-	MinCoverage float64
-}
-
-// DefaultMinCoverage is 90%: a month that is only 60% observed is not a month,
-// and reporting it as one produces an invoice nobody can reconcile.
-const DefaultMinCoverage = 0.9
-
-// ErrIncomplete reports a period whose samples do not cover enough of it.
-type ErrIncomplete struct {
-	Period   string
-	Coverage float64
-	Want     float64
-}
-
-func (e *ErrIncomplete) Error() string {
-	return fmt.Sprintf("cost: period %s is only %.0f%% observed, need %.0f%% to close it",
-		e.Period, e.Coverage*100, e.Want*100)
+	// Adjustments are corrections carried in from earlier periods, and
+	// AmendmentTotal is their net. When it is not zero, Allocated deliberately
+	// differs from Pool and the report says so: the extra is money this period
+	// is collecting on behalf of months that were already closed wrongly.
+	AdjustmentTotal billing.Amount `json:"adjustmentTotal"`
+	Adjustments     []Adjustment   `json:"adjustments"`
+	// Amended lists the earlier periods this revision changed, so the trail is
+	// readable from either end of it.
+	Amended []Amendment `json:"amended"`
 }
 
 // Close turns observations into a cost report.
@@ -151,9 +128,13 @@ func Close(in Input) (Report, error) {
 	rates := rateIndex(in.Rates)
 
 	rep := Report{
-		Period: in.Period.String(),
-		From:   in.Period.Start,
-		To:     in.Period.End,
+		Period:   in.Period.String(),
+		From:     in.Period.Start,
+		To:       in.Period.End,
+		Revision: in.Revision,
+	}
+	if rep.Revision <= 0 {
+		rep.Revision = 1
 	}
 
 	var poolSeconds int64
@@ -183,6 +164,17 @@ func Close(in Input) (Report, error) {
 	used, consumption := occupied(in)
 	rep.Deployments = perDeployment(in, used)
 	rep.Tenants, rep.Allocated = allocate(rep.Pool, consumption, in.Spent)
+	rep.Tenants, rep.Allocated = apply(rep.Tenants, in.Adjustments)
+	rep.Adjustments = in.Adjustments
+	rep.Amended = in.Amended
+	for _, adj := range rep.Adjustments {
+		rep.AdjustmentTotal += adj.Amount
+	}
+	if rep.AdjustmentTotal != 0 {
+		rep.Notes = append(rep.Notes, fmt.Sprintf(
+			"allocated is %s of pool: %s in corrections to earlier periods are collected here",
+			rep.Allocated, rep.AdjustmentTotal))
+	}
 	rep.Busy = proportion(rep.Pool, usedSeconds(used), poolSeconds)
 	rep.Idle = rep.Pool - rep.Busy
 	rep.IdlePct = percent(int64(rep.Idle), int64(rep.Pool))

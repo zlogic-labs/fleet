@@ -10,7 +10,8 @@ const { Text } = Typography;
 //
 // Two figures, and the distinction between them is the whole point of the
 // section. A closed period is an invoice: priced against the capacity the fleet
-// had and the rate standing at the close, immutable once stored. The open
+// had and the rate standing at the close. It keeps that figure; a correction
+// found later is collected by the month after, not written back. The open
 // period is token charges so far — real money, already in the ledger, and
 // precisely what an operator wants on the first screen of the month.
 //

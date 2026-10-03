@@ -430,9 +430,13 @@ CREATE INDEX IF NOT EXISTS usage_events_occurred_idx ON usage_events (occurred_a
 
 -- A closed period, immutable.
 --
--- Re-closing is refused rather than updated for the same reason the ledger is
--- append-only: an invoice that can change after it was sent is not an invoice.
--- A correction is a second row.
+-- A period is frozen once a later period has been closed, because that is the
+-- point at which a correction would have nowhere to land: the difference has to
+-- be collected by a month that comes after, and after October is invoiced there
+-- is no such month for September. Until then it can be recomputed, and the
+-- movement is booked to the month immediately after it — the same reason the
+-- ledger is append-only. An invoice that can change after it was sent is not an
+-- invoice.
 CREATE TABLE IF NOT EXISTS cost_periods (
     period           text PRIMARY KEY,
     closed_at        timestamptz NOT NULL DEFAULT now(),
@@ -443,15 +447,48 @@ CREATE TABLE IF NOT EXISTS cost_periods (
     idle_micro       bigint      NOT NULL DEFAULT 0,
     idle_percent     integer     NOT NULL DEFAULT 0,
     coverage_percent integer     NOT NULL DEFAULT 0,
-    pool_gpu_seconds bigint      NOT NULL DEFAULT 0
+    pool_gpu_seconds bigint      NOT NULL DEFAULT 0,
+    revision         integer     NOT NULL DEFAULT 1
 );
 
+ALTER TABLE cost_periods    ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 1;
+
 CREATE TABLE IF NOT EXISTS cost_allocations (
-    period       text NOT NULL,
-    scope        text NOT NULL,
-    gpu_seconds  bigint NOT NULL DEFAULT 0,
-    share        bigint NOT NULL DEFAULT 0,
-    amount_micro bigint NOT NULL DEFAULT 0,
-    usage_micro  bigint NOT NULL DEFAULT 0,
+    period           text NOT NULL,
+    scope            text NOT NULL,
+    gpu_seconds      bigint NOT NULL DEFAULT 0,
+    share            bigint NOT NULL DEFAULT 0,
+    amount_micro     bigint NOT NULL DEFAULT 0,
+    usage_micro      bigint NOT NULL DEFAULT 0,
+    revision         integer NOT NULL DEFAULT 1,
+    adjustment_micro bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (period, scope)
 );
+
+-- The allocation table holds the current revision only. Superseded values are
+-- not kept: every difference between two revisions is written to
+-- cost_adjustments as it happens, and current minus the recorded movement is the
+-- previous figure. Keeping a second copy of every row would grow without bound
+-- for a number that is already exactly determined.
+ALTER TABLE cost_allocations ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 1;
+ALTER TABLE cost_allocations ADD COLUMN IF NOT EXISTS adjustment_micro bigint NOT NULL DEFAULT 0;
+
+-- A correction carried from an already-closed period into the one that found it.
+--
+-- This is the only thing in Fleet that looks like a debt. There is no balance to
+-- roll forward: a period apportions a pool that has already been paid for, and
+-- a request is reserved and accounted for together, so nothing can be spent in
+-- one month and paid in another. What can happen is that a month is closed
+-- before every observation for it arrived, and the only honest repair is to leave
+-- the invoice alone and collect the difference now.
+CREATE TABLE IF NOT EXISTS cost_adjustments (
+    period       text NOT NULL,
+    for_period   text NOT NULL,
+    scope        text NOT NULL,
+    gpu_seconds  bigint NOT NULL DEFAULT 0,
+    amount_micro bigint NOT NULL DEFAULT 0,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (period, for_period, scope)
+);
+
+CREATE INDEX IF NOT EXISTS cost_adjustments_corrected_idx ON cost_adjustments (for_period);

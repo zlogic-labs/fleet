@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/cost"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
@@ -77,6 +78,12 @@ func (s *Server) getCostPeriod(w http.ResponseWriter, r *http.Request) {
 }
 
 // closeCostPeriod computes and stores a period's cost report.
+//
+// 201 the first time a period is closed and 200 when an existing one was
+// recomputed, so a caller can tell an invoice from a correction without reading
+// the body. Recomputing is refused once a later period is closed, with 409 and
+// the name of that period: after it there is no month left to collect the
+// difference in, and a retry loop would never succeed.
 func (s *Server) closeCostPeriod(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDB(w) {
 		return
@@ -85,8 +92,16 @@ func (s *Server) closeCostPeriod(w http.ResponseWriter, r *http.Request) {
 	if !period.Valid() {
 		return
 	}
+	_, missing := s.cost.GetPeriod(r.Context(), period.String())
+	revised := missing == nil
+
 	rep, err := s.cost.ClosePeriod(r.Context(), period, coverageFor(r))
 	if err != nil {
+		var frozen *sqlstore.ErrFrozen
+		if errors.As(err, &frozen) {
+			writeError(w, errs.New(errs.KindConflict, "frozen_period", "%s", cleanErr(err)))
+			return
+		}
 		var incomplete *cost.ErrIncomplete
 		if errors.As(err, &incomplete) {
 			// 400 and not 500: the request was fine, the observations are not
@@ -98,7 +113,11 @@ func (s *Server) closeCostPeriod(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, rep)
+	status := http.StatusCreated
+	if revised {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, rep)
 }
 
 func periodParam(w http.ResponseWriter, r *http.Request, name string) cost.Period {

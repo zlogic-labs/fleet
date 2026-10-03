@@ -250,4 +250,8 @@ import json,sys
 ps=json.load(sys.stdin)
 print(f\"  {len(ps)} closed periods\")
 for p in ps:
-    print(f\"    {p['period']}  pool={p['pool']}  idle={p['idlePercent']}%  coverage={p['coveragePercent']}%\")"
+    # Revision is printed because a second run of this script recomputes the
+    # month rather than failing on it, and a number that quietly goes to 2 is
+    # the one a reader would want to see.
+    rev='' if p.get('revision', 1) <= 1 else f\"  rev{p['revision']}\"
+    print(f\"    {p['period']}  pool={p['pool']}  idle={p['idlePercent']}%  coverage={p['coveragePercent']}%{rev}\")"

@@ -10,11 +10,12 @@ const { Text } = Typography;
 /**
  * Closed periods, and the control that creates one.
  *
- * Closing is a separate action from closing the page because it is an
- * irreversible event: the pool is priced and stored, and a second close of the
- * same month answers 409 rather than silently replacing the invoice. The
- * confirmation says so, and the period is validated as YYYY-MM before it is
- * sent, because "September" is not a period and neither is "2026".
+ * Closing is a separate action from closing the page because it is an event
+ * with consequences: the pool is priced and stored, and a second close of the
+ * same month is a revision whose difference is collected by the month after it,
+ * not a silent replacement. The confirmation says so, and the period is
+ * validated as YYYY-MM before it is sent, because "September" is not a period
+ * and neither is "2026".
  */
 export function PeriodsCard({
   periods,
@@ -89,7 +90,7 @@ export function PeriodsCard({
           </Form.Item>
           <Popconfirm
             title="Close this period?"
-            description="It is billed out and stored. It cannot be reopened."
+            description="It is billed out and stored. Closing it again recomputes it, and the difference is collected by the month after."
             onConfirm={() => form.submit()}
           >
             <Button type="primary" icon={<PlusOutlined />} loading={busy}>

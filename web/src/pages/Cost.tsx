@@ -58,7 +58,7 @@ export function Cost() {
       setBusy(true);
       try {
         await costPeriods.close(values.period);
-        message.success(`${values.period} is closed and now immutable.`);
+        message.success(`${values.period} is priced and stored.`);
         refreshPeriods();
         setOpen(values.period);
         closeForm.resetFields();

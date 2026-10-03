@@ -67,19 +67,6 @@ func allocate(pool billing.Amount, uses []Use, spent map[string]billing.Amount) 
 // perDeployment reports reserved, used and idle GPU-seconds per deployment.
 //
 // Seconds only, no money: a rate is declared per cluster and a deployment is
-// priced at the rate of whichever cluster's capacity it shares, so with several
-// clusters the per-row amount would be an assumption. The ratio between
-// reserved and used does not depend on any of that, and it is the part an
-// operator actually acts on.
-// perDeployment reports reserved, used and idle GPU-seconds per deployment.
-//
-// Seconds only, no money: a rate is declared per cluster and a deployment is
-// priced at the rate of whichever cluster's capacity it shares, so with several
-// clusters the per-row amount would be an assumption. The ratio between
-// reserved and used does not depend on any of that, and it is the part an
-// operator actually acts on.
-//
-// Idle is not clamped. Used is a sweep bounded by the capacity it was swept
 // against, so a negative here would mean the bound broke, and printing zero
 // over it would hide that.
 func perDeployment(in Input, used map[string]int64) []Deployment {

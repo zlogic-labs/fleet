@@ -816,13 +816,14 @@ else
   check "and it says how much of it it saw" "yes" \
     "$(case "$msg" in *observed*) echo yes;; *) echo "no: $msg";; esac)"
 
-  # Forcing the coverage gate closes a period for real, which is irreversible by
-  # design — so this run may see the conflict a previous one created, and both
-  # are correct. What is checked is the report either way.
+  # Forcing the coverage gate closes a period for real, so this run may be the
+  # first to do it (201) or may be recomputing one a previous run closed (200).
+  # 409 is not reachable here: nothing after 1999-01 has been closed, so there
+  # is no month for a correction to land in and nothing to freeze.
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/cost-periods/1999-01?minCoverage=0")
   case "$code" in
-    201|409) ;;
-    *) check "a forced close creates the period, or reports the one already there" "201 or 409" "$code" ;;
+    201|200) ;;
+    *) check "a forced close creates or recomputes the period" "201 or 200" "$code" ;;
   esac
 
   closed=$(curl -sS "$API/cost-periods/1999-01")
@@ -833,6 +834,15 @@ else
   check "an unpriced pool is zero, not missing" "0" "$(printf '%s' "$closed" | jqp "d['pool']")"
   check "and it appears in the list" "True" \
     "$(curl -sS "$API/cost-periods" | jqp "any(p['period']=='1999-01' for p in d)")"
+
+  # Closing it again recomputes rather than conflicting. 1999-02 was refused
+  # above, so nothing later exists that could freeze it.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT "$API/cost-periods/1999-01?minCoverage=0")
+  check "closing it again is a revision, not a conflict" "200" "$code"
+  check "the period says how many times it has been computed" "True" \
+    "$(curl -sS "$API/cost-periods/1999-01" | jqp "d['revision']>=1")"
+  check "a revision carries no correction into itself" "0" \
+    "$(curl -sS "$API/cost-periods/1999-01" | jqp "d['adjustmentTotal']")"
 fi
 
 # ── summary ────────────────────────────────────────────────────────

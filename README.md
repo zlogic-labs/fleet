@@ -237,8 +237,18 @@ a fixed cost, so it has to land on somebody's invoice. Allocating only the busy
 part would leave it unbilled and the operator would quietly absorb the exact
 problem the platform is supposed to surface.
 
-A closed period is immutable — closing twice is a 409, not a recalculation,
-because an invoice that can change after it was sent is not an invoice.
+A closed period keeps its numbers. Closing it again recomputes it, and the
+difference is booked to the month after rather than rewritten into the month
+that was already sent — a correction discovered late still has to be collected
+somewhere, and that somewhere cannot be the invoice already issued. Once the
+following month is closed the earlier one is frozen and answers 409 naming the
+period that closed the door, because after that there is nowhere left for a
+correction to land.
+
+That is the whole of Fleet's cross-period rule. There is no balance to roll
+forward and no debt to carry: a period apportions a pool that has already been
+paid for, and a request is reserved and accounted for together (P5), so nothing
+can be spent in one month and paid in another.
 
 Fleet refuses to close a month it did not watch. The capacity time series comes
 from the operator's own inventory reports, so on a fresh deployment a month is

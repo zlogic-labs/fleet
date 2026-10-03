@@ -3,7 +3,7 @@ import { Alert, Card, Col, Progress, Row, Statistic, Table, Tag, Typography } fr
 import { humanGpuSeconds, humanMoney, humanPct } from '../../hooks';
 import type { CostReport } from '../../types';
 
-const { Paragraph } = Typography;
+const { Paragraph, Text } = Typography;
 
 /** idlePercent's colour scale. Idle is the number P8 exists for, so it gets a colour. */
 function idleTag(pct: number, extra?: string) {
@@ -27,7 +27,15 @@ function idleTag(pct: number, extra?: string) {
 export function Report({ report }: { report: CostReport }) {
   const cur = report.currency;
   return (
-    <Card size="small" title={`${report.period} — closed`}>
+    <Card
+      size="small"
+      title={`${report.period} — closed`}
+      extra={
+        report.revision > 1 ? (
+          <Tag color="blue">revision {report.revision}</Tag>
+        ) : undefined
+      }
+    >
       {!report.priced && (
         <Alert
           showIcon
@@ -44,6 +52,17 @@ export function Report({ report }: { report: CostReport }) {
           style={{ marginBottom: 16 }}
           message={`Only ${report.coveragePercent}% of this period was observed.`}
           description="The remainder is extrapolated from what the reporter saw. A close refuses below 90% rather than issuing an invoice nobody can reconcile."
+        />
+      )}
+      {report.amended.length > 0 && (
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message={`Recomputed after the fact. ${report.amended
+            .map((a) => `${a.scope} ${humanMoney(a.amount, cur)}`)
+            .join(', ')} — collected by ${[...new Set(report.amended.map((a) => a.forPeriod))].join(', ')}.`}
+          description="A closed invoice does not move. When a period is found to be wrong, the difference is collected by the month after it rather than rewritten into the month that was already sent."
         />
       )}
 
@@ -76,9 +95,9 @@ export function Report({ report }: { report: CostReport }) {
       />
 
       <Paragraph type="secondary" style={{ fontSize: 12 }}>
-        Allocated equals the whole pool, idle included: idle capacity is a fixed cost and has to land
-        somewhere. Allocating only the busy part would hide it in the operator's margin, which is the
-        one number this platform exists to make visible.
+        {report.adjustmentTotal === 0
+          ? 'Allocated equals the whole pool, idle included: idle capacity is a fixed cost and has to land somewhere. Allocating only the busy part would hide it in the operator’s margin, which is the one number this platform exists to make visible.'
+          : `Allocated is ${humanMoney(report.allocated, cur)} against a pool of ${humanMoney(report.pool, cur)}: the difference is ${humanMoney(report.adjustmentTotal, cur)} of corrections to earlier periods, collected by the month after them.`}
       </Paragraph>
 
       <Row gutter={16}>
@@ -94,6 +113,25 @@ export function Report({ report }: { report: CostReport }) {
               { title: 'Tenant', dataIndex: 'key', ellipsis: true },
               { title: 'Share', dataIndex: 'share', width: 80, align: 'right', render: humanPct },
               { title: 'GPU-hours', dataIndex: 'gpuSeconds', width: 100, align: 'right', render: humanGpuSeconds },
+              // Keyed on whether there are corrections, not on their net: a
+              // correction that moved a share between two tenants nets to zero
+              // and is still something the person reading the invoice needs.
+              ...(report.adjustments.length === 0
+                ? []
+                : [
+                    {
+                      title: 'Correction',
+                      dataIndex: 'adjustment',
+                      width: 110,
+                      align: 'right' as const,
+                      render: (v: number) =>
+                        v === 0 ? (
+                          <Text type="secondary">—</Text>
+                        ) : (
+                          <Text type={v > 0 ? 'danger' : 'success'}>{humanMoney(v, cur)}</Text>
+                        ),
+                    },
+                  ]),
               { title: 'Allocated', dataIndex: 'amount', align: 'right', render: (v: number) => humanMoney(v, cur) },
               {
                 title: 'Token ledger',

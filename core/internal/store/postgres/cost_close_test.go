@@ -51,20 +51,6 @@ func TestCloseRefusesAPeriodItDidNotWatch(t *testing.T) {
 	}
 }
 
-func TestClosingTwiceIsAConflict(t *testing.T) {
-	// An invoice that can change after it was sent is not an invoice.
-	s := newCostStore(t)
-	fillMonth(t, s, 4, 1)
-	ctx := context.Background()
-	if _, err := s.ClosePeriod(ctx, period(t), cost.DefaultMinCoverage); err != nil {
-		t.Fatalf("first close: %v", err)
-	}
-	_, err := s.ClosePeriod(ctx, period(t), cost.DefaultMinCoverage)
-	if !Conflict(err) {
-		t.Fatalf("got %v, want a conflict", err)
-	}
-}
-
 func TestAClosedPeriodReadsBackIdentically(t *testing.T) {
 	s := newCostStore(t)
 	fillMonth(t, s, 8, 2)
