@@ -13,6 +13,12 @@ export interface FleetStatus {
   customer?: string;
   expiresAt?: string;
   version: string;
+  /**
+   * Where this gateway reaches the control plane, when it was told. Absent
+   * means this gateway discovers deployments some other way — static upstreams,
+   * or a control plane on the same origin as the console.
+   */
+  controlPlane?: string;
   capabilities: string[];
   endpoints: EndpointStatus[];
   recent: RecentSample[];
@@ -246,6 +252,13 @@ export interface CostPeriodSummary {
   priced: boolean;
   pool: number;
   idle: number;
+  /**
+   * Whole-number percentages, 0–100, rounded half up by the server.
+   *
+   * Not fractions in millionths — CostAllocation.share below is, and the two
+   * being different is a trap. `humanPct` expects the millionths scale; using
+   * it here printed 100 as 0.01%.
+   */
   idlePercent: number;
   coveragePercent: number;
   poolGpuSeconds: number;

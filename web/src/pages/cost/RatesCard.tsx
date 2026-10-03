@@ -1,4 +1,4 @@
-import { Button, Card, Form, Input, InputNumber, Space, Table, Tooltip, Typography } from 'antd';
+import { Button, Card, Form, Input, InputNumber, Space, Table, Typography } from 'antd';
 import type { FormInstance } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 
@@ -6,6 +6,13 @@ import { humanMoney } from '../../hooks';
 import type { CostRate } from '../../types';
 
 const { Text } = Typography;
+
+/** What the form collects, before normalize turns currency into millionths. */
+interface RateForm {
+  cluster: string;
+  gpuHour: number;
+  currency: string;
+}
 
 /**
  * What a GPU-hour costs, per cluster.
@@ -23,7 +30,7 @@ export function RatesCard({
   onSubmit,
 }: {
   rates: CostRate[];
-  form: FormInstance<CostRate>;
+  form: FormInstance<RateForm>;
   busy: boolean;
   onSubmit: (v: CostRate) => void;
 }) {
@@ -49,33 +56,48 @@ export function RatesCard({
             title: 'Per GPU-hour',
             dataIndex: 'gpuHourMicro',
             align: 'right',
-            render: (v: number, r: CostRate) => humanMoney(v, r.currency, 4),
+            // Two decimals, not four. A GPU-hour rate is written in currency,
+            // and "$2.0000" is a number nobody types; worse, it invites typing
+            // "2" into the field below and meaning dollars.
+            render: (v: number, r: CostRate) => humanMoney(v, r.currency, 2),
           },
           { title: 'Currency', dataIndex: 'currency', width: 90 },
         ]}
       />
-      <Form form={form} layout="vertical" onFinish={onSubmit}>
-        <Space wrap style={{ marginTop: 12 }}>
+      <Form
+        form={form}
+        layout="vertical"
+        // The form speaks currency; the API speaks millionths. Converting here
+        // rather than asking the operator to do it is the whole point: a rate
+        // entered in the wrong unit is a millionfold error, and nothing on the
+        // page would look wrong afterwards.
+        onFinish={(v: RateForm) =>
+          onSubmit({
+            cluster: v.cluster,
+            currency: v.currency,
+            gpuHourMicro: Math.round((v.gpuHour ?? 0) * 1_000_000),
+          })
+        }
+      >
+        <Space wrap style={{ marginTop: 12, alignItems: 'flex-start' }}>
           <Form.Item name="cluster" rules={[{ required: true, message: 'which cluster' }]}>
             <Input placeholder="cluster name" style={{ width: 150 }} />
           </Form.Item>
           <Form.Item
-            name="gpuHourMicro"
-            label={
-              <Tooltip title="Millionths of a currency unit. 2.50 is 2500000.">
-                <span>Micro per GPU-hour</span>
-              </Tooltip>
-            }
+            name="gpuHour"
+            label="Per GPU-hour"
             rules={[{ required: true, message: 'a rate of zero is not a rate' }]}
           >
-            <InputNumber min={1} style={{ width: 150 }} />
+            <InputNumber min={0.000001} step={0.25} style={{ width: 150 }} placeholder="2.00" />
           </Form.Item>
           <Form.Item name="currency" initialValue="USD" rules={[{ required: true }]}>
             <Input placeholder="USD" style={{ width: 80 }} />
           </Form.Item>
-          <Button type="primary" htmlType="submit" icon={<PlusOutlined />} loading={busy}>
-            Declare
-          </Button>
+          <Form.Item label={<span style={{ visibility: 'hidden' }}>.</span>}>
+            <Button type="primary" htmlType="submit" icon={<PlusOutlined />} loading={busy}>
+              Declare
+            </Button>
+          </Form.Item>
         </Space>
       </Form>
     </Card>

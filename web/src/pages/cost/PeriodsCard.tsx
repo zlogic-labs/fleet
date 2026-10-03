@@ -85,7 +85,7 @@ export function PeriodsCard({
               },
             ]}
           >
-            <Input placeholder="2026-09" style={{ width: 130 }} />
+            <Input placeholder={previousPeriod()} style={{ width: 130 }} />
           </Form.Item>
           <Popconfirm
             title="Close this period?"
@@ -103,4 +103,16 @@ export function PeriodsCard({
       </Text>
     </Card>
   );
+}
+
+// The month before this one, as the placeholder.
+//
+// A literal placeholder goes stale the moment it is written, and a stale one
+// is worse than none: it suggested a period that had already closed the first
+// time the page was loaded in a later month.
+function previousPeriod(): string {
+  const now = new Date();
+  const first = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const back = new Date(first - 24 * 60 * 60 * 1000);
+  return `${back.getUTCFullYear()}-${String(back.getUTCMonth() + 1).padStart(2, '0')}`;
 }

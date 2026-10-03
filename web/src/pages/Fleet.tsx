@@ -8,7 +8,6 @@ import {
   Progress,
   Row,
   Space,
-  Statistic,
   Table,
   Tag,
   Typography,
@@ -45,42 +44,19 @@ export function Fleet() {
   const names = Object.keys(CAPABILITIES);
   const missing = names.filter((n) => !granted.has(n));
 
-  const totalTok = data.recent.reduce((a, s) => a + s.completionTokens, 0);
+  // P6 only trusts the usage the engine reports. A request that arrived without
+  // any was billed on the reservation instead, so the count is worth showing
+  // next to the log it explains rather than as a headline number — it is a
+  // property of the engines, not a fact about how much traffic there was.
   const estimated = data.recent.filter((s) => s.estimated).length;
-  const avgTtft = data.recent.length
-    ? Math.round(data.recent.reduce((a, s) => a + s.ttftMs, 0) / data.recent.length)
-    : 0;
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={6}>
-          <Card size="small">
-            <Statistic title="Endpoints" value={data.endpoints.length} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card size="small">
-            <Statistic title="Healthy" value={data.endpoints.filter((e) => e.healthy).length}
-              suffix={`/ ${data.endpoints.length}`} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card size="small">
-            <Statistic title="Avg time to first token" value={avgTtft} suffix="ms" />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card size="small">
-            <Statistic
-              title="Completion tokens (recent)"
-              value={totalTok}
-              suffix={estimated > 0 ? `${estimated} estimated` : ''}
-            />
-          </Card>
-        </Col>
-      </Row>
-
+      {/* No summary row here. These four numbers are on the Overview, and a
+          page that answers a question twice makes both answers suspect. What
+          is left is the detail the Overview deliberately left out: which
+          endpoint, which engine version, which replica, and the recent request
+          log with its per-request usage. */}
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={12}>
           <Card size="small" title="Endpoints" extra={<Text type="secondary">from /fleet/status</Text>}>
@@ -121,11 +97,16 @@ export function Fleet() {
                   render: (v: string) => CAPABILITIES[v] ?? v,
                 },
                 {
+                  // A tick, or nothing. The column used to hold a pill on every
+                  // row saying "community", which is the state the card's own
+                  // title already states — seven badges repeating one fact, and
+                  // seven boxes of visual noise for it.
                   title: '',
                   dataIndex: 'on',
                   align: 'right',
+                  width: 40,
                   render: (on: boolean) =>
-                    on ? <Tag color="green">granted</Tag> : <Tag>community</Tag>,
+                    on ? <Badge status="success" title="granted" /> : null,
                 },
               ]}
             />
@@ -144,9 +125,16 @@ export function Fleet() {
         size="small"
         title="Recent requests"
         extra={
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            time to first token vs decode; a wide gap on short answers means KV-cache misses
-          </Text>
+          <Space size={12}>
+            {estimated > 0 && (
+              <Tag color="gold">
+                {estimated} billed on an estimate
+              </Tag>
+            )}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              time to first token vs decode; a wide gap on short answers means KV-cache misses
+            </Text>
+          </Space>
         }
       >
         <Table<RecentSample>

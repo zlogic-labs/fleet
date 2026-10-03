@@ -22,13 +22,18 @@ export interface NavGroup {
   items: NavItem[];
 }
 
+// Overview sits above the groups rather than inside one. It is not a peer of
+// them — it summarises all of them — and a group holding a single leaf is a
+// heading that names nothing.
+export const HOME: NavItem = { key: '/', label: 'Overview' };
+
 export const NAV: NavGroup[] = [
   {
     key: 'serving',
     label: 'Serving',
     items: [
       { key: '/playground', label: 'Playground' },
-      { key: '/fleet', label: 'Fleet' },
+      { key: '/endpoints', label: 'Endpoints' },
     ],
   },
   {
@@ -59,5 +64,5 @@ export function groupOf(path: string): NavGroup | undefined {
 }
 
 export function navPaths(): string[] {
-  return NAV.flatMap((g) => g.items.map((i) => i.key));
+  return [HOME.key, ...NAV.flatMap((g) => g.items.map((i) => i.key))];
 }

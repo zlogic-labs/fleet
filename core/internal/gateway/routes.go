@@ -23,6 +23,7 @@ type routesDeps struct {
 	chat      *handler.Chat
 	embedding *handler.Embeddings
 	current   func() []engine.Endpoint
+	control   string
 }
 
 func routes(d routesDeps) chi.Router {
@@ -57,10 +58,11 @@ func routes(d routesDeps) chi.Router {
 		r.Get("/metrics", serveMetrics(d.registry))
 
 		r.Get("/fleet/status", (&handler.Fleet{
-			Endpoints: d.current,
-			Samples:   d.chat.Samples,
-			Lic:       d.lic,
-			Version:   d.version,
+			Endpoints:    d.current,
+			Samples:      d.chat.Samples,
+			Lic:          d.lic,
+			Version:      d.version,
+			ControlPlane: d.control,
 		}).ServeHTTP)
 	})
 

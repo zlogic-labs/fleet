@@ -4,6 +4,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { Shell } from './layout/Shell';
 import { navPaths } from './layout/nav';
+import { Overview } from './pages/Overview';
 import { Playground } from './pages/Playground';
 import { Fleet } from './pages/Fleet';
 import { Models } from './pages/Models';
@@ -11,6 +12,7 @@ import { Cluster } from './pages/Cluster';
 import { Tenancy } from './pages/Tenancy';
 import { Cost } from './pages/Cost';
 import { listModels, fleetStatus } from './api/gateway';
+import { adoptControlPlane } from './api/client';
 import { usePoll } from './hooks';
 import type { Model } from './types';
 
@@ -20,7 +22,7 @@ const { Text } = Typography;
 // sidebar entry that goes nowhere is worse. Both are checked at startup
 // because neither is a crash: the console looks fine either way, which is
 // exactly why this needs to be asserted rather than noticed.
-const ROUTES = ['/playground', '/fleet', '/models', '/cluster', '/tenancy', '/cost'];
+const ROUTES = ['/', '/playground', '/endpoints', '/models', '/cluster', '/tenancy', '/cost'];
 
 function checkNavigation() {
   const nav = navPaths();
@@ -54,6 +56,12 @@ function ShellFrame() {
 
   const models: Model[] = models$.data ?? [];
 
+  // The gateway is the one process that knows where the control plane is, and
+  // it serves this page. Asking it here means a deployment whose two processes
+  // are on different hosts needs nobody to open Settings first — which is what
+  // a hardcoded localhost cost every such deployment.
+  adoptControlPlane(status$.data?.controlPlane);
+
   return (
     <Shell
       edition={status$.data?.edition}
@@ -75,7 +83,7 @@ function ShellFrame() {
       }
     >
       <Routes>
-        <Route path="/" element={<Navigate to="/playground" replace />} />
+        <Route path="/" element={<Overview />} />
         <Route
           path="/playground"
           element={
@@ -88,12 +96,18 @@ function ShellFrame() {
             )
           }
         />
-        <Route path="/fleet" element={<Fleet />} />
+        <Route path="/endpoints" element={<Fleet />} />
+        {/* The page used to be called Fleet, which named the product rather
+            than the thing on screen. Kept as a redirect so a shared link from
+            an earlier build still lands on the endpoints it described. */}
+        <Route path="/fleet" element={<Navigate to="/endpoints" replace />} />
         <Route path="/models" element={<Models />} />
         <Route path="/cluster" element={<Cluster />} />
         <Route path="/tenancy" element={<Tenancy />} />
         <Route path="/cost" element={<Cost />} />
-        <Route path="*" element={<Navigate to="/playground" replace />} />
+        {/* Overview, not the playground: an address that matches nothing should
+            land somewhere that explains the deployment. */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>
   );

@@ -23,7 +23,7 @@ export function Cost() {
   const periods$ = usePoll((signal) => costPeriods.list(signal), 30000);
   const [open, setOpen] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const [rateForm] = Form.useForm<CostRate>();
+  const [rateForm] = Form.useForm<{ cluster: string; gpuHour: number; currency: string }>();
   const [closeForm] = Form.useForm<{ period: string }>();
 
   // Fetched only when a period is picked. Returning undefined rather than

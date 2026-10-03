@@ -74,6 +74,27 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE UNIQUE INDEX IF NOT EXISTS projects_tenant_name_idx ON projects (tenant_id, name);
 CREATE INDEX IF NOT EXISTS projects_tenant_idx ON projects (tenant_id);
 
+-- The limit columns, for a database created before they existed.
+--
+-- CREATE TABLE IF NOT EXISTS is a no-op on a table that is already there, so a
+-- database that predates this change keeps its old shape forever and every
+-- query naming request_limit fails. That is not only a 500: the gateway's
+-- policy lookup is the same query, and it falls back to server defaults when
+-- the lookup errors — so the deployment looks healthy and enforces the wrong
+-- limits. Adding a column with a default does not rewrite existing rows, which
+-- is the line db.go's Migrate draws between this file and a real migration.
+ALTER TABLE tenants  ADD COLUMN IF NOT EXISTS request_limit integer NOT NULL DEFAULT 0;
+ALTER TABLE tenants  ADD COLUMN IF NOT EXISTS token_limit   integer NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS request_limit integer NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS token_limit   integer NOT NULL DEFAULT 0;
+
+-- budget_units was replaced by budget_rules, which can express a dimension and
+-- a window rather than one number. Dropping it is safe and intentional: a
+-- value there meant something different from anything the code now reads, and
+-- leaving it invites someone to keep reading it.
+ALTER TABLE tenants  DROP COLUMN IF EXISTS budget_units;
+ALTER TABLE projects DROP COLUMN IF EXISTS budget_units;
+
 -- An API key is a credential, not a scope.
 --
 -- It carries no limits at all. A key rotates, it leaks, and it is not a budget:

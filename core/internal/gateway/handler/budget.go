@@ -23,10 +23,23 @@ import (
 // in money.
 //
 // It returns a no-op reservation when there is nothing to enforce — no budget
-// package, which is every gateway with no database — so the settle path does
-// not have to branch on whether budgeting is switched on.
+// package, which is every gateway with no database, or no tenant to enforce
+// against — so the settle path does not have to branch on whether budgeting is
+// switched on.
 func (h *settler) reserve(ctx context.Context, tenant, project, model string, promptTokens, maxOut int) (quota.Reservation, error) {
 	if h.Budget == nil {
+		return quota.Reservation{}, nil
+	}
+	// A budget is a statement about a tenant: a rule names a scope, and a
+	// scope with no tenant is not a smaller budget, it is no budget. Refusing
+	// here instead would make "auth off, database on" answer every request
+	// with 503, which is the shape of a platform that owns GPUs and refuses to
+	// run its owner's traffic.
+	//
+	// What this does not do is make the request free. Rate limiting, pricing
+	// and the ledger all still run in settle; only the ceiling is skipped,
+	// because there is nothing to write a ceiling against.
+	if tenant == "" {
 		return quota.Reservation{}, nil
 	}
 	est, err := h.predict(ctx, model, promptTokens, maxOut)

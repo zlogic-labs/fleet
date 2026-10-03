@@ -12,6 +12,7 @@ import { Button, Layout, Menu, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
   CloudServerOutlined,
+  DashboardOutlined,
   DollarOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -19,7 +20,7 @@ import {
 } from '@ant-design/icons';
 import { useLocation, useNavigate } from 'react-router-dom';
 
-import { NAV, SETTINGS, groupOf } from './nav';
+import { HOME, NAV, SETTINGS, groupOf } from './nav';
 import { Settings } from '../pages/Settings';
 
 const { Sider, Content } = Layout;
@@ -44,7 +45,10 @@ export function Shell({ children, edition, status }: ShellProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [open, setOpen] = useState<string[]>([]);
 
-  const selected = location.pathname === '/' ? '/playground' : location.pathname;
+  // '/' is Overview, not Playground. Collapsing the root onto another page
+  // made the root a dead entry: a deep link to / served a screen that nothing
+  // highlighted, which is the shape of a link that goes nowhere.
+  const selected = location.pathname;
 
   // Open whichever group owns the current route. Deriving this from the route
   // rather than leaving it to defaultOpenKeys is what makes a deep link land on
@@ -57,12 +61,17 @@ export function Shell({ children, edition, status }: ShellProps) {
     }
   }, [selected]);
 
-  const items = NAV.map((group) => ({
-    key: group.key,
-    label: group.label,
-    icon: GROUP_ICON[group.key],
-    children: group.items.map((item) => ({ key: item.key, label: item.label })),
-  }));
+  const items = [
+    // Overview first and outside the groups, so the tree below it reads as the
+    // detail it summarises.
+    { key: HOME.key, label: HOME.label, icon: <DashboardOutlined /> },
+    ...NAV.map((group) => ({
+      key: group.key,
+      label: group.label,
+      icon: GROUP_ICON[group.key],
+      children: group.items.map((item) => ({ key: item.key, label: item.label })),
+    })),
+  ];
 
   return (
     <Layout style={{ height: '100vh' }}>
@@ -233,6 +242,7 @@ function Foot({
 }
 
 function titleFor(path: string): string {
+  if (path === HOME.key) return HOME.label;
   for (const group of NAV) {
     const item = group.items.find((i) => i.key === path);
     if (item) {

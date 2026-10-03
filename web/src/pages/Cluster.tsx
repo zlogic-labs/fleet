@@ -3,13 +3,10 @@ import {
   Badge,
   Button,
   Card,
-  Col,
   Descriptions,
   Empty,
   Progress,
-  Row,
   Space,
-  Statistic,
   Table,
   Tag,
   Tooltip,
@@ -165,12 +162,15 @@ export function Cluster() {
 }
 
 function Report({ report }: { report: ClusterReport }) {
-  // The totals come from the server, which recomputes them from the node list
-  // on every report. Deriving them here as well would give the summary and the
-  // table two chances to disagree.
-  const { gpuCount: totalGpu, readyGpus: readyGpu } = report;
-  const gpuMem = report.nodes.reduce((a, n) => a + n.gpu.totalMemoryMiB, 0);
-  const mem = report.memoryMiB;
+  // No cluster summary here. The figures these cards held — nodes, GPUs, CPU,
+  // memory — are on the Overview, where the question "is my pool being used"
+  // is actually asked. Repeating them above a node table gave the console two
+  // answers to one question and made a page nobody needed between the landing
+  // page and the numbers.
+  //
+  // Cluster memoryMiB is the whole cluster's total while the per-node
+  // Allocatable column below is the schedulable part, so the two could not be
+  // summed or compared without a note. That note lived in a card comment.
 
   return (
     <Card
@@ -188,44 +188,6 @@ function Report({ report }: { report: ClusterReport }) {
         </Text>
       }
     >
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={6} lg={4}>
-          <Statistic title="Nodes" value={`${report.readyNodes}/${report.nodeCount}`} />
-        </Col>
-        <Col xs={12} sm={6} lg={4}>
-          <Statistic
-            title="GPUs"
-            value={`${readyGpu}/${totalGpu}`}
-            valueStyle={readyGpu < totalGpu ? { color: '#d48806' } : undefined}
-          />
-        </Col>
-        <Col xs={12} sm={6} lg={5}>
-          <Statistic
-            title="GPU memory"
-            value={gpuMem ? `${Math.round(gpuMem / 1024)} GiB` : '—'}
-          />
-        </Col>
-        <Col xs={12} sm={6} lg={5}>
-          {/* Cluster memoryMiB is the whole cluster's total. The per-node
-              Allocatable column below is the schedulable part; labelling this
-              one "Allocatable" would show a bigger number than the sum of the
-              column, which is exactly the kind of thing that wastes an
-              afternoon. */}
-          <Statistic
-            title="Cluster memory"
-            value={mem ? `${Math.round(mem / 1024)} GiB` : '—'}
-          />
-        </Col>
-        <Col xs={12} sm={12} lg={6}>
-          {/* Millicores are the wire unit; a capacity card showing
-              "32256000 m" is unreadable. */}
-          <Statistic
-            title="CPU"
-            value={report.cpuMillicores ? `${(report.cpuMillicores / 1000).toFixed(1)} cores` : '—'}
-          />
-        </Col>
-      </Row>
-
       {report.message && <Alert type="warning" message={report.message} style={{ marginBottom: 16 }} />}
 
       {report.nodes.length === 0 ? (

@@ -27,11 +27,31 @@ export class ApiError extends Error {
  * baseFor picks the origin for a path group. The console can be served by the
  * gateway itself, by the control plane, or by a dev server on a third port, so
  * the origin is configurable per group rather than assumed to be one.
+ *
+ * The control plane's origin is not guessed either. The gateway publishes the
+ * one it uses on /fleet/status, and adoptOrigin takes it from there on the
+ * first poll; the constant below is only what a console sees before that
+ * answer arrives, and it covers the single-host case where both processes run
+ * on the same machine.
  */
 export const origins = {
   gateway: localStorage.getItem('fleet.gatewayUrl') || '',
   control: localStorage.getItem('fleet.controlUrl') || 'http://127.0.0.1:8081',
 };
+
+/**
+ * Take the control plane's address from the gateway, once, and only if the
+ * operator has not set one by hand.
+ *
+ * A stored value wins because it is a deliberate choice, including the choice
+ * to point at nothing. Writing it through also means the guess above stops
+ * mattering after the first load, so a deployment whose two processes are on
+ * different hosts works without anyone visiting Settings.
+ */
+export function adoptControlPlane(url: string | undefined) {
+  if (!url || localStorage.getItem('fleet.controlUrl')) return;
+  setOrigin('control', url);
+}
 
 export function setOrigin(group: 'gateway' | 'control', value: string) {
   origins[group] = value.replace(/\/+$/, '');

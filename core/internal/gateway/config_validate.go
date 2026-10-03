@@ -71,12 +71,21 @@ func (c Config) validate(db *sqlstore.DB) error {
 // is empty (a caller that opened the pool itself) and non-empty while no pool
 // was opened yet (Load, before Run gets to it). Either one is enough.
 func (c Config) validateAuth(hasDB bool) error {
-	haveKeys := len(c.Auth.Keys) > 0 || c.Database.URL != "" || hasDB
-	if c.Auth.Required && !haveKeys {
-		return fmt.Errorf("auth.required is set but there are no keys: set auth.keys or database.url, " +
-			"or every request would be rejected")
+	if c.Auth.Required {
+		haveKeys := len(c.Auth.Keys) > 0 || c.Database.URL != "" || hasDB
+		if !haveKeys {
+			return fmt.Errorf("auth.required is set but there are no keys: set auth.keys or database.url, " +
+				"or every request would be rejected")
+		}
+		return nil
 	}
-	if !c.Auth.Required && haveKeys {
+	// Deliberately not "or a database". This rule asks whether a configured
+	// secret is being ignored, and a database is not a secret, it is somewhere
+	// to look one up. Conflating the two made "point Fleet at Postgres and
+	// leave auth off" unstartable, which is the shape of a single-tenant
+	// private deployment: no keys issued, every request still metered against
+	// the pool and written to the ledger.
+	if len(c.Auth.Keys) > 0 {
 		return fmt.Errorf("keys are configured but auth.required is false: they would be ignored")
 	}
 	return nil

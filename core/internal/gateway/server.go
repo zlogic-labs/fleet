@@ -116,6 +116,7 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		chat:      chat,
 		embedding: embeddings,
 		current:   refresher.Endpoints,
+		control:   cfg.ControlPlane.URL,
 	}), refresher, nil
 }
 

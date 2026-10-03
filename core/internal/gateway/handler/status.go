@@ -70,6 +70,13 @@ type Fleet struct {
 	Samples   func() []Sample
 	Lic       entitlement.License
 	Version   string
+	// ControlPlane is where this gateway itself finds the control plane, if it
+	// was told. The console is served by the gateway and so already has the
+	// answer; hardcoding localhost:8081 in the browser made every page that
+	// needs the control plane fail with a connection error on any deployment
+	// where the two are not on the same host, and the error looked like a
+	// broken product rather than a guessed address.
+	ControlPlane string
 }
 
 func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
@@ -99,6 +106,7 @@ func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		Customer     string           `json:"customer,omitempty"`
 		ExpiresAt    string           `json:"expiresAt,omitempty"`
 		Version      string           `json:"version"`
+		ControlPlane string           `json:"controlPlane,omitempty"`
 		Capabilities []string         `json:"capabilities"`
 		Endpoints    []endpointStatus `json:"endpoints"`
 		Recent       []recentSample   `json:"recent"`
@@ -108,6 +116,7 @@ func (h *Fleet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		Edition:      string(h.Lic.Edition),
 		Customer:     h.Lic.Customer,
 		Version:      h.Version,
+		ControlPlane: h.ControlPlane,
 		Capabilities: granted,
 		Endpoints:    endpoints,
 		Recent:       recent(h.Samples()),

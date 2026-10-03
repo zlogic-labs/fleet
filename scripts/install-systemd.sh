@@ -141,6 +141,17 @@ WorkingDirectory=$ROOT
 Environment=FLEET_LISTEN=0.0.0.0:8080
 EOF
 
+if [ -n "${DATABASE_URL:-}" ]; then
+cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
+# The gateway needs the database as much as the control plane does: without it
+# there are no tenants, no rate limits, no budgets and no ledger, so requests
+# are served for free and nothing is ever billed. Routing and the console work
+# either way, which is what makes the omission read as "billing is fine".
+Environment=FLEET_DATABASE_URL=$DATABASE_URL
+Environment=FLEET_DATABASE_MIGRATE=true
+EOF
+fi
+
 if [ -z "$SKIP_OPERATOR" ]; then
 cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
 Environment=FLEET_CONTROL_PLANE_URL=$APISERVER

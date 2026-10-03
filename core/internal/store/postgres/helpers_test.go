@@ -59,6 +59,21 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "cannot take the test lock: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Migrate once, here, rather than in every test.
+	//
+	// The schema is the same for all of them and it holds the test lock, so a
+	// per-test migration is pure repetition. It was cheap when the schema was
+	// a dozen CREATE TABLE statements and mostly no-ops; once it contains ALTER
+	// TABLE it is not, because each one takes ACCESS EXCLUSIVE on tenants and
+	// projects — and an exclusive lock acquired once per test across a package
+	// that holds them for hundreds of queries is how a suite ends up taking
+	// thirteen minutes instead of five.
+	if err := db.Migrate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot migrate the test database: %v\n", err)
+		os.Exit(1)
+	}
+
 	code := m.Run()
 	_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, testLockKey)
 	os.Exit(code)
@@ -76,9 +91,8 @@ func testDB(t *testing.T) *DB {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(db.Close)
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	// No Migrate here: TestMain has already run it, while holding the lock
+	// that keeps the other test package off this database.
 	return db
 }
 
