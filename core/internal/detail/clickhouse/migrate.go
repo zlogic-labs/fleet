@@ -1,0 +1,100 @@
+package clickhouse
+
+import (
+	"context"
+	"fmt"
+)
+
+// The statements are Go values rather than a .sql file for one reason: the HTTP
+// interface refuses multi-statement input by default, so a file would need a
+// splitter in front of it, and a splitter is a parser that can be wrong. Each
+// statement here is named in the error it produces, which is what makes a
+// partially applied schema diagnosable.
+
+// ddl are the statements that create a usable detail table, in order. They are
+// idempotent, so Migrate can run on every start.
+var ddl = []struct{ name, query string }{
+	{"table", `
+CREATE TABLE IF NOT EXISTS usage_detail
+(
+    -- The authoritative row id, so a reconciliation can compare the two stores
+    -- by identity instead of by matching on content. Zero when the gateway
+    -- pushed a record before the ledger returned its id; the backfill fills
+    -- those in.
+    ledger_id      Int64,
+
+    occurred_at    DateTime64(3, 'UTC'),
+    tenant         LowCardinality(String),
+    project        LowCardinality(String),
+    key_id         String,
+    model          LowCardinality(String),
+    endpoint       LowCardinality(String),
+    price_book     String,
+
+    prompt_tokens       Int64,
+    completion_tokens  Int64,
+    cached_tokens      Int64,
+    reasoning_tokens   Int64,
+
+    -- Micro-units, exactly as the ledger stores them. Money is never a float and
+    -- never a rounded decimal: a rounding rule that differed between the two
+    -- stores would turn every comparison between them into a false alarm.
+    amount_micro  Int64,
+
+    -- engine / counted / reserved. An Enum rather than a String because the
+    -- metering audit groups on it, and an unknown value there is a bug worth
+    -- failing on rather than a value to store.
+    usage_source  Enum8('engine' = 1, 'counted' = 2, 'reserved' = 3),
+    usage_known   Bool,
+    truncated     Bool,
+
+    ttft_ms        Int64,
+    duration_ms    Int64,
+    streamed       Bool,
+
+    -- One skip index per query the ordering key cannot serve, and no others.
+    --
+    -- The metering audit groups by endpoint. Endpoint is not in the ordering key
+    -- because putting it there would break the tenant-then-model grouping that
+    -- two of the three questions depend on.
+    INDEX idx_endpoint endpoint TYPE set(256) GRANULARITY 4
+)
+ENGINE = MergeTree
+-- Date first, then the two columns every question groups by.
+--
+-- ClickHouse has no secondary index in the relational sense: a query reads a
+-- prefix of the ordering key and scans everything else. Putting tenant or model
+-- first would make the leading column useless for every query that starts with
+-- a date range -- which is all of them. So a month-long close prunes to that
+-- month before it looks at any other column.
+--
+-- There is deliberately no pre-aggregated projection here. One was written and
+-- then measured: reading the projection's query cost the same rows as reading the
+-- table, because the projection's GROUP BY names an alias and the planner
+-- matches on the expression. It was removed rather than left in place, since a
+-- projection that silently does nothing still costs a write amplification and
+-- disk on every insert while making the schema look optimised.
+--
+-- What was measured instead, on a real server: the ordering key's date prefix
+-- reads one granule of three for a one-hour range, and idx_endpoint appears in
+-- the plan for the audit query.
+PARTITION BY toYYYYMM(occurred_at)
+ORDER BY (toDate(occurred_at), tenant, model)
+SETTINGS index_granularity = 8192`},
+}
+
+// Migrate creates the schema, reporting which statement failed.
+//
+// A partial schema is worse than none here: it would make queries fail in ways
+// that look like missing data. So a failure is loud and the statements stop.
+func (s *Store) Migrate(ctx context.Context) error {
+	if err := s.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+s.db); err != nil {
+		return fmt.Errorf("creating the database: %w", err)
+	}
+	for _, stmt := range ddl {
+		if err := s.Exec(ctx, stmt.query); err != nil {
+			return fmt.Errorf("creating the %s: %w", stmt.name, err)
+		}
+	}
+	return nil
+}

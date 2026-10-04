@@ -22,6 +22,14 @@ import (
 // at read time would attribute last month's usage to whichever project the key
 // points at now.
 type Record struct {
+	// LedgerID is the authoritative row id, once the ledger has assigned one.
+	//
+	// It is zero before the insert and filled afterwards, which is why the
+	// detail mirror carries it separately from the record's content: a
+	// reconciliation compares two stores by identity, and matching on content
+	// would report a difference whenever two identical requests happened.
+	LedgerID int64
+
 	Tenant  string
 	Project string
 	KeyID   string
