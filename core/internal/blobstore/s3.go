@@ -12,9 +12,16 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// S3Config points at any S3-compatible endpoint. MinIO, Ceph RGW, R2, Spaces
-// and AWS S3 all satisfy it, which is why the type is S3 and not MinIO: the
-// alternative to running MinIO is running something that speaks to MinIO.
+// S3Config points at any S3-compatible endpoint. Ceph RGW, R2, Spaces, AWS S3
+// and SeaweedFS all satisfy it, which is why the type is S3 and not the name of
+// any one product.
+//
+// The client library is minio-go despite that. It is an S3 client, not a MinIO
+// binding, and the alternative -- the AWS SDK -- is orders of magnitude larger
+// for the same six operations. That this is safe rather than convenient was not
+// assumed: scripts/s3-smoke.sh runs the whole path against SeaweedFS, a
+// different implementation, so the code is known not to depend on one server's
+// quirks.
 type S3Config struct {
 	Endpoint  string
 	Bucket    string

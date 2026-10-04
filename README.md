@@ -292,19 +292,24 @@ upstreams:
     api_key: ""                       # the engine's key, not a tenant's
 ```
 
-### Against MinIO or S3
+### Against an object store
 
 The control plane uses a directory when `FLEET_S3_ENDPOINT` is unset, and any
-S3-compatible endpoint when it is set:
+S3-compatible endpoint when it is set — Ceph RGW, R2, Spaces, AWS S3, and
+anything else that answers the S3 API:
 
 ```sh
 export FLEET_S3_ENDPOINT=127.0.0.1:9000
-export FLEET_S3_BUCKET=fleet
-export FLEET_S3_ACCESS_KEY=minioadmin
-export FLEET_S3_SECRET_KEY=minioadmin
+export FLEET_S3_BUCKET=fleet-weights
+export FLEET_S3_ACCESS_KEY=fleetadmin
+export FLEET_S3_SECRET_KEY=fleet-secret-key-01
 export FLEET_S3_USE_SSL=false
 fleet-apiserver --listen :8081
 ```
+
+To try it locally, `./scripts/install-objectstore.sh` stands up SeaweedFS in
+WSL and `./scripts/s3-smoke.sh` drives the whole path against it: a real pull
+off huggingface.co, the objects counted back out, and the cancel path.
 
 The `FLEET_S3_` prefix deliberately shadows the `AWS_` names: a process that
 also talks to AWS must not pick up Fleet's bucket by accident.

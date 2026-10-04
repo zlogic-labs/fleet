@@ -14,7 +14,8 @@ import (
 //
 // S3 wins when an endpoint is configured; otherwise a directory under --data.
 // The fallback is deliberate: an operator evaluating Fleet should be able to
-// pull a small model and see the whole path work before standing up MinIO, and
+// pull a small model and see the whole path work before standing up an object
+// store, and
 // a single-node install is a legitimate deployment, not a mistake.
 func openStore() (blobstore.Store, error) {
 	if os.Getenv("FLEET_S3_ENDPOINT") != "" {

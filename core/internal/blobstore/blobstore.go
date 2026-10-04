@@ -4,7 +4,8 @@
 // 140 GiB of blobs, and what an operator needs from storage is a prefix, not
 // rows. The interface is deliberately small — put, get, list, delete, stats —
 // because everything above it (the registry, the puller, the deployment
-// planner) should not care whether the bytes live in S3, MinIO, or a directory.
+// planner) should not care whether the bytes live in an object store or a
+// directory on disk.
 package blobstore
 
 import (
