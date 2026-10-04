@@ -35,6 +35,7 @@ type flags struct {
 	dataDir        string
 	hubURL         string
 	hubToken       string
+	adminToken     string
 	pullConc       int
 	fileConc       int
 	allowedOrigins []string
@@ -53,8 +54,19 @@ func run() error {
 		"address to serve the management API on")
 	fs.StringVar(&f.databaseURL, "database", envOr("FLEET_DATABASE_URL", ""),
 		"PostgreSQL URL; without one the control plane runs but has no tenancy")
+	fs.StringVar(&f.adminToken, "admin-token", envOr("FLEET_ADMIN_TOKEN", ""),
+		"bearer token guarding every management route; required unless bound to loopback. "+
+			"The gateway and the console must be given the same value")
+	// Defaults to true, unlike the same flag on fleet-gateway, and the difference
+	// is deliberate rather than an oversight: this is the management process, so
+	// it is the one an operator starts by hand and the one that owns the
+	// database in a single-node deployment. The gateway is on the request path,
+	// runs several replicas in production, and should not need DDL privileges
+	// to serve a completion — so it defaults to off. Same variable, two
+	// defaults, one stated reason.
 	fs.BoolVar(&f.migrate, "database-migrate", envBool("FLEET_DATABASE_MIGRATE", true),
-		"create the schema at startup; IF NOT EXISTS only creates what is absent")
+		"create the schema at startup; IF NOT EXISTS only creates what is absent. "+
+			"Defaults on here and off in fleet-gateway, which should not hold DDL privileges")
 	fs.StringVar(&f.dataDir, "data", envOr("FLEET_DATA_DIR", "./fleet-data"),
 		"directory for the local object store, used when no S3 endpoint is configured")
 	fs.StringVar(&f.hubURL, "hub", envOr("FLEET_HUB_URL", "https://huggingface.co"),
@@ -65,6 +77,12 @@ func run() error {
 		"how many pulls may run at once")
 	fs.IntVar(&f.fileConc, "file-concurrency", 3,
 		"how many files within one pull may download at once")
+	// Seeded from the environment because cors.go documents
+	// FLEET_ALLOWED_ORIGINS and nothing read it: the flag was a Func, so it had
+	// no envOr default, and an operator following the documentation got
+	// loopback-only CORS. Passing the flag still wins, since Func runs after
+	// this assignment.
+	f.allowedOrigins = apiserver.CorsOrigins(envOr("FLEET_ALLOWED_ORIGINS", ""))
 	fs.Func("allowed-origins", "comma-separated CORS origins; empty allows loopback only",
 		func(v string) error {
 			f.allowedOrigins = apiserver.CorsOrigins(v)
@@ -128,7 +146,13 @@ func run() error {
 	var costStore *sqlstore.CostStore
 	if db != nil {
 		policySource = sqlstore.NewPolicySource(db, ratelimit.Policy{})
-		keyStore = sqlstore.NewKeyStore(db, sqlstore.NewTTLCache(5*time.Minute, 4096))
+		// The same TTL the gateway uses, and deliberately so: this process mints and
+		// revokes keys, so a stale entry here is an operator who deleted a leaked
+		// credential and finds it still working. The 5 minutes this used to carry
+		// was ten times the staleness budget NewTTLCache documents, in the one
+		// binary where a long cache is a security problem rather than a saving.
+		// The limit is left to NewTTLCache's own default rather than restated.
+		keyStore = sqlstore.NewKeyStore(db, sqlstore.NewTTLCache(30*time.Second, 0))
 		quotaStore = sqlstore.NewQuota(db)
 		costStore = sqlstore.NewCostStore(db)
 	}
@@ -140,6 +164,7 @@ func run() error {
 		PullConcurrency: f.pullConc,
 		FileConcurrency: f.fileConc,
 		AllowedOrigins:  f.allowedOrigins,
+		AdminToken:      f.adminToken,
 		Version:         version,
 		DB:              db,
 		Policies:        policySource,

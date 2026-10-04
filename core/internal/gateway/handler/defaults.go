@@ -21,7 +21,15 @@ func withDefaults(opts ChatOptions, tokens tokenizer.Resolver) ChatOptions {
 		opts.SampleBuffer = 32
 	}
 	if opts.DefaultMaxTokens <= 0 {
-		opts.DefaultMaxTokens = 1024
+		// The same figure config.go configures, reached from the other
+		// direction. It was 1024 here, which is a second and unstated answer
+		// to "what may one request cost": in the gateway the config always
+		// wins, so it only ever applied to a caller constructing a handler
+		// directly — and a library caller is exactly who would read 1024 as
+		// Fleet's position on the question.
+		//
+		// The number lives in one place. If you change it, change it here.
+		opts.DefaultMaxTokens = 4096
 	}
 	if opts.Tokens == nil {
 		// Settlement counts an unreported answer with this. A nil here would

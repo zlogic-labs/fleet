@@ -65,11 +65,27 @@ func rewriteServerError(resp *http.Response) error {
 	return nil
 }
 
+// readBody reads a failing response's body and closes the original.
+//
+// Closing is not optional housekeeping: every caller replaces resp.Body with
+// the bytes it just read, so the original is dropped without being closed and
+// the connection behind it is never released. net/http only reclaims it from a
+// finalizer, so a burst of engine errors — exactly when the gateway is busiest
+// — leaks a connection per request until the GC happens to run.
+//
+// A body longer than the limit is not drained to the end, so the connection
+// will not be reused and is closed rather than returned to the pool. That is
+// the right outcome: it is an HTML error page from something in the way, and
+// half-reading it is not worth holding a connection open for.
 func readBody(resp *http.Response) ([]byte, error) {
 	if resp.Body == nil {
 		return nil, nil
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	// Closed on the way out whatever happened above. A partial read is still a
+	// read, and the caller has what it needs either way.
+	_ = resp.Body.Close()
+	return body, err
 }
 
 func truncate(b []byte, n int) []byte {

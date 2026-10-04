@@ -88,11 +88,16 @@ func (p *Puller) Run(ctx context.Context, job *registry.Pull) error {
 	// pins to it.
 	prefix := blobstore.Prefix(owner, name, repo.Resolved)
 	format := weights.Of(paths(repo))
-	// Whatever the operator asked for at queue time, and nothing else. The
-	// entry written when the pull was queued is the only place a real
-	// encoding name can come from; inventing one here would override it with
-	// a guess that the gateway cannot use.
-	prev, _ := p.Store.GetModel(ctx, name)
+	// The qualified name, not the bare one. Every entry in the registry is
+	// keyed owner/name — startPull stores it that way and UpsertModel below
+	// writes to it — so looking up `name` alone found nothing, ever, and prev
+	// was silently the zero Model. That made the tokenizer carry-over below
+	// dead code: the one place a real encoding name could be inherited from,
+	// reading an empty string every time.
+	//
+	// The error is dropped deliberately: a first pull has no prior entry, and
+	// there is nothing to report for one.
+	prev, _ := p.Store.GetModel(ctx, owner+"/"+name)
 	tokenizer := tokenizerFor(format, prev.Tokenizer)
 	job.Commit = repo.Resolved
 	job.Prefix = prefix.String()

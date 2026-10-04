@@ -25,8 +25,14 @@ var usageMarker = []byte(`"usage"`)
 // assumed the opposite failed, which is how it was found.
 
 // DefaultRetainCap bounds how many response bytes the tap keeps for a
-// non-streaming parse. Beyond it the tap stops accumulating and the billing
-// layer falls back to the P6 policy, which caps the request at max_tokens.
+// non-streaming parse.
+//
+// Past it the tap keeps nothing more to parse. It does not mean the request is
+// billed at max_tokens any more — that comment sat here until the tap learned
+// to count the forwarded text, and by then it described the opposite of the
+// code. It now means the token count for such a request comes from the engine's
+// own usage, which arrives in the final frames as ordinary deltas rather than
+// as part of the body being parsed.
 const DefaultRetainCap = 1 << 20
 
 // Tap observes a proxied response without altering a single byte the client

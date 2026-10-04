@@ -123,6 +123,39 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 
 `usage_events.truncated` 记录某个 counted 答案是否撞到了 tap 的 256 KiB 上限。这样的行是**下界**，混进总数会系统性偏低，核对时明确跳过并说明原因，而不是当成 metering 故障让运维去查一个不存在的问题。
 
+#### 控制面为什么需要自己的凭证（`FLEET_ADMIN_TOKEN`）
+
+租户 key 是**花钱的凭证**，它不能设价格、发别的 key、也不能关账。所以管理 API 用的是另一把 token，**并且在绑定到非回环地址时强制要求**——`fleet-apiserver` 监听 `0.0.0.0:8081` 而没有 token 时**拒绝启动**，不是打个警告继续跑。
+
+这不是理论上的加固。在加这一层之前，控制面的路由表上只有 `cors`/`requestLog`/`recoverer` 三个中间件，`/api/v1/*` 全部裸露。对着一台真实部署实测的完整攻击链是：
+
+```
+POST /api/v1/tenants          → 201   凭空建一个租户
+POST /api/v1/projects         → 201   凭空建一个项目
+POST /api/v1/keys             → 201   返回明文 sk-fleet-…，可直接用
+POST   /v1/chat/completions   → 200   以该租户身份跑通推理，烧真 GPU
+POST /api/v1/cost-rates       → 200   把所有租户的 GPU 小时费率改成 1
+```
+
+五步，全部无凭据。CORS 对此**毫无帮助**——它约束的是浏览器 JS，`curl` 不带 `Origin`，根本不经过它。
+
+三条取舍：
+1. **绑回环时不要求 token**。gateway 和控制面同机的部署是最常见形态，为此加一道配置摩擦是错的。
+2. **probes 留在守卫外**（`/healthz`、`/readyz`）。kubelet 没法带 bearer token，把 liveness 放在鉴权后面会让一个健康的服务被判死——gateway 之前已经踩过这个坑。
+3. **一个共享 token，不做角色表**。受众本来就小：能碰到控制面的人已经能碰机器。per-role 权限是企版能力（§13），在这里自己造一套 RBAC 反而会立刻分叉。
+
+控制台用**独立的**凭证字段（Settings → Control plane token）。此前它把租户 key 发给管理路由，在无人校验时无害，在有人校验之后就是运维自己的控制台被运维自己的 key 拒掉。
+
+#### 撤销与过期必须在查找里读，不能在之后过滤
+
+`DELETE /api/v1/keys/*` 写的是 `revoked_at = now()`，而认证查询当时只按 `key_hash` 匹配——**撤销之后凭据照常有效**。同一处查询里过期判断写成了 `time.Now().Before(*expiresAt)`，即"现在早于过期时间"，返回的却是"已过期"。
+
+两处都是**在真实部署上实测**的，不是读代码推断：真库上 `DELETE` 返回 204"成功"，紧接着用被撤销的 key 打 `/v1/chat/completions` 得到 **200，跑通了推理**。密钥轮换在事故中等于无效。
+
+**为什么两处一起藏了这么久**：内存版 `authn.MemoryKey.Valid` 判断是对的，于是任何"和内存版对照"的测试都发现不了；而 `expires_at` 至今没有任何 Go 代码写入，所有行都是 NULL，那个分支从来没带非空值跑过。**这类 bug 只有对真库跑才看得见**，所以对应测试必须带 `FLEET_TEST_DATABASE_URL`。
+
+`scripts/smoke.sh` 里**没有**这条断言，而且是刻意的：脚本里唯一开鉴权的网关（:8099）用 `FLEET_API_KEYS` 内存 store，而控制面签发的 key 在 PostgreSQL 里、由另一个 store 解析——把它发给 :8099 会因**错误的理由**被拒，断言会在撤销失效时照样通过。真正的覆盖在 `keys_revoke_test.go`，对着真库跑。
+
 ### P7 · Gateway 与 Kubernetes 解耦
 
 `core` 模块不依赖任何 k8s 库。这不是洁癖：gateway 镜像要小、启动要快、贡献者不该为了改一个 handler 而下载整个 k8s.io。

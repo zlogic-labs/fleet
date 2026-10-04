@@ -726,6 +726,17 @@ else
   check "the key list never carries the secret" "False" \
     "$(curl -sS "$API/keys?project=$T%2Fresearch" | jqp "'secret' in d[0]")"
 
+  # Revocation is deliberately NOT checked here, and the reason is worth
+  # knowing rather than papering over: the only gateway in this script that
+  # authenticates (:8099) resolves keys from FLEET_API_KEYS in memory, while
+  # the key above lives in PostgreSQL and is resolved by a different store
+  # entirely. Sending it to :8099 would be refused for the wrong reason and the
+  # check would pass while revocation was broken — which is exactly what it did
+  # before, silently, for months.
+  #
+  # The real coverage is keys_revoke_test.go, against a live PostgreSQL. It is
+  # named here so the next person looking for a smoke check finds the truth.
+
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/budget-rules" \
     -H 'content-type: application/json' \
     -d "{\"scopeKind\":\"tenant\",\"scopeId\":\"$T\",\"dimension\":\"tokens_total\",\"limit\":5000,\"window\":\"5h\"}")

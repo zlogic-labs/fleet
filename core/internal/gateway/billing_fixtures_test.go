@@ -31,6 +31,10 @@ func buildBilling(t *testing.T, db *sqlstore.DB, engineURL, label string) (http.
 	return buildBillingTokenLimit(t, db, 1_000_000, engineURL, label)
 }
 
+// buildBillingTokenLimit builds a gateway for a tenant whose per-minute token
+// ceiling is tokenLimit. It does not set DefaultMaxTokens, so a test that
+// reasons about the reservation must use buildPricedWiredWithMax instead of
+// arriving here and inheriting whatever the handler defaults to.
 func buildBillingTokenLimit(t *testing.T, db *sqlstore.DB, tokenLimit int,
 	engineURL, label string) (http.Handler, string) {
 	t.Helper()
@@ -78,11 +82,26 @@ func buildBudgetedTokens(t *testing.T, db *sqlstore.DB, tokens int64, engineURL,
 // billing tests need one and the auth tests do not care.
 func buildPricedWired(t *testing.T, db *sqlstore.DB, engineURL string) http.Handler {
 	t.Helper()
+	return buildPricedWiredWithMax(t, db, engineURL, 0)
+}
+
+// buildPricedWiredWithMax builds the same gateway with an explicit
+// DefaultMaxTokens. A zero means "whatever the handler defaults to", which is
+// right for tests that are not about the reservation.
+//
+// Tests that are about the reservation must set it. That one did not, and its
+// arithmetic depended on the handler's default happening to sit in a narrow
+// window -- so changing that default from 1024 to 4096, which is what the
+// configuration says a request may cost, silently turned a test about refunds
+// into a test about the limit.
+func buildPricedWiredWithMax(t *testing.T, db *sqlstore.DB, engineURL string, maxTokens int) http.Handler {
+	t.Helper()
 	cfg := Config{
 		Listen: "127.0.0.1:0", MaxBodyMB: 1,
-		Auth:      AuthConfig{Required: true},
-		Database:  DatabaseConfig{URL: "postgres://configured-but-unused"},
-		Upstreams: []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: engineURL}},
+		DefaultMaxTokens: maxTokens,
+		Auth:             AuthConfig{Required: true},
+		Database:         DatabaseConfig{URL: "postgres://configured-but-unused"},
+		Upstreams:        []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: engineURL}},
 	}
 	h, _, err := Build(cfg, db, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {

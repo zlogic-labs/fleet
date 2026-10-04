@@ -90,6 +90,25 @@ export function setApiKey(value: string) {
   localStorage.setItem('fleet.apiKey', value);
 }
 
+/**
+ * The control plane's own credential.
+ *
+ * Separate from the tenant key because it is a different job. A tenant key may
+ * spend money; the admin token may set the price, issue other keys and close a
+ * billing period. Sending the tenant key to those routes was harmless while
+ * nothing checked it, and wrong the moment something did — the operator's own
+ * key would have been refused by the operator's own console.
+ *
+ * It follows its origin, so an operator configures each host once.
+ */
+export function controlToken(): string {
+  return localStorage.getItem('fleet.controlToken') || '';
+}
+
+export function setControlToken(value: string) {
+  localStorage.setItem('fleet.controlToken', value);
+}
+
 async function toError(res: Response): Promise<ApiError> {
   let message = res.statusText || `HTTP ${res.status}`;
   let code = '';
@@ -117,7 +136,7 @@ interface RequestOptions {
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, group = 'control', signal } = opts;
   const base = group === 'gateway' ? origins.gateway : origins.control;
-  const key = apiKey();
+  const key = group === 'gateway' ? apiKey() : controlToken();
 
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';

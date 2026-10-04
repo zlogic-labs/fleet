@@ -21,9 +21,16 @@ type HTTP struct {
 	// Transport is shared across requests so a pull of a large repository
 	// reuses connections instead of handshaking per file.
 	Transport http.RoundTripper
-	// MaxConcurrent bounds simultaneous file downloads. The Hub rate-limits
-	// anonymous traffic hard, and a 40-file repository fired in parallel is a
-	// reliable way to get a 429 halfway through a 140 GiB pull.
+	// MaxConcurrent sizes the connection pool. It is not the download
+	// concurrency bound, which lives in the puller and is what the operator
+	// sets with -file-concurrency; this only decides how many idle connections
+	// are kept warm for that many workers.
+	//
+	// The comment here used to claim to bound simultaneous downloads, and
+	// nothing consulted it. The operator's flag help still says "file
+	// downloads are bounded", which was true of the puller and misleading
+	// next to this field. The bound is a puller concern because it is a
+	// semaphore over in-flight work; this is a pool size.
 	MaxConcurrent int
 }
 

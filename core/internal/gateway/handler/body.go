@@ -10,9 +10,15 @@ import "bytes"
 // without reading the reservation logic around it.
 
 // includeUsageField is what Fleet inserts so that a streamed completion
-// carries token counts at all. Without it the engine sends deltas only, the
-// response is unbillable, and P6 forces the gateway to charge max_tokens —
-// which is worse for the customer than Fleet setting the flag itself.
+// carries token counts at all. Without it the engine sends deltas only and
+// there is nothing to bill against.
+//
+// It matters far less than it used to. Before the tap learned to count the
+// text it forwards, an engine that ignored the flag meant billing the
+// reservation — charging max_tokens for a two-token answer. That is gone: an
+// unreported answer is now measured from the payload we already have. The flag
+// still goes in, because the engine's own figure is the better one when it
+// exists and this is how we find out whether it does. See tap_text.go.
 const includeUsageField = `"stream_options":{"include_usage":true}`
 
 // ensureIncludeUsage returns body with stream_options.include_usage set.

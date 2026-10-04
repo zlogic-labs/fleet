@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,19 +20,31 @@ import (
 // books out of Postgres and hands back a *billing.Pricer, and the refresh
 // cadence is a policy decision rather than a fact of the schema.
 
-// PriceStore reads price books and caches the ones in force.
-type PriceStore struct {
-	db *DB
-	// pricer is the last successfully built pricer. Kept across a failed
-	// refresh so that a brief database outage prices at yesterday's rate
-	// rather than refusing every request.
+// prices is one consistent view of the books in force.
+//
+// The three values belong together and are swapped together. They were three
+// separate fields, written by Refresh and read by Pricer and BookID on every
+// settled request, with no lock anywhere: two concurrent settlements both saw
+// a stale timestamp and both replaced the fields, and a reader could see a new
+// pricer with the previous map. That map is the worse half — reading a Go map
+// while another goroutine writes it is a panic, not a stale value, and the
+// gateway panics on a price refresh under load.
+type priceSnapshot struct {
 	pricer *billing.Pricer
 	// ids maps model to the id of the effective book, which the ledger records
 	// so a row points at the exact prices that were applied.
 	ids  map[string]string
 	load time.Time
-	// every is the reload interval. A price change should reach running
-	// gateways without a restart, but not on every request.
+}
+
+// PriceStore reads price books and caches the ones in force.
+type PriceStore struct {
+	db *DB
+	// mu guards held. It is never held across the query in Refresh: a reload
+	// is I/O, and blocking every settlement on it would turn a slow price
+	// lookup into a slow gateway.
+	mu    sync.RWMutex
+	held  priceSnapshot
 	every time.Duration
 }
 
@@ -39,7 +53,11 @@ func NewPriceStore(db *DB, every time.Duration) *PriceStore {
 	if every <= 0 {
 		every = time.Minute
 	}
-	return &PriceStore{db: db, every: every, ids: map[string]string{}}
+	return &PriceStore{
+		db:    db,
+		every: every,
+		held:  priceSnapshot{ids: map[string]string{}},
+	}
 }
 
 // Refresh rebuilds the pricer from every model's currently effective book.
@@ -55,6 +73,15 @@ func NewPriceStore(db *DB, every time.Duration) *PriceStore {
 // exists to make impossible. The previous pricer survives, so the failure is
 // loud and the gateway keeps working.
 func (s *PriceStore) Refresh(ctx context.Context) error {
+	// A missing pool is reported, not dereferenced. pgxpool's methods panic
+	// on a nil receiver rather than returning an error, so this is the one
+	// path through the store that crashes the process instead of failing a
+	// request -- and it is reached exactly when configuration is incomplete,
+	// which is when a confusing stack trace helps least.
+	if s.db == nil || s.db.pool == nil {
+		return errors.New("postgres: read price books: no database connection pool")
+	}
+
 	const q = `
 		SELECT id, model, input_rate, output_rate, cached_rate, reasoning_rate
 		  FROM price_books
@@ -98,9 +125,12 @@ func (s *PriceStore) Refresh(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("postgres: build price book: %w", err)
 	}
-	s.pricer = billing.NewPricer(book)
-	s.ids = ids
-	s.load = time.Now()
+	// Swapped in one assignment under a short lock. The query above ran
+	// unlocked on purpose: holding a write lock across a database round trip
+	// would serialise every settlement behind it.
+	s.mu.Lock()
+	s.held = priceSnapshot{pricer: billing.NewPricer(book), ids: ids, load: time.Now()}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -110,12 +140,27 @@ func (s *PriceStore) Refresh(ctx context.Context) error {
 // background refresh has no request to fail on: if it stopped, the gateway
 // would keep pricing at yesterday's rate and nothing would say so.
 func (s *PriceStore) Pricer(ctx context.Context) (*billing.Pricer, error) {
-	if s.pricer == nil || time.Since(s.load) > s.every {
-		if err := s.Refresh(ctx); err != nil && s.pricer == nil {
-			return nil, err
+	if s.stale() {
+		if err := s.Refresh(ctx); err != nil {
+			// Fatal only while there is nothing to fall back on.
+			s.mu.RLock()
+			first := s.held.pricer == nil
+			s.mu.RUnlock()
+			if first {
+				return nil, err
+			}
 		}
 	}
-	return s.pricer, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.held.pricer, nil
+}
+
+// stale reports whether the held books should be reloaded.
+func (s *PriceStore) stale() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.held.pricer == nil || time.Since(s.held.load) > s.every
 }
 
 // Charge implements billing.Pricer.
@@ -139,7 +184,11 @@ func (s *PriceStore) Charge(ctx context.Context, model string, u openai.Usage) (
 // Empty when the model has no book, which the ledger stores as NULL. It exists
 // so a ledger row points at the exact prices applied rather than at a model
 // name whose price may since have changed.
-func (s *PriceStore) BookID(model string) string { return s.ids[model] }
+func (s *PriceStore) BookID(model string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.held.ids[model]
+}
 
 // Predict implements billing.PricerSource.
 //

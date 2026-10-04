@@ -99,12 +99,19 @@ func (s *KeyStore) lookup(ctx context.Context, key string) (authn.Principal, err
 	//
 	// The project is read as its name, not its id, because the limiter keys on
 	// the name and because the name is what the tenant recognises in a bill.
+	//
+	// revoked_at is part of the lookup, not a filter applied afterwards. A
+	// revoked key is one the operator deleted while answering an incident, and
+	// the whole point of the delete is that it stops working immediately —
+	// checked here rather than after the read, there is no window in which a
+	// revocation is accepted from the client and not yet from the store.
 	const q = `
 		SELECT k.id, k.tenant_id, p.name, k.label, k.expires_at, t.active
 		  FROM api_keys k
 		  JOIN projects p ON p.id = k.project_id
 		  JOIN tenants  t ON t.id = k.tenant_id
-		 WHERE k.key_hash = $1`
+		 WHERE k.key_hash = $1
+		   AND k.revoked_at IS NULL`
 
 	row := s.db.pool.QueryRow(ctx, q, HashKey(key))
 	err := row.Scan(&p.KeyID, &p.Tenant, &p.Project, &label, &expiresAt, &active)
@@ -117,7 +124,15 @@ func (s *KeyStore) lookup(ctx context.Context, key string) (authn.Principal, err
 	if !active {
 		return authn.Principal{}, errs.PermissionDenied("the tenant is deactivated")
 	}
-	if expiresAt != nil && time.Now().Before(*expiresAt) {
+	// Expired means now is at or past the expiry. Spelled as the negation of
+	// "still valid" rather than as an After test so it cannot come out
+	// backwards: this was `Before`, which is true while the key is still good,
+	// so setting an expiry in the future would have locked every key out and
+	// an expired one would have stayed usable forever.
+	//
+	// None is not expired. That is the only state any key is in today, which
+	// is why this went unnoticed until something could set the column.
+	if expiresAt != nil && !time.Now().Before(*expiresAt) {
 		return authn.Principal{}, errs.PermissionDenied("the API key has expired")
 	}
 	if label != "" {

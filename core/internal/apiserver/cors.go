@@ -34,7 +34,11 @@ func cors(allowed []string) func(http.Handler) http.Handler {
 				// without naming it here the preflight fails and every
 				// management call is blocked.
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+				// PUT closes a billing period and PATCH scales a deployment.
+				// Leaving either out means the browser's preflight refuses the
+				// one call that matters most, with an error that points at the
+				// network rather than at the allowlist.
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}
 			if r.Method == http.MethodOptions {

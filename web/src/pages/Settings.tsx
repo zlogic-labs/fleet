@@ -1,21 +1,34 @@
 import { Alert, Button, Drawer, Form, Input, Space, Typography } from 'antd';
 
-import { origins, setApiKey, setOrigin, apiKey } from '../api/client';
+import {
+  apiKey,
+  controlToken,
+  origins,
+  setApiKey,
+  setControlToken,
+  setOrigin,
+} from '../api/client';
 
 const { Paragraph, Text } = Typography;
 
 /**
- * Where the gateway and the control plane live.
+ * Where the gateway and the control plane live, and the credential for each.
  *
  * They are separate settings because they are separate processes: the gateway
  * is the data plane and the control plane is the management API. In the common
  * case the console is served by the gateway itself and the control plane is on
  * 8081, but an operator running them apart needs to say so.
+ *
+ * The two credentials are separate for the same reason, and it is not a
+ * formality: the tenant key may spend money, and the control plane's token may
+ * set the price, issue keys and close a billing period. One field for both would
+ * mean either over-granting the data plane or under-granting the control plane.
  */
 interface SettingsValues {
   gateway: string;
   control: string;
   apiKey?: string;
+  controlToken?: string;
 }
 
 export function Settings({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -25,6 +38,7 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
     setOrigin('gateway', values.gateway);
     setOrigin('control', values.control);
     setApiKey(values.apiKey ?? '');
+    setControlToken(values.controlToken ?? '');
     onClose();
     // A reload is the honest way to re-probe both origins; a partial refresh
     // would leave one page's data from a different server.
@@ -48,6 +62,7 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
           gateway: origins.gateway || window.location.origin,
           control: origins.control,
           apiKey: apiKey(),
+          controlToken: controlToken(),
         }}
         onFinish={save}
       >
@@ -69,8 +84,16 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
           <Input placeholder="http://127.0.0.1:8081" />
         </Form.Item>
 
-        <Form.Item name="apiKey" label="API key" extra="Sent as a bearer token to both.">
+        <Form.Item name="apiKey" label="API key" extra="Sent as a bearer token to the gateway, to spend as a tenant.">
           <Input.Password placeholder="sk-..." autoComplete="off" />
+        </Form.Item>
+
+        <Form.Item
+          name="controlToken"
+          label="Control plane token"
+          extra="FLEET_ADMIN_TOKEN. Needed unless the control plane is bound to loopback."
+        >
+          <Input.Password placeholder="operator token" autoComplete="off" />
         </Form.Item>
 
         <Space>

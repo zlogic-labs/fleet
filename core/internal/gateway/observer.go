@@ -116,23 +116,15 @@ func (o *observer) served(rec billing.Record, duration, ttft float64, streamed b
 	}
 }
 
-// refused records a turn-away. The reasons are a closed set; adding one is a
-// deliberate act, which is the only defence against a reason that is really an
-// error message.
+// refused records a turn-away.
+//
+// The reasons themselves live in the handler package, as handler.Reason*
+// constants, and are not repeated here. They used to be: this file carried its
+// own copy, nine constants with four extras, referenced by nothing, and both
+// comments claimed to be the closed set. A second copy of a closed set is not
+// a closed set — adding a reason to the real one silently does nothing here,
+// and nothing reads here to notice.
 func (o *observer) refuse(reason string) { o.refused.Inc(reason) }
-
-// Refusal reasons.
-const (
-	reasonRateLimited  = "rate_limited"
-	reasonBudget       = "budget_exhausted"
-	reasonNoEndpoint   = "no_endpoint"
-	reasonBadRequest   = "bad_request"
-	reasonUpstream     = "upstream"
-	reasonBodyTooLarge = "body_too_large"
-	reasonUnauthorized = "unauthorized"
-	reasonStoreFailed  = "budget_store_unavailable"
-	reasonInternal     = "internal"
-)
 
 // publishEndpoints publishes the routable set and each endpoint's last scraped load.
 //

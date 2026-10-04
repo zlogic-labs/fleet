@@ -21,10 +21,14 @@ CLUSTER_NAME=${CLUSTER_NAME:-k3s-dev}
 APISERVER=http://127.0.0.1:8081
 # The console and the control plane are bound to the wildcard address because
 # WSL's localhost forwarding is unreliable here, and a browser on Windows that
-# cannot reach the server looks exactly like the server being down. This is the
-# address they are reached on: the vEthernet adapter, which is host-local, so
-# this exposes them to this machine and not to the network it sits on. Set
-# FLEET_API_KEYS before exposing them anywhere else.
+# cannot reach the server looks exactly like the server being down. Print the
+# WSL address at the end so you know what to open.
+#
+# Note that a wildcard bind is every interface, not the vEthernet one — the
+# earlier comment here said otherwise, and it was wrong. The control plane
+# refuses to start on a wildcard bind without an admin token, which is what
+# keeps this from being a mistake; the gateway still needs FLEET_API_KEYS set
+# before it is reachable by anything but this machine.
 WSL_ADDR=${WSL_ADDR:-$(hostname -I | awk '{print $1}')}
 UNIT_DIR=/etc/systemd/system
 SKIP_OPERATOR=
@@ -106,6 +110,43 @@ DATABASE_ARG=
 if [ -n "${DATABASE_URL:-}" ]; then
   DATABASE_ARG=" --database $DATABASE_URL"
 fi
+
+# The admin token, generated once and reused.
+#
+# The control plane is bound to the wildcard address, and it holds the price
+# book, the tenant table and the key issuer — so it refuses to start without
+# this. That refusal is the point: a control plane listening on 0.0.0.0 with no
+# token lets anything that can open a socket create a tenant, mint a working
+# API key and rewrite what everyone is billed.
+#
+# It is written to a file rather than passed on the command line, because
+# ExecStart= is world-readable through ps. The file is 0600, which is what the
+# unit files themselves are not.
+#
+# Set ADMIN_TOKEN to choose it yourself; otherwise one is generated and kept, so
+# a reinstall does not invalidate a token the console already has.
+if [ -z "${ADMIN_TOKEN:-}" ]; then
+  if [ -s "$FLEET_HOME/state/admin.token" ]; then
+    ADMIN_TOKEN=$(cat "$FLEET_HOME/state/admin.token")
+  else
+    ADMIN_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '=+/' | cut -c1-40)
+  fi
+fi
+mkdir -p "$FLEET_HOME/state"
+umask 077
+printf '%s' "$ADMIN_TOKEN" > "$FLEET_HOME/state/admin.token"
+chmod 600 "$FLEET_HOME/state/admin.token"
+umask 022
+# Three names, one secret. Each process in this install is a separate module --
+# the operator is a different repository -- so each keeps its own variable name
+# rather than depending on the control plane's. The install script is the one
+# place that knows they are the same value.
+cat > "$FLEET_HOME/state/admin.env" <<ENV
+FLEET_ADMIN_TOKEN=$ADMIN_TOKEN
+FLEET_CONTROL_PLANE_TOKEN=$ADMIN_TOKEN
+FLEET_REPORT_TOKEN=$ADMIN_TOKEN
+ENV
+chmod 600 "$FLEET_HOME/state/admin.env"
 if [ -n "$SKIP_OPERATOR" ]; then
 cat > "$UNIT_DIR/fleet-upstream.service" <<EOF
 [Unit]
@@ -156,6 +197,8 @@ if [ -z "$SKIP_OPERATOR" ]; then
 cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
 Environment=FLEET_CONTROL_PLANE_URL=$APISERVER
 Environment=FLEET_CONTROL_PLANE_REFRESH=5s
+# The same token, so endpoint discovery is not silently failing with a 401.
+EnvironmentFile=$FLEET_HOME/state/admin.env
 EOF
 else
 cat >> "$UNIT_DIR/fleet-gateway.service" <<EOF
@@ -176,6 +219,9 @@ Description=Fleet control plane
 After=k3s.service
 
 [Service]
+# The token comes from a 0600 file rather than the command line: ExecStart= is
+# visible to every local user through ps, and this credential can mint keys.
+EnvironmentFile=$FLEET_HOME/state/admin.env
 ExecStart=$FLEET_HOME/bin/fleet-apiserver --listen 0.0.0.0:8081 \\
   --allowed-origins http://$WSL_ADDR:8080 --data $FLEET_HOME/weights --hub stub${DATABASE_ARG}
 Restart=always
@@ -193,6 +239,11 @@ After=k3s.service fleet-apiserver.service
 
 [Service]
 Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+# The same credential as the control plane, for the same reason it is in a 0600
+# file rather than on the command line. Without it the inventory PUT is
+# refused and the console's cluster page silently empties -- a page that looks
+# broken rather than a 401 that names the cause.
+EnvironmentFile=$FLEET_HOME/state/admin.env
 ExecStart=$FLEET_HOME/bin/fleet-operator \\
   --metrics-bind-address :9090 --health-probe-bind-address :9091 --namespace $NS \\
   --report-to $APISERVER --report-every 5s --cluster-name $CLUSTER_NAME
@@ -239,3 +290,9 @@ for u in $UNITS; do
 done
 printf '\n  console  http://%s:8080\n' "$WSL_ADDR"
 printf '  control  http://%s:8081/api/v1\n' "$WSL_ADDR"
+# Printed because the console needs it and there is nowhere else an operator
+# would look: the console's Settings drawer asks for a "Control plane token",
+# and this file is where it came from. Mode 600, so this is the one place it
+# is disclosed.
+printf '\n  console token  %s\n' "$ADMIN_TOKEN"
+printf '  (Settings -> Control plane token; stored in this browser only)\n'

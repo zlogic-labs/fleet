@@ -47,8 +47,16 @@ type Config struct {
 	FileConcurrency int
 	// AllowedOrigins is the CORS allowlist. Empty means loopback only.
 	AllowedOrigins []string
-	Version        string
-	Edition        string
+	// AdminToken guards every management route. It is deliberately separate
+	// from a tenant key: a tenant may spend, and this may set the price, mint
+	// keys and close an invoice.
+	//
+	// Optional only on a loopback listen address. A server bound to the
+	// wildcard without one would hand the whole money surface of the platform
+	// to anything that can open a socket, so NewServer refuses that instead.
+	AdminToken string
+	Version    string
+	Edition    string
 }
 
 const apiPrefix = "/api/v1"
@@ -86,6 +94,17 @@ type Server struct {
 func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, error) {
 	if store == nil {
 		store = registry.NewMemory()
+	}
+	// Fail closed. A control plane bound to anything but this machine, with no
+	// admin token, is not a misconfiguration to warn about at runtime — it is a
+	// server where anyone who can open a socket can mint a credential, set a
+	// price and close a billing period. Refusing to start is the only answer
+	// that cannot be discovered after the fact.
+	if cfg.AdminToken == "" && listensOffHost(cfg.Listen) {
+		return nil, errs.InvalidArgument(
+			"apiserver: listening on %s exposes tenants, keys and billing to the network, "+
+				"so an admin token is required; set FLEET_ADMIN_TOKEN, or bind 127.0.0.1:8081",
+			cfg.Listen)
 	}
 	// The database is optional. Without one the gateway, the console and the
 	// pull queue all work; only tenancy is missing, and its routes say so
@@ -137,6 +156,13 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/readyz", s.ready)
 
 	r.Route(apiPrefix, func(r chi.Router) {
+		// Everything under the API prefix carries money or credentials, so
+		// everything under it is behind the admin token — including the
+		// read-only routes. A registry listing is not sensitive on its own,
+		// but an unauthenticated GET that returns 200 while the mutations
+		// return 401 is a map of what is worth attacking.
+		r.Use(requireAdmin(s.cfg.AdminToken))
+
 		// A wildcard, not a named parameter. A model name is owner/name, and
 		// chi's {name} and {name:.+} both stop at the first slash, so
 		// GET /models/Qwen/Qwen2.5 would 404 while

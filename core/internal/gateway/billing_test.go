@@ -172,8 +172,12 @@ func TestAResponseWithNoTextFallsBackToTheReservation(t *testing.T) {
 // reservation instead of the result would let two such requests exhaust a
 // tenant's minute that can hold a hundred of them.
 //
-// The limit is chosen so the two behaviours differ: the reservation alone
-// exceeds it, so a gateway that fails to refund refuses the second request.
+// The two numbers are chosen so the behaviours differ, and both are stated here
+// rather than inherited: a reservation of 1024 against a limit of 2000 means
+// one request fits, two do not. A gateway that refunds passes; one that settles
+// the reservation refuses the second request. The reservation is set
+// explicitly for exactly that reason — while it came from the handler's
+// default, the test measured the default rather than the refund.
 func TestARequestIsRefundedWhatItDidNotSpend(t *testing.T) {
 	db := wireDB(t)
 	truncateWired(t, db)
@@ -181,7 +185,9 @@ func TestARequestIsRefundedWhatItDidNotSpend(t *testing.T) {
 
 	var calls atomic.Int64
 	up := fakeEngine(t, &calls)
-	h, key := buildBillingTokenLimit(t, db, 2000, up.URL, "refund")
+	seedTenant(t, db, "acme", 100, 2000)
+	key := seedKey(t, db, "acme", "research", "refund")
+	h := buildPricedWiredWithMax(t, db, up.URL, 1024)
 
 	for i := 0; i < 2; i++ {
 		w := post(h, key, req)
