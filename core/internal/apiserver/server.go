@@ -183,7 +183,7 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/pulls", s.startPull)
 		r.Get("/pulls", s.listPulls)
 		r.Get("/pulls/{id}", s.getPull)
-		r.Delete("/pulls/{id}", s.cancelPull)
+		r.Patch("/pulls/{id}", s.patchPull)
 
 		r.Get("/storage", s.storageInfo)
 

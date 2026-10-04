@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,11 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/weights"
 )
+
+// ErrNotReady marks a registry entry whose weights are not stored yet. Its own
+// sentinel because "download it first" and "that name does not exist" call for
+// opposite operator actions, and both used to answer 400.
+var ErrNotReady = errors.New("weights are not stored yet")
 
 // Verify checks that the stored objects satisfy the engine that will load
 // them.
@@ -29,7 +35,7 @@ func (p *Puller) Verify(ctx context.Context, name, engineName string) (found int
 		return 0, nil, err
 	}
 	if mdl.State != registry.StateReady {
-		return 0, nil, fmt.Errorf("model %s is %s, not ready", name, mdl.State)
+		return 0, nil, fmt.Errorf("model %s is %s, not ready: %w", name, mdl.State, ErrNotReady)
 	}
 	if err := engine.Compatible(mdl.Format, engineName); err != nil {
 		return 0, nil, fmt.Errorf("%s: %w", name, err)

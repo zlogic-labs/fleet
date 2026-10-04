@@ -1,10 +1,12 @@
 package apiserver
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zlogic-labs/fleet/core/internal/registry"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
@@ -63,7 +65,12 @@ func (s *Server) getRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	found, missing, err := s.puller.Verify(r.Context(), name, engineName)
 	if err != nil {
-		openai.WriteError(w, errs.InvalidArgument("%s", err))
+		// Three different failures arrive on one path and they are not the same
+		// event: the name is not in the registry, the entry exists but its weights
+		// are not there yet, and the request itself was wrong. Collapsing them
+		// into one 400 makes "you have not downloaded this yet" look like a
+		// client bug, which is the kind of thing an operator files a ticket about.
+		writeVerifyError(w, err)
 		return
 	}
 	// An empty list, not null: the console renders `missing` directly, and
@@ -78,6 +85,26 @@ func (s *Server) getRepository(w http.ResponseWriter, r *http.Request) {
 		"missing": missing,
 		"usable":  len(missing) == 0,
 	})
+}
+
+// writeVerifyError maps a Verify failure onto the status code that describes it.
+//
+// The classification is by sentinel rather than by message text, because a
+// message is written for a human and its wording will change while the meaning
+// will not.
+func writeVerifyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, registry.ErrNotFound):
+		openai.WriteError(w, errs.NotFound("%s", err))
+	case errors.Is(err, ErrNotReady):
+		// 409 rather than 404: the model exists and will be usable once its
+		// pull finishes, so this is a state the caller can wait out.
+		openai.WriteError(w, errs.Conflict("%s", err))
+	default:
+		// A weight format the named engine cannot load, or a blob store that
+		// could not be reached. Both are the caller's problem to notice.
+		openai.WriteError(w, errs.InvalidArgument("%s", err))
+	}
 }
 
 // modelName reads the wildcard tail, unescaped.

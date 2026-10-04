@@ -150,6 +150,14 @@ func NotFound(format string, args ...any) *Error {
 	return New(KindNotFound, "not_found", format, args...)
 }
 
+// Conflict is for a request that is well-formed but cannot be applied to the
+// state as it stands -- an existing record in another state, for instance.
+// It is distinct from InvalidArgument because the two invite opposite recovery:
+// fix the request, or wait for the other actor to finish.
+func Conflict(format string, args ...any) *Error {
+	return New(KindConflict, "conflict", format, args...)
+}
+
 func Unavailable(format string, args ...any) *Error {
 	return New(KindUnavailable, "service_unavailable", format, args...)
 }

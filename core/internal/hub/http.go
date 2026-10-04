@@ -109,19 +109,23 @@ func (h *HTTP) Resolve(ctx context.Context, owner, name, revision string) (Repo,
 
 // listFiles expands the repository at a commit into downloadable files.
 //
-// Sizes are not in the listing, because the listing is served from a manifest
-// that does not record them for git-lfs objects. The Hub's tree API does, so
-// that is where the numbers come from: progress reporting without real sizes
-// is progress reporting that lies.
+// The Hub's tree API answers with a JSON array of entries, each carrying a type
+// of "file" or "directory". This used to decode it as the {"siblings": [...]}
+// object that the model-info endpoint returns, which fails against every real
+// repository. Nothing caught it because the stub hub implements Hub directly and
+// never speaks HTTP, so this decoding path had no test at all -- every local run
+// bypassed the exact code that production depends on.
+//
+// Recursive listings include directory entries, and a directory has no size. Left
+// in, they become zero-byte downloads that fail partway through a pull.
 func (h *HTTP) listFiles(ctx context.Context, owner, name, revision string) ([]File, error) {
-	var tree struct {
-		Siblings []struct {
-			Path string `json:"path"`
-			Size int64  `json:"size"`
-			LFS  struct {
-				Size int64 `json:"size"`
-			} `json:"lfs"`
-		} `json:"siblings"`
+	var tree []struct {
+		Type string `json:"type"`
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+		LFS  struct {
+			Size int64 `json:"size"`
+		} `json:"lfs"`
 	}
 	endpoint := fmt.Sprintf("/api/models/%s/%s/tree/%s?recursive=true",
 		url.PathEscape(owner), url.PathEscape(name), url.PathEscape(revision))
@@ -130,8 +134,11 @@ func (h *HTTP) listFiles(ctx context.Context, owner, name, revision string) ([]F
 	}
 
 	base := h.base()
-	files := make([]File, 0, len(tree.Siblings))
-	for _, s := range tree.Siblings {
+	files := make([]File, 0, len(tree))
+	for _, s := range tree {
+		if s.Type != "" && s.Type != "file" {
+			continue
+		}
 		size := s.Size
 		lfs := false
 		if s.LFS.Size > 0 {

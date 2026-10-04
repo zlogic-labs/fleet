@@ -103,6 +103,22 @@ func (f *FS) List(_ context.Context, prefix string, limit int) ([]Object, error)
 	var out []Object
 	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			// A path that is not there is not an error. S3 says so --
+			// ListObjectsV2 on a prefix matching no key returns an empty result --
+			// and most prefixes in a real store match nothing, because asking
+			// whether a model is stored is what an operator does before
+			// downloading it. Without this the same Fleet code answers "no such
+			// path" here and "no objects" against S3, so the answer depends on
+			// which backend was configured rather than on what is in it.
+			//
+			// It covers two cases at once: the base directory never existing, and
+			// an entry vanishing mid-walk because a concurrent pull is renaming
+			// files underneath it. A stat of the base before walking would only
+			// handle the first of those, and the second is the one that actually
+			// happens during a pull.
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		if info.IsDir() {

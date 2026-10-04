@@ -116,8 +116,29 @@ func redactToken(p *registry.Pull) *registry.Pull {
 	return &cp
 }
 
-func (s *Server) cancelPull(w http.ResponseWriter, r *http.Request) {
+// patchPull changes a pull's state. Cancel is the only transition, so the body
+// says which one it means rather than the route.
+//
+// This was DELETE /pulls/{id}, which said something false: DELETE means the
+// resource ceases to exist, and a canceled pull is still readable -- knowing what
+// happened to a 9.85 GB download is the whole point of having canceled it. It
+// is a state transition, so it is PATCH, the same verb the deployment scale uses.
+func (s *Server) patchPull(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	var body struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		openai.WriteError(w, errs.InvalidArgument("body is not a pull patch: %s", err))
+		return
+	}
+	if body.State != "canceled" {
+		openai.WriteError(w, errs.InvalidArgument(
+			"a pull can only be patched to %q, not %q", "canceled", body.State))
+		return
+	}
+
 	stopped, err := s.store.CancelPull(r.Context(), id)
 	if err != nil {
 		openai.WriteError(w, errs.NotFound("no pull with id %q", id))

@@ -56,7 +56,13 @@ export const pulls = {
   start: (body: PullRequest) => request<PullJob>(`${BASE}/pulls`, { method: 'POST', body }),
   list: (signal?: AbortSignal) => request<PullJob[]>(`${BASE}/pulls`, { signal }),
   get: (id: string, signal?: AbortSignal) => request<PullJob>(`${BASE}/pulls/${id}`, { signal }),
-  cancel: (id: string) => request<void>(`${BASE}/pulls/${id}`, { method: 'DELETE' }),
+  // Cancel is a state transition, not a deletion: the job stays readable so you
+  // can see what happened to a download you stopped.
+  cancel: (id: string) =>
+    request<void>(`${BASE}/pulls/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'canceled' }),
+    }),
 };
 
 export const storage = {
