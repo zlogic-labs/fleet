@@ -258,6 +258,16 @@ CREATE INDEX IF NOT EXISTS usage_events_model_time_idx
 ALTER TABLE usage_events
     ADD COLUMN IF NOT EXISTS usage_source text NOT NULL DEFAULT 'engine';
 
+-- truncated marks a counted answer that hit the tap's 256 KiB cap. The token
+-- count on such a row is a floor, so it sits below what the engine would have
+-- said for the same request; recording that is what keeps the agreement check
+-- from reporting arithmetic as a metering fault.
+--
+-- False for every existing row, and correctly so: an old row was either the
+-- engine's own figure or a whole-body parse under a cap that predates this.
+ALTER TABLE usage_events
+    ADD COLUMN IF NOT EXISTS truncated boolean NOT NULL DEFAULT false;
+
 -- Reconciliation looks for rows that were charged on something other than the
 -- engine's account and have not been contradicted since. usage_known covers
 -- counted and reserved alike, so a reconcile pass finds both; usage_source is

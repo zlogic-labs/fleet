@@ -321,6 +321,38 @@ export interface CostAdjustment {
   amount: number;
 }
 
+/**
+ * Fleet's own metering, audited against itself.
+ *
+ * `sources` counts settled rows by what they were billed on: `engine` is
+ * measured, `counted` is measured by the gateway, `reserved` is arithmetic.
+ */
+export interface UsageAgreement {
+  period: string;
+  from: string;
+  to: string;
+  asOf: string;
+  sources: Record<'engine' | 'counted' | 'reserved', number> & Record<string, number>;
+  keys: UsageAgreementKey[];
+  /** How many keys are worth stopping for. */
+  faults: number;
+  minSamples: number;
+  tolerancePercent: number;
+}
+
+export interface UsageAgreementKey {
+  endpoint: string;
+  /** counted / engine. Zero when there is nothing to compare. */
+  ratio: number;
+  /** Signed whole percent. The whole engine figure is 0. */
+  percent: number;
+  fault: boolean;
+  reason: string;
+  engineRows: number;
+  countedRows: number;
+  truncatedRows: number;
+}
+
 export interface OpenSpendScope {
   /** "tenant/project", or bare "tenant" when the request carried no project. */
   id: string;

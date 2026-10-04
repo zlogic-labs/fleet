@@ -1,9 +1,10 @@
 import { Alert, App as AntApp, Col, Form, Row } from 'antd';
 import { useCallback, useState } from 'react';
 
-import { costPeriods, costRates } from '../api/control';
+import { costPeriods, costRates, usageAgreement } from '../api/control';
 import { usePoll } from '../hooks';
 import type { CostRate } from '../types';
+import { Agreement } from './cost/Agreement';
 import { PeriodsCard } from './cost/PeriodsCard';
 import { RatesCard } from './cost/RatesCard';
 import { Report } from './cost/Report';
@@ -21,6 +22,7 @@ export function Cost() {
   const { message } = AntApp.useApp();
   const rates$ = usePoll((signal) => costRates.list(signal), 30000);
   const periods$ = usePoll((signal) => costPeriods.list(signal), 30000);
+  const agreement$ = usePoll((signal) => usageAgreement.get(signal), 30000);
   const [open, setOpen] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [rateForm] = Form.useForm<{ cluster: string; gpuHour: number; currency: string }>();
@@ -100,6 +102,8 @@ export function Cost() {
       </Row>
 
       {open && report$.data && <Report report={report$.data} />}
+
+      <Agreement report={agreement$.data} />
     </>
   );
 }

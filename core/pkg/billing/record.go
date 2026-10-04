@@ -44,7 +44,15 @@ type Record struct {
 	UsageKnown bool
 	// UsageSource names where Usage came from.
 	UsageSource Source
-	Amount      Amount
+	// Truncated says a counted answer was longer than the gateway keeps, so
+	// the completion figure is a floor rather than the whole output.
+	//
+	// It is recorded rather than inferred because nothing downstream can
+	// recover it: the row looks identical to a short answer otherwise, and a
+	// floor quietly averaged into a total is the exact failure the agreement
+	// check exists to prevent.
+	Truncated bool
+	Amount    Amount
 
 	TTFT       time.Duration
 	Duration   time.Duration

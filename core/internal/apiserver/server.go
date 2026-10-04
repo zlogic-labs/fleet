@@ -215,6 +215,11 @@ func (s *Server) Handler() http.Handler {
 		// here to close, get or delete, and it answers a question the closed
 		// ones cannot.
 		r.Get("/spend", s.getOpenSpend)
+
+		// Fleet's own metering, audited against itself. Read-only, and not a
+		// sub-resource of anything: it describes the ledger rather than one
+		// tenant, one model or one period.
+		r.Get("/usage-agreement", s.getUsageAgreement)
 	})
 
 	return r

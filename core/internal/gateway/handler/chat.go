@@ -72,25 +72,7 @@ type ChatOptions struct {
 // NewChat builds the handler and its rolling sample log, which the Fleet
 // status endpoint reads.
 func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver, log *slog.Logger, opts ChatOptions) *Chat {
-	if opts.SampleBuffer <= 0 {
-		opts.SampleBuffer = 32
-	}
-	if opts.DefaultMaxTokens <= 0 {
-		opts.DefaultMaxTokens = 1024
-	}
-	if opts.Tokens == nil {
-		// Settlement counts an unreported answer with this, so it is filled
-		// from the resolver the handler already holds rather than trusted to
-		// arrive. A nil here would silently degrade every estimate on an engine
-		// that reports no usage back to billing max_tokens.
-		opts.Tokens = tokens
-	}
-	if opts.Limiter == nil {
-		// An unlimited limiter rather than a nil check on every request: the
-		// handler's hot path should not branch on whether the deployment
-		// configured a limit.
-		opts.Limiter = ratelimit.NewMemory(nil)
-	}
+	opts = withDefaults(opts, tokens)
 	return &Chat{
 		Picker:           p,
 		Proxy:            proxy,

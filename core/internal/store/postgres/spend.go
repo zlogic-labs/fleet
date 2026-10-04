@@ -34,9 +34,16 @@ type Spend struct {
 	// invisible.
 	CachedTokens int64
 	// Estimated is how many of Requests had no engine-reported usage. A
-	// non-zero value means the bill is partly made of max_tokens guesses, which
-	// is a fact the operator needs before they trust the total.
+	// non-zero value means the bill is partly made of counted answers or
+	// max_tokens guesses, which is a fact the operator needs before they trust
+	// the total.
 	Estimated int64
+	// Sources breaks Estimated down by what the figure was measured from.
+	// Without that, "12 estimated requests" cannot be distinguished from "12
+	// requests measured by the gateway", which are very different things to
+	// trust: the first is arithmetic, the second is the fleet's metering
+	// accuracy.
+	Sources map[string]int64
 }
 
 // Window bounds a report.

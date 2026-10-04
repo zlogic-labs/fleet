@@ -43,13 +43,10 @@ type Embeddings struct {
 
 // NewEmbeddings builds the handler over the same billing pieces the chat
 // handler uses, so a deployment cannot end up billing one and forgetting the
-// other.
+// other. The defaults come from the same function for the same reason.
 func NewEmbeddings(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver,
 	log *slog.Logger, opts ChatOptions) *Embeddings {
-
-	if opts.Limiter == nil {
-		opts.Limiter = ratelimit.NewMemory(nil)
-	}
+	opts = withDefaults(opts, tokens)
 	return &Embeddings{
 		Picker:      p,
 		Proxy:       proxy,

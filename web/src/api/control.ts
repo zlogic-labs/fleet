@@ -16,6 +16,7 @@ import type {
   CostPeriodSummary,
   CostReport,
   OpenSpend,
+  UsageAgreement,
 } from '../types';
 
 const BASE = '/api/v1';
@@ -146,4 +147,15 @@ export const costPeriods = {
  */
 export const spend = {
   open: (signal?: AbortSignal) => request<OpenSpend>(`${BASE}/spend`, { signal }),
+};
+
+/**
+ * Fleet's metering against itself: the engine's account of its output next to
+ * the gateway's count of the text it forwarded.
+ *
+ * Read-only and fleet-wide rather than per tenant or per model, because it
+ * describes the ledger rather than anything inside it.
+ */
+export const usageAgreement = {
+  get: (signal?: AbortSignal) => request<UsageAgreement>(`${BASE}/usage-agreement`, { signal }),
 };

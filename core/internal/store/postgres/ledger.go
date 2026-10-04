@@ -43,9 +43,9 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		INSERT INTO usage_events (
 			tenant_id, project_id, key_id, model, endpoint_id, price_book_id,
 			prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
-			amounts_micro, usage_known, usage_source,
+			amounts_micro, usage_known, usage_source, truncated,
 			ttft_ms, duration_ms, streamed, occurred_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id`
 
 	var id int64
@@ -56,7 +56,7 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		r.Model, r.Endpoint, nullIfEmpty(r.PriceBook),
 		r.Usage.PromptTokens, r.Usage.CompletionTokens,
 		r.Usage.CachedPromptTokens(), r.Usage.ReasoningTokens(),
-		int64(r.Amount), r.UsageKnown, sourceOrEngine(r.UsageSource),
+		int64(r.Amount), r.UsageKnown, sourceOrEngine(r.UsageSource), r.Truncated,
 		r.TTFT.Milliseconds(), r.Duration.Milliseconds(), r.Streamed, r.OccurredAt,
 	).Scan(&id)
 	if err != nil {

@@ -845,6 +845,34 @@ else
     "$(curl -sS "$API/cost-periods/1999-01" | jqp "d['adjustmentTotal']")"
 fi
 
+# ── the metering audit ─────────────────────────────────────────────
+# Fleet's own two measurements of output tokens, side by side. The point is
+# not the number this run produces — a fresh ledger has one population and no
+# comparison to make — but that an empty comparison is an empty table and not a
+# null, and that the policy in force is echoed so a finding is reproducible.
+if curl -sS "$API/cost-rates" | grep -q '"code"'; then
+  section "metering agreement (no database; skipped)"
+else
+  section "metering agreement"
+
+  ag=$(curl -sS "$API/usage-agreement")
+  check "the audit answers" "True" "$(printf '%s' "$ag" | jqp "d['period'] is not None")"
+  check "an empty source mix is an object, not null" "True" \
+    "$(printf '%s' "$ag" | jqp "isinstance(d['sources'], dict)")"
+  check "keys are a list rather than null" "True" \
+    "$(printf '%s' "$ag" | jqp "isinstance(d['keys'], list)")"
+  # Both thresholds are echoed, so the same rows under a different policy can be
+  # told apart from the same rows under this one.
+  check "the thresholds in force are reported" "True" \
+    "$(printf '%s' "$ag" | jqp "d['minSamples']>=1 and d['tolerancePercent']>=1")"
+  # Every key carries a reason, so "no findings" is distinguishable from "the
+  # check declined to look".
+  check "every endpoint says why it passed or failed" "True" \
+    "$(printf '%s' "$ag" | jqp "all(k.get('reason') for k in d['keys'])")"
+  check "the fault count matches the table" "True" \
+    "$(printf '%s' "$ag" | jqp "d['faults']==sum(1 for k in d['keys'] if k['fault'])")"
+fi
+
 # ── summary ────────────────────────────────────────────────────────
 printf '\n'
 if [ "$fail" -eq 0 ]; then
