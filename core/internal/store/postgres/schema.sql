@@ -210,11 +210,12 @@ CREATE TABLE IF NOT EXISTS usage_events (
     -- Priced result, in millionths of a quota unit.
     amounts_micro bigint NOT NULL DEFAULT 0,
 
-    -- False when the engine sent no usage and this row is an estimate. P6:
-    -- the estimate is charged at max_tokens and reconciled afterwards, but the
-    -- row records that it was an estimate so a reconciliation query can find
-    -- it instead of it being invisible inside an aggregate.
+    -- usage_known is false when the engine sent no usage at all. What the row
+    -- was charged for instead is named by usage_source, so a report can ask
+    -- how much of the token volume was measured rather than assumed without
+    -- having to guess from the numbers.
     usage_known boolean NOT NULL DEFAULT true,
+    usage_source text    NOT NULL DEFAULT 'engine',
 
     -- Performance, kept with the money because a report grouped by endpoint
     -- wants them and a join would otherwise drop them.
@@ -246,7 +247,21 @@ CREATE INDEX IF NOT EXISTS usage_events_project_time_idx
     WHERE project_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS usage_events_model_time_idx
     ON usage_events (model, occurred_at DESC);
--- Reconciliation looks for estimates it has not yet fixed up.
+
+-- usage_source names what a row was charged on: the engine's own report, the
+-- gateway's count of the answer it forwarded, or the reservation.
+--
+-- An existing row is any one of those and this file cannot know which, so it
+-- gets the default that is right for the overwhelming majority: usage_known was
+-- true for every row written before a column distinguishing them existed, and
+-- those rows really were the engine's own figures.
+ALTER TABLE usage_events
+    ADD COLUMN IF NOT EXISTS usage_source text NOT NULL DEFAULT 'engine';
+
+-- Reconciliation looks for rows that were charged on something other than the
+-- engine's account and have not been contradicted since. usage_known covers
+-- counted and reserved alike, so a reconcile pass finds both; usage_source is
+-- what it reads to tell them apart.
 CREATE INDEX IF NOT EXISTS usage_events_unestimated_idx
     ON usage_events (occurred_at)
     WHERE NOT usage_known;

@@ -104,8 +104,13 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		Budget:           budget,
 	}
 	opts.Observed = obs
-	chat := handler.NewChat(picker, proxy, tokenizer.NewResolver(0), log, opts)
-	embeddings := handler.NewEmbeddings(picker, proxy, tokenizer.NewResolver(0), log, opts)
+	// One resolver for both handlers. It already counted every prompt; now it
+	// also counts every answer an engine declined to report, and two resolvers
+	// would be two chances for the two halves of one request to be measured
+	// with different loaders.
+	tokens := tokenizer.NewResolver(0)
+	chat := handler.NewChat(picker, proxy, tokens, log, opts)
+	embeddings := handler.NewEmbeddings(picker, proxy, tokens, log, opts)
 
 	return routes(routesDeps{
 		log:       log,

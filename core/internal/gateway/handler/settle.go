@@ -13,6 +13,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
+	"github.com/zlogic-labs/fleet/core/pkg/tokenizer"
 )
 
 // Settlement: what a finished request cost, and where that number is recorded.
@@ -37,6 +38,10 @@ type settler struct {
 	Recorder billing.Recorder
 	Budget   quota.Limiter
 	Log      *slog.Logger
+	// Tokens counts an answer the engine declined to report. The same
+	// resolver that counted the prompt, so an estimate and a measurement come
+	// from one tokenizer and cannot disagree about the same request.
+	Tokens tokenizer.Resolver
 
 	// Observed records the request into the process's own metrics. It is the
 	// *only* place a request turns into a monitoring signal, which is why it
@@ -68,6 +73,7 @@ func newSettler(opts ChatOptions, log *slog.Logger) *settler {
 		Recorder: opts.Recorder,
 		Budget:   opts.Budget,
 		Log:      log,
+		Tokens:   opts.Tokens,
 		Observed: opts.Observed,
 	}
 }
@@ -97,23 +103,27 @@ func settleContext(r *http.Request) (context.Context, context.CancelFunc) {
 // tenant's allowance should come back before a price lookup runs. The budget
 // settles immediately after, because by this point the amount is known and
 // leaving a reservation outstanding would spend money that was never used.
+//
+// completion is the requested maximum, and it is only used when there is
+// nothing to count. See measure.
 func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, booking quota.Reservation,
 	ep engine.Endpoint, result transport.Result, promptTokens, completion int, streamed bool) {
 
-	actual := promptTokens + completion
-	if result.UsageKnown && result.Usage != nil {
-		actual = result.Usage.TotalTokens
-	}
+	usage, source := s.measure(ep, result, promptTokens, completion)
+
+	actual := usage.TotalTokens
 	s.Limiter.Settle(r.Context(), reservation, actual)
 
 	rec := billing.Record{
-		Model:      ep.Model,
-		Endpoint:   ep.ID,
-		UsageKnown: result.UsageKnown,
-		TTFT:       result.TTFT,
-		Duration:   result.Duration,
-		Streamed:   streamed,
-		OccurredAt: time.Now(),
+		Model:       ep.Model,
+		Endpoint:    ep.ID,
+		UsageKnown:  result.UsageKnown,
+		UsageSource: source,
+		Usage:       usage,
+		TTFT:        result.TTFT,
+		Duration:    result.Duration,
+		Streamed:    streamed,
+		OccurredAt:  time.Now(),
 	}
 	if p, ok := authn.FromContext(r.Context()); ok {
 		// The ledger records the project *id*, not its bare name, so that
@@ -130,19 +140,6 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 			rec.Project = p.Tenant + "/" + p.Project
 		}
 	}
-	if result.UsageKnown && result.Usage != nil {
-		rec.Usage = *result.Usage
-	} else {
-		// No usage from the engine. The record still has to exist, marked as an
-		// estimate, because the tokens were really spent; charging the
-		// reservation is P6's fallback and reconciliation finds it later.
-		rec.Usage = openai.Usage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completion,
-			TotalTokens:      actual,
-		}
-	}
-
 	settleCtx, cancel := settleContext(r)
 	defer cancel()
 
@@ -187,6 +184,56 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 		return
 	}
 	s.record(settleCtx, rec)
+}
+
+// measure decides what this request is charged for.
+//
+// Three cases, in order of how much they can be trusted:
+//
+//  1. The engine reported usage. That figure is used unchanged, because the
+//     prompt cache the engine counted and the one the gateway would count are
+//     not the same cache.
+//  2. It reported nothing, and there is an answer. Fleet counts the text it
+//     forwarded, with the tokenizer that already counted the prompt. This is
+//     the case that used to bill max_tokens: a client that asked for 4096 and
+//     received forty was charged for 4096, so the error grew with the size of
+//     the request the client declined to bound.
+//  3. It reported nothing and there is no answer either — a stream cut before
+//     any frame, a response with no text at all. The reservation is the only
+//     figure left, so it is used, and the row says so.
+//
+// The prompt is counted by the gateway in every case. That is not a second
+// guess at the engine's accounting: the engine's number is used for the whole
+// request when there is one, and the two are never mixed within a row.
+func (s *settler) measure(ep engine.Endpoint, result transport.Result, promptTokens, completion int) (openai.Usage, billing.Source) {
+	if result.UsageKnown && result.Usage != nil {
+		return *result.Usage, billing.SourceEngine
+	}
+	prompt := promptTokens
+	if result.Text != "" && s.Tokens != nil {
+		n := s.Tokens.Resolve(ep.Model, "").Count(result.Text)
+		if n > 0 {
+			if result.TextTruncated {
+				// A floor, not the whole answer. Naming it here rather than
+				// letting it read as a measurement is the difference between an
+				// honest under-count and an accident that looks exact.
+				s.Log.Warn("the answer was longer than the tap keeps; the token count is a floor",
+					"model", ep.Model, "endpoint", ep.ID, "counted", n)
+			}
+			return openai.Usage{
+				PromptTokens:     prompt,
+				CompletionTokens: n,
+				TotalTokens:      prompt + n,
+			}, billing.SourceCounted
+		}
+	}
+	// No text at all. The tokens may still have been spent, so the row exists
+	// and is charged, at the reservation.
+	return openai.Usage{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      prompt + completion,
+	}, billing.SourceReserved
 }
 
 // record writes the ledger row.

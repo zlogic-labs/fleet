@@ -59,7 +59,7 @@ func (e *Engine) writeStream(w http.ResponseWriter, r *http.Request, req chatReq
 		return
 	}
 
-	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage && !e.cfg.Silent {
 		final := map[string]any{
 			"id": "chatcmpl-devstub", "object": "chat.completion.chunk",
 			"model": req.Model, "choices": []any{}, "usage": e.usage(completion),

@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 )
 
@@ -97,10 +98,16 @@ func TestAnUnpricedModelIsStillRecorded(t *testing.T) {
 	}
 }
 
-// An engine that reports no usage is charged at max_tokens and marked, so
-// reconciliation can find it later rather than it being invisible in an
-// aggregate. This is the P6 fallback.
-func TestAnEngineWithoutUsageIsRecordedAsAnEstimate(t *testing.T) {
+// An engine that reports no usage does not get billed max_tokens.
+//
+// This is the bug the whole change exists for, and it was worse than an
+// inaccuracy: silentEngine answers "ok" — two characters — and the old
+// fallback charged the request's requested maximum, 1024 completion tokens for
+// an answer of one. Every client that sets max_tokens paid for the ceiling it
+// asked for rather than the text it received, and the error grew with the size
+// of the request, which is backwards: the more carefully a caller bounded its
+// output, the more it was overcharged.
+func TestAnEngineWithoutUsageIsChargedForTheAnswerNotTheCeiling(t *testing.T) {
 	db := wireDB(t)
 	truncateWired(t, db)
 	seedPrice(t, db)
@@ -118,10 +125,45 @@ func TestAnEngineWithoutUsageIsRecordedAsAnEstimate(t *testing.T) {
 		t.Error("usage_known is true although the engine reported no usage")
 	}
 	if rec.Usage.TotalTokens == 0 {
-		t.Error("an estimate recorded zero tokens; the spend would be invisible")
+		t.Fatal("an estimate recorded zero tokens; the spend would be invisible")
 	}
-	if rec.Amount <= 0 {
-		t.Errorf("amount = %d — an estimate is still charged at max_tokens", rec.Amount)
+	if rec.UsageSource != billing.SourceCounted {
+		t.Errorf("usage_source = %q, want %q — the gateway counted the answer",
+			rec.UsageSource, billing.SourceCounted)
+	}
+	// "ok" is one token by any tokenizer. The old figure was 1024.
+	if rec.Usage.CompletionTokens > 8 {
+		t.Errorf("charged %d completion tokens for a two-character answer; this is the bug",
+			rec.Usage.CompletionTokens)
+	}
+}
+
+// A response with no text at all still costs money, and the row has to say the
+// figure is a guess. Charging zero would hide the spend; charging the ceiling
+// without saying so would be the bug above wearing a different hat.
+func TestAResponseWithNoTextFallsBackToTheReservation(t *testing.T) {
+	db := wireDB(t)
+	truncateWired(t, db)
+	seedPrice(t, db)
+
+	var calls atomic.Int64
+	up := muteEngine(t, &calls)
+	h, key := buildBilling(t, db, up.URL, "mute")
+
+	if w := post(h, key, req); w.Code != 200 {
+		t.Fatalf("request: %d %s", w.Code, w.Body)
+	}
+
+	rec := onlyRecord(t, db)
+	if rec.UsageSource != billing.SourceReserved {
+		t.Errorf("usage_source = %q, want %q — nothing was countable",
+			rec.UsageSource, billing.SourceReserved)
+	}
+	if rec.Usage.CompletionTokens == 0 {
+		t.Error("a response with no text was charged nothing; the model may still have run")
+	}
+	if rec.UsageKnown {
+		t.Error("usage_known is true although the engine reported nothing")
 	}
 }
 

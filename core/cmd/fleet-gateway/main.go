@@ -21,12 +21,13 @@ import (
 var version = "dev"
 
 type options struct {
-	configPath string
-	listen     string
-	logLevel   string
-	edition    string
-	showVer    bool
-	demo       bool
+	configPath  string
+	listen      string
+	logLevel    string
+	edition     string
+	showVer     bool
+	demo        bool
+	demoNoUsage bool
 }
 
 func parseFlags() options {
@@ -43,6 +44,8 @@ func parseFlags() options {
 		"print the version and exit")
 	flag.BoolVar(&o.demo, "demo", false,
 		"serve a built-in stub engine, for trying the console without a GPU")
+	flag.BoolVar(&o.demoNoUsage, "demo-no-usage", false,
+		"with --demo, answer without a usage object so the gateway counts the answer itself")
 	flag.Parse()
 	return o
 }
@@ -70,7 +73,7 @@ func main() {
 	}
 
 	if opts.demo {
-		stub, err := addStub(&cfg, log)
+		stub, err := addStub(&cfg, log, opts.demoNoUsage)
 		if err != nil {
 			log.Error("could not start the demo engine", "error", err)
 			os.Exit(1)
@@ -94,8 +97,8 @@ func main() {
 // addStub appends a built-in engine so the gateway has something to serve.
 // An operator who already declared upstreams keeps them; the stub is an
 // addition, not a replacement, so --demo is safe on a real config file.
-func addStub(cfg *gateway.Config, log *slog.Logger) (*devstub.Engine, error) {
-	stub, baseURL, err := devstub.Start(devstub.Config{})
+func addStub(cfg *gateway.Config, log *slog.Logger, silent bool) (*devstub.Engine, error) {
+	stub, baseURL, err := devstub.Start(devstub.Config{Silent: silent})
 	if err != nil {
 		return nil, err
 	}

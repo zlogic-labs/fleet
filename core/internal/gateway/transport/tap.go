@@ -45,6 +45,9 @@ type Tap struct {
 	usage    *openai.Usage
 	sawUsage bool
 
+	text     []byte
+	textFull bool
+
 	startedAt time.Time
 	firstByte time.Duration
 	sealed    bool
@@ -61,6 +64,19 @@ type Result struct {
 	TTFT       time.Duration
 	Duration   time.Duration
 	Bytes      int64
+
+	// Text is the answer as it crossed the proxy: the message content, the
+	// reasoning content and any tool-call arguments, concatenated. It exists
+	// for the case where Usage is nil, and the billing layer counts it with the
+	// same tokenizer it counts prompts with.
+	//
+	// It is collected on every response rather than only on the ones that turn
+	// out to lack usage, because a stream reveals that only at its last frame.
+	Text string
+	// TextTruncated says Text stopped at the cap. The count is then a floor
+	// rather than the whole answer, which is the safe direction: it
+	// under-bills instead of billing a client for a length nobody read.
+	TextTruncated bool
 }
 
 // NewTap starts an observation. clock is injectable so tests need not sleep.
@@ -134,6 +150,7 @@ func (t *Tap) drainFrames() {
 		t.buf = t.buf[end:]
 		if data := sseData(frame); len(data) > 0 {
 			t.considerUsage(data)
+			t.considerText(data)
 		}
 	}
 }
@@ -156,7 +173,11 @@ func (t *Tap) seal() {
 		return
 	}
 	t.sealed = true
-	if t.sse || t.truncated || len(t.buf) == 0 || t.sawUsage {
+	if t.sse || t.truncated || len(t.buf) == 0 {
+		return
+	}
+	t.considerText(t.buf)
+	if t.sawUsage {
 		return
 	}
 	var resp openai.ChatResponse
@@ -171,10 +192,12 @@ func (t *Tap) seal() {
 // the P6 fallback, not an error case.
 func (t *Tap) Result() Result {
 	return Result{
-		Usage:      t.usage,
-		UsageKnown: t.sawUsage,
-		TTFT:       t.firstByte,
-		Duration:   t.clock().Sub(t.startedAt),
-		Bytes:      t.bytes,
+		Usage:         t.usage,
+		UsageKnown:    t.sawUsage,
+		TTFT:          t.firstByte,
+		Duration:      t.clock().Sub(t.startedAt),
+		Bytes:         t.bytes,
+		Text:          string(t.text),
+		TextTruncated: t.textFull,
 	}
 }

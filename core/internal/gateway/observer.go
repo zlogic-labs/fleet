@@ -68,8 +68,8 @@ func newObserver(reg *metrics.Registry) *observer {
 		"Millionths of a currency unit, in the price book's currency.",
 		"tenant", "project", "model")
 	o.estimated = reg.Counter("fleet_usage_estimated_total",
-		"Requests settled without an engine-reported usage, and so billed from the reservation.",
-		"tenant", "project", "model")
+		"Requests settled without an engine-reported usage, by what they were billed on instead.",
+		"tenant", "project", "model", "source")
 	o.refused = reg.Counter("fleet_refused_total",
 		"Requests Fleet turned away, by reason. No tenant label: a refusal can happen before there is one.",
 		"reason")
@@ -109,8 +109,10 @@ func (o *observer) served(rec billing.Record, duration, ttft float64, streamed b
 	if !rec.UsageKnown {
 		// Counted separately rather than folded into the token counters: these
 		// tokens are an estimate, and an alert on tokens must be able to say
-		// how much of the total was real.
-		o.estimated.Inc(tenant, project, rec.Model)
+		// how much of the total was real. Split by what it was measured from,
+		// because "the gateway counted the answer" and "we billed the ceiling"
+		// are different problems with different fixes.
+		o.estimated.Inc(tenant, project, rec.Model, string(rec.UsageSource))
 	}
 }
 

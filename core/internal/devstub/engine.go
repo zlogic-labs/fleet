@@ -27,6 +27,13 @@ type Config struct {
 	PromptTokens int
 	// Reply overrides the default answer text.
 	Reply string
+	// Silent answers without a usage object at all.
+	//
+	// It exists because "the engine reports nothing" is a shape the gateway
+	// has to survive and a stub that always reports usage can never produce.
+	// With it on, the gateway counts the answer itself and bills that, which is
+	// the path no amount of testing the happy path would reach.
+	Silent bool
 }
 
 func (c *Config) withDefaults() Config {
@@ -128,7 +135,7 @@ func (e *Engine) serves(model string) bool {
 
 func (e *Engine) writeCompletion(w http.ResponseWriter, req chatRequest) {
 	completion := len(strings.Fields(e.cfg.Reply))
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"id": "chatcmpl-devstub", "object": "chat.completion",
 		"model": req.Model, "created": time.Now().Unix(),
 		"choices": []any{map[string]any{
@@ -136,8 +143,11 @@ func (e *Engine) writeCompletion(w http.ResponseWriter, req chatRequest) {
 			"message":       map[string]any{"role": "assistant", "content": e.cfg.Reply},
 			"finish_reason": "stop",
 		}},
-		"usage": e.usage(completion),
-	})
+	}
+	if !e.cfg.Silent {
+		out["usage"] = e.usage(completion)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (e *Engine) usage(completion int) map[string]any {

@@ -97,7 +97,21 @@ Ray Serve LLM 也不适合做在线 serving 底座：它自带 prefix 感知路�
 
 ### P6 · 不信任客户端上报的 usage
 
-计费的权威来源是引擎返回的 `usage` 字段。客户端请求体里的任何数字都不参与计费。流式中断拿不到 usage 时按 `max_tokens` 封顶并打 `estimated` 标记，事后对账修正。
+计费的权威来源是引擎返回的 `usage` 字段。客户端请求体里的任何数字都不参与计费。
+
+**引擎没报的时候，网关数自己转发出去的那段文本。** 早先的措辞是"只信引擎"，而缺失时的回退是按 `max_tokens` 封顶——实测这是整个系统里最贵的一个错：引擎返回 `{"content":"ok"}`（两个字符，约一个 token），账本记 `completion=1024`、`amounts_micro=2050000`。**误差与请求大小成正比，也就是说越是认真设了 `max_tokens` 的调用方，被多收得越多。**
+
+所以现在有三档，写进 `usage_events.usage_source`：
+
+| | 什么时候 | 依据 |
+|---|---|---|
+| `engine` | 引擎报了 usage | 引擎的账，整个请求都用它，不和网关的计数混 |
+| `counted` | 引擎没报，但有答案 | 网关用**数 prompt 的同一个 tokenizer** 数自己转发的文本：message content、reasoning content、tool-call 参数 |
+| `reserved` | 引擎没报，且没有文本可数（空回答、流在第一帧前就断了） | 预留值，并明确标记 |
+
+`counted` 量的是**载荷**，不是引擎内部账——所以它的误差是百分之几，不是请求上限和实际答案之比。这也解释了为什么它不违反 P6：P6 禁止的是**采信声明**，不是禁止**自己测量**。
+
+`reserved` 单独存在是为了让"我们有多少账单是猜的"有答案，而不是让这一档悄悄变成默认。`fleet_usage_estimated_total` 按 `source` 拆开就是这个问题的答案。
 
 ### P7 · Gateway 与 Kubernetes 解耦
 
@@ -484,7 +498,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 
 **限流先结算。** 它是三步里唯一持锁的一步，而租户的额度应该在它的请求结束那一刻就还回去——一次慢的价格查询不该让租户等完才能继续花钱。
 
-**计价第二，按引擎的 usage。** P6：引擎是 token 的唯一权威，所以价格查不到不会改变"花了多少"，只会改变"值多少"。
+**计价第二，按 P6 定下的那个数。** 引擎报了就是引擎的账，没报就是网关数自己转发出去的文本（见 P6），所以价格查不到不会改变"花了多少"，只会改变"值多少"。
 
 **落账最后。** 它是三步里唯一可能失败的失败，而到这一步已经没有什么可以失败的了。响应此时已经写完。
 
@@ -640,7 +654,7 @@ embedding 请求走和 chat 完全相同的生命周期（预留 → 选副本 �
 | `fleet_request_first_token_seconds` | histogram | 同上 | **只有流式才有** |
 | `fleet_tokens_total` | counter | 同上 + **kind** | 见下 |
 | `fleet_spend_micro_total` | counter | 同上 | 计费口径 |
-| `fleet_usage_estimated_total` | counter | 同上 | 哪些账是估的（P6） |
+| `fleet_usage_estimated_total` | counter | 同上 + **source** | 哪些账是估的（P6）：counted / reserved |
 | `fleet_refused_total` | counter | **reason** | 被拒的原因 |
 | `fleet_endpoints` | gauge | **state** | healthy / unhealthy |
 | `fleet_endpoint_queue_depth` 等 | gauge | endpoint, model | 路由输入 |

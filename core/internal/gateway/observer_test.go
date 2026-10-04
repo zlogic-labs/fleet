@@ -97,10 +97,25 @@ func TestAnEstimatedRequestIsCountedSeparately(t *testing.T) {
 	// real, or it alerts on a number nobody can act on.
 	reg, obs := newTestObserver()
 	obs.Served(record(billing.Record{
-		Usage: openai.Usage{PromptTokens: 10, CompletionTokens: 4096, TotalTokens: 4106},
+		UsageSource: billing.SourceReserved,
+		Usage:       openai.Usage{PromptTokens: 10, CompletionTokens: 4096, TotalTokens: 4106},
 	}), time.Second, -1, false)
-	if got, _ := find(t, reg, "fleet_usage_estimated_total", nil); got != 1 {
+	if got, _ := find(t, reg, "fleet_usage_estimated_total", map[string]string{"source": "reserved"}); got != 1 {
 		t.Errorf("estimated = %v, want 1", got)
+	}
+
+	// A counted answer is measured rather than assumed, and the two are not
+	// the same problem: one is an engine to upgrade, the other is a bug.
+	reg3, obs3 := newTestObserver()
+	obs3.Served(record(billing.Record{
+		UsageSource: billing.SourceCounted,
+		Usage:       openai.Usage{PromptTokens: 10, CompletionTokens: 4, TotalTokens: 14},
+	}), time.Second, -1, false)
+	if got, _ := find(t, reg3, "fleet_usage_estimated_total", map[string]string{"source": "counted"}); got != 1 {
+		t.Errorf("counted = %v, want 1", got)
+	}
+	if got, _ := find(t, reg3, "fleet_usage_estimated_total", map[string]string{"source": "reserved"}); got != 0 {
+		t.Errorf("a counted answer was reported as billed from the reservation: %v", got)
 	}
 
 	reg2, obs2 := newTestObserver()

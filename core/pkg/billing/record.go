@@ -34,19 +34,47 @@ type Record struct {
 	// and is not used to re-price: Amount below is the figure that was charged.
 	PriceBook string
 
-	// Usage is the engine's own report (P6). When UsageKnown is false this is
-	// the estimate the charge was based on, and the row says so so a
-	// reconciliation pass can find it rather than it being invisible inside an
-	// aggregate.
+	// Usage is the tokens this request was charged for. Which of the three
+	// available answers it is, is UsageSource; the two are separate because
+	// "the engine reported nothing" and "the gateway counted the answer" are
+	// different facts about different situations, and a report that wants to
+	// ask how much of the fleet's token volume was measured rather than
+	// assumed needs to be able to tell them apart.
 	Usage      openai.Usage
 	UsageKnown bool
-	Amount     Amount
+	// UsageSource names where Usage came from.
+	UsageSource Source
+	Amount      Amount
 
 	TTFT       time.Duration
 	Duration   time.Duration
 	Streamed   bool
 	OccurredAt time.Time
 }
+
+// Source is where a settled request's token count came from.
+//
+// Three values because there are three situations, and collapsing them loses
+// the only thing an operator can act on: a fleet whose output tokens are mostly
+// counted rather than reported is a fleet whose invoices are mostly estimates,
+// and that is a fact about the engines deployed, not about the tenants using
+// them.
+type Source string
+
+const (
+	// SourceEngine: the engine reported usage and Fleet charged exactly that.
+	SourceEngine Source = "engine"
+	// SourceCounted: the engine reported nothing, so Fleet counted the answer
+	// it forwarded. A measurement of the payload, not a claim about the
+	// engine's internals, and wrong by a percent rather than by the ratio
+	// between the requested maximum and the actual answer.
+	SourceCounted Source = "counted"
+	// SourceReserved: nothing could be counted — a response with no text at
+	// all, or one cut short before any frame arrived — so the request was
+	// charged at what it reserved. The worst of the three and rare; it is
+	// named so that "how often do we bill a guess" has an answer.
+	SourceReserved Source = "reserved"
+)
 
 // Recorder persists a settled record.
 //

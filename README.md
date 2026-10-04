@@ -30,7 +30,7 @@ These are the rules the code is written against. Changing one requires an ADR.
 | **P3** | The gateway owns endpoint selection, because it is the only layer holding token counts and quota state. |
 | **P4** | Fleet owns its CRDs. Upstream operators are rendered to, never adopted as the API. |
 | **P5** | Rate limits are reserved up front and settled after, never deducted after the fact. |
-| **P6** | Only the engine's `usage` field is trusted for billing. |
+| **P6** | Nobody's token *claim* is trusted. The engine's `usage` is used when there is one; otherwise the gateway counts the text it forwarded. |
 | **P7** | The gateway does not depend on Kubernetes. Enforced by the module graph, not by review. |
 | **P8** | Billing allocates a fixed cost pool by GPU-hour; it is not a prepaid balance. |
 

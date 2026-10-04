@@ -136,8 +136,9 @@ func seedPrice(t *testing.T, db *sqlstore.DB) {
 	}
 }
 
-// silentEngine answers with no usage at all, which is what a stream cut short
-// looks like and what P6's fallback exists for.
+// silentEngine answers with text but no usage at all, which is what an engine
+// that honours neither stream_options.include_usage nor a usage field looks
+// like. It is the case the gateway has to measure for itself.
 func silentEngine(t *testing.T, calls *atomic.Int64) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -151,6 +152,22 @@ func silentEngine(t *testing.T, calls *atomic.Int64) *httptest.Server {
 	return s
 }
 
+// muteEngine answers with no usage and no text either: a refusal, an empty
+// completion, or a stream cut before its first frame. There is nothing to
+// count here, so the reservation is the only figure left.
+func muteEngine(t *testing.T, calls *atomic.Int64) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","object":"chat.completion","model":"demo",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":""},` +
+			`"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
 // storedRecord is the ledger row as the assertions want to read it.
 type storedRecord struct {
 	Tenant, Project, KeyID string
@@ -158,6 +175,7 @@ type storedRecord struct {
 	PriceBook              string
 	Amount                 int64
 	UsageKnown             bool
+	UsageSource            billing.Source
 	Usage                  openai.Usage
 }
 
@@ -169,7 +187,7 @@ func onlyRecord(t *testing.T, db *sqlstore.DB) storedRecord {
 	rows, err := db.Pool().Query(context.Background(), `
 		SELECT tenant_id, COALESCE(project_id,''), COALESCE(key_id,''),
 		       model, COALESCE(price_book_id,''), amounts_micro, usage_known,
-		       prompt_tokens, completion_tokens, cached_tokens
+		       usage_source, prompt_tokens, completion_tokens, cached_tokens
 		  FROM usage_events`)
 	if err != nil {
 		t.Fatalf("read the ledger: %v", err)
@@ -180,13 +198,15 @@ func onlyRecord(t *testing.T, db *sqlstore.DB) storedRecord {
 	for rows.Next() {
 		var (
 			r      storedRecord
+			source string
 			cached int
 		)
 		if err := rows.Scan(&r.Tenant, &r.Project, &r.KeyID, &r.Model, &r.PriceBook,
-			&r.Amount, &r.UsageKnown,
+			&r.Amount, &r.UsageKnown, &source,
 			&r.Usage.PromptTokens, &r.Usage.CompletionTokens, &cached); err != nil {
 			t.Fatalf("scan the ledger: %v", err)
 		}
+		r.UsageSource = billing.Source(source)
 		r.Usage.TotalTokens = r.Usage.PromptTokens + r.Usage.CompletionTokens
 		out = append(out, r)
 	}

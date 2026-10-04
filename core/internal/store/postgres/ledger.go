@@ -43,8 +43,9 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		INSERT INTO usage_events (
 			tenant_id, project_id, key_id, model, endpoint_id, price_book_id,
 			prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
-			amounts_micro, usage_known, ttft_ms, duration_ms, streamed, occurred_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			amounts_micro, usage_known, usage_source,
+			ttft_ms, duration_ms, streamed, occurred_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		RETURNING id`
 
 	var id int64
@@ -55,7 +56,7 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		r.Model, r.Endpoint, nullIfEmpty(r.PriceBook),
 		r.Usage.PromptTokens, r.Usage.CompletionTokens,
 		r.Usage.CachedPromptTokens(), r.Usage.ReasoningTokens(),
-		int64(r.Amount), r.UsageKnown,
+		int64(r.Amount), r.UsageKnown, sourceOrEngine(r.UsageSource),
 		r.TTFT.Milliseconds(), r.Duration.Milliseconds(), r.Streamed, r.OccurredAt,
 	).Scan(&id)
 	if err != nil {
@@ -64,11 +65,26 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 	return id, nil
 }
 
-// Reconcile fills in the real token counts for rows written as estimates.
+// sourceOrEngine keeps an unset source out of the table.
+//
+// A zero Source means the caller did not say, which is not the same as saying
+// "the engine reported this". The default is the conservative reading: a row
+// that says nothing is attributed to the engine, so a report counting
+// unmeasured output cannot silently include it.
+func sourceOrEngine(s billing.Source) string {
+	if s == "" {
+		return string(billing.SourceEngine)
+	}
+	return string(s)
+}
+
+// Reconcile replaces an estimate with what the engine later reported.
 //
 // This is the P6 reconciliation: a request whose engine sent no usage was
-// charged at max_tokens, and the difference is returned here rather than being
-// quietly absorbed. The amount is recomputed from the same price book that was
+// charged on the gateway's own count of the answer, and if the count was later
+// contradicted — a reconcile pass, a replay, an engine that was fixed
+// mid-flight — the real figures replace it here rather than being quietly
+// absorbed. The amount is recomputed from the same price book that was
 // recorded, so a price change since the request does not rewrite history.
 //
 // Zero rows affected is not an error: two reconcilers racing is normal, and
@@ -77,11 +93,13 @@ func (l *Ledger) Reconcile(ctx context.Context, id int64, r billing.Record) erro
 	const q = `
 		UPDATE usage_events
 		   SET prompt_tokens = $2, completion_tokens = $3, cached_tokens = $4,
-		       reasoning_tokens = $5, amounts_micro = $6, usage_known = true
+		       reasoning_tokens = $5, amounts_micro = $6, usage_known = true,
+		       usage_source = $7
 		 WHERE id = $1 AND NOT usage_known`
 	if _, err := l.db.pool.Exec(ctx, q, id,
 		r.Usage.PromptTokens, r.Usage.CompletionTokens,
-		r.Usage.CachedPromptTokens(), r.Usage.ReasoningTokens(), int64(r.Amount)); err != nil {
+		r.Usage.CachedPromptTokens(), r.Usage.ReasoningTokens(), int64(r.Amount),
+		sourceOrEngine(r.UsageSource)); err != nil {
 		return fmt.Errorf("postgres: reconcile usage event %d: %w", id, err)
 	}
 	return nil

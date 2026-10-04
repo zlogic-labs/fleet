@@ -61,6 +61,12 @@ type ChatOptions struct {
 	// Observed is nil for a gateway built without a registry, and every
 	// metric call is then a no-op rather than a nil check at each site.
 	Observed Observer
+	// Tokens is the same resolver NewChat was given. It is here because the
+	// settler needs it to count an answer the engine declined to report, and a
+	// gateway that did not measure the prompt cannot measure the output
+	// either — the handler passes it down rather than leaving settlement to
+	// guess.
+	Tokens tokenizer.Resolver
 }
 
 // NewChat builds the handler and its rolling sample log, which the Fleet
@@ -71,6 +77,13 @@ func NewChat(p routing.Picker, proxy *transport.Proxy, tokens tokenizer.Resolver
 	}
 	if opts.DefaultMaxTokens <= 0 {
 		opts.DefaultMaxTokens = 1024
+	}
+	if opts.Tokens == nil {
+		// Settlement counts an unreported answer with this, so it is filled
+		// from the resolver the handler already holds rather than trusted to
+		// arrive. A nil here would silently degrade every estimate on an engine
+		// that reports no usage back to billing max_tokens.
+		opts.Tokens = tokens
 	}
 	if opts.Limiter == nil {
 		// An unlimited limiter rather than a nil check on every request: the
