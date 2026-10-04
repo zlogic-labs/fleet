@@ -20,7 +20,6 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/inventory"
-	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
 // Config is the control plane's configuration.
@@ -202,29 +201,7 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/clusters", s.clusterStatus)
 		r.Get("/deployments", s.listDeployments)
 
-		// Tenancy. Every collection is top-level and plural; an item's id may
-		// contain a slash, so item routes end in "*" rather than "{id}" —
-		// chi's named parameters stop at the first slash, which would make
-		// acme/research unreachable while acme%2Fresearch worked.
-		r.Get("/tenants", s.listTenants)
-		r.Post("/tenants", s.createTenant)
-		r.Get("/tenants/*", s.getTenant)
-		r.Patch("/tenants/*", s.updateTenant)
-		r.Delete("/tenants/*", s.deleteTenant)
-
-		r.Get("/projects", s.listProjects)
-		r.Post("/projects", s.createProject)
-		r.Get("/projects/*", s.getProject)
-		r.Patch("/projects/*", s.updateProject)
-		r.Delete("/projects/*", s.deleteProject)
-
-		r.Get("/keys", s.listKeys)
-		r.Post("/keys", s.createKey)
-		r.Delete("/keys/*", s.deleteKey)
-
-		r.Get("/budget-rules", s.listBudgetRules)
-		r.Post("/budget-rules", s.putBudgetRule)
-		r.Delete("/budget-rules/*", s.deleteBudgetRule)
+		tenancyRoutes(r, s)
 
 		// The cost pool. Rates are what a GPU-hour costs the operator, which
 		// Fleet cannot know; periods are closed reports and are immutable.
@@ -249,19 +226,6 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	return r
-}
-
-func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	// Readiness fails when storage is unreachable. A control plane that cannot
-	// reach its weights cannot start a pull, and a deployment it reports as
-	// healthy will not be able to mount anything.
-	info := s.blobs.Info(r.Context())
-	if !info.Reachable {
-		openai.WriteError(w, errs.Unavailable("object storage is not reachable: %s", info.Message))
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
 }
 
 // ── storage ────────────────────────────────────────────────────

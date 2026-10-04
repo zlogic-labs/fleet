@@ -15,6 +15,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/devstub"
 	"github.com/zlogic-labs/fleet/core/internal/gateway"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
+	"github.com/zlogic-labs/fleet/core/pkg/logconf"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
@@ -58,7 +59,7 @@ func main() {
 		return
 	}
 
-	log := newLogger(opts.logLevel)
+	log := logconf.New(opts.logLevel, logconf.JSON)
 
 	cfg, err := gateway.Load(opts.configPath)
 	if err != nil {
@@ -144,19 +145,4 @@ func waitForShutdown() context.Context {
 		stop()
 	}()
 	return ctx
-}
-
-func newLogger(level string) *slog.Logger {
-	var lv slog.Level
-	switch level {
-	case "debug":
-		lv = slog.LevelDebug
-	case "warn":
-		lv = slog.LevelWarn
-	case "error":
-		lv = slog.LevelError
-	default:
-		lv = slog.LevelInfo
-	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
 }

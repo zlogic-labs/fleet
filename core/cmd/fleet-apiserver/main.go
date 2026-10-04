@@ -5,20 +5,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/apiserver"
-	"github.com/zlogic-labs/fleet/core/internal/blobstore"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
-	"github.com/zlogic-labs/fleet/core/internal/hub"
 	"github.com/zlogic-labs/fleet/core/internal/registry"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
+	"github.com/zlogic-labs/fleet/core/pkg/logconf"
 )
 
 var version = "dev"
@@ -102,7 +99,7 @@ func run() error {
 		return nil
 	}
 
-	log := newLogger(f.logLevel)
+	log := logconf.New(f.logLevel, logconf.Text)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -205,55 +202,4 @@ func run() error {
 		_ = httpSrv.Shutdown(shutdownCtx)
 		return nil
 	}
-}
-
-// openStore picks the object backend.
-//
-// S3 wins when an endpoint is configured; otherwise a directory under --data.
-// The fallback is deliberate: an operator evaluating Fleet should be able to
-// pull a small model and see the whole path work before standing up MinIO, and
-// a single-node install is a legitimate deployment, not a mistake.
-func openStore() (blobstore.Store, error) {
-	if os.Getenv("FLEET_S3_ENDPOINT") != "" {
-		store, err := blobstore.S3FromEnv(context.Background())
-		if err != nil {
-			return nil, fmt.Errorf("configuring S3: %w", err)
-		}
-		return store, nil
-	}
-	dir := envOr("FLEET_DATA_DIR", "./fleet-data")
-	abs, err := filepath.Abs(filepath.Join(dir, "weights"))
-	if err != nil {
-		return nil, err
-	}
-	return blobstore.NewFS(abs)
-}
-
-func pickHub(f flags) (hub.Hub, string) {
-	if f.dev {
-		stub := hub.NewStub()
-		if f.devDelay > 0 {
-			stub.PerFileDelay = f.devDelay
-		}
-		return stub, "synthetic (--dev)"
-	}
-	if f.hubToken != "" {
-		return hub.NewHTTP(f.hubToken, f.fileConc), f.hubURL
-	}
-	return hub.NewHTTP("", f.fileConc), f.hubURL
-}
-
-func newLogger(level string) *slog.Logger {
-	var lvl slog.Level
-	switch level {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
-	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 }
