@@ -69,7 +69,7 @@ func call(t *testing.T, srv *httptest.Server, method, path, token string, body s
 }
 
 func TestAManagementRouteRefusesACallerWithNoToken(t *testing.T) {
-	srv := serverWith(t, Config{AdminToken: probeToken})
+	srv := serverWith(t, Config{AdminTokens: []string{probeToken}})
 
 	// Every verb that changes money or issues a credential. If one of these
 	// answers 200 the exploit still works with a token check bolted on
@@ -92,7 +92,7 @@ func TestAManagementRouteRefusesACallerWithNoToken(t *testing.T) {
 }
 
 func TestAWrongTokenIsRefused(t *testing.T) {
-	srv := serverWith(t, Config{AdminToken: probeToken})
+	srv := serverWith(t, Config{AdminTokens: []string{probeToken}})
 	for _, bad := range []string{"", probeToken + "x", probeToken[:len(probeToken)-1], "Bearer " + probeToken} {
 		code, _ := call(t, srv, "GET", "/api/v1/tenants", bad, "")
 		if code != http.StatusUnauthorized {
@@ -105,7 +105,7 @@ func TestAWrongTokenIsRefused(t *testing.T) {
 // and a bare Authorization value with no scheme. An operator switching between
 // curl and the console should not have to learn two conventions.
 func TestTheRightTokenIsAccepted(t *testing.T) {
-	srv := serverWith(t, Config{AdminToken: probeToken})
+	srv := serverWith(t, Config{AdminTokens: []string{probeToken}})
 
 	// /models rather than /tenants: without a database the tenancy routes
 	// answer 400, and a test that cannot tell 400 from 401 tests nothing.
@@ -141,7 +141,7 @@ func TestTheRightTokenIsAccepted(t *testing.T) {
 // token, so a liveness check behind one reports a healthy server as dead — the
 // gateway already learned that lesson and it applies here unchanged.
 func TestTheProbesStayOpen(t *testing.T) {
-	srv := serverWith(t, Config{AdminToken: probeToken})
+	srv := serverWith(t, Config{AdminTokens: []string{probeToken}})
 	for _, p := range []string{"/healthz", "/readyz"} {
 		if code, _ := call(t, srv, "GET", p, "", ""); code != http.StatusOK {
 			t.Errorf("%s returned %d, want 200 — a probe cannot carry a token", p, code)
@@ -150,7 +150,7 @@ func TestTheProbesStayOpen(t *testing.T) {
 }
 
 func TestAnUnauthorizedAnswerIsAnOpenAIStyleEnvelope(t *testing.T) {
-	srv := serverWith(t, Config{AdminToken: probeToken})
+	srv := serverWith(t, Config{AdminTokens: []string{probeToken}})
 	resp, err := http.Get(srv.URL + "/api/v1/tenants")
 	if err != nil {
 		t.Fatalf("get: %v", err)

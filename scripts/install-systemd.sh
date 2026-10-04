@@ -125,6 +125,10 @@ fi
 #
 # Set ADMIN_TOKEN to choose it yourself; otherwise one is generated and kept, so
 # a reinstall does not invalidate a token the console already has.
+#
+# A comma-separated list is accepted, so an operator can hand a second person
+# their own credential. Revoking one is then an edit and a restart instead of a
+# rotation that invalidates whatever the other is using.
 if [ -z "${ADMIN_TOKEN:-}" ]; then
   if [ -s "$FLEET_HOME/state/admin.token" ]; then
     ADMIN_TOKEN=$(cat "$FLEET_HOME/state/admin.token")
@@ -141,10 +145,15 @@ umask 022
 # the operator is a different repository -- so each keeps its own variable name
 # rather than depending on the control plane's. The install script is the one
 # place that knows they are the same value.
+#
+# The control plane gets the whole list; the gateway and the operator are handed
+# only the first, because one shared credential is enough for a process that
+# reads and reports rather than administers.
+FIRST_TOKEN=${ADMIN_TOKEN%%,*}
 cat > "$FLEET_HOME/state/admin.env" <<ENV
 FLEET_ADMIN_TOKEN=$ADMIN_TOKEN
-FLEET_CONTROL_PLANE_TOKEN=$ADMIN_TOKEN
-FLEET_REPORT_TOKEN=$ADMIN_TOKEN
+FLEET_CONTROL_PLANE_TOKEN=$FIRST_TOKEN
+FLEET_REPORT_TOKEN=$FIRST_TOKEN
 ENV
 chmod 600 "$FLEET_HOME/state/admin.env"
 if [ -n "$SKIP_OPERATOR" ]; then
@@ -294,5 +303,6 @@ printf '  control  http://%s:8081/api/v1\n' "$WSL_ADDR"
 # would look: the console's Settings drawer asks for a "Control plane token",
 # and this file is where it came from. Mode 600, so this is the one place it
 # is disclosed.
-printf '\n  console token  %s\n' "$ADMIN_TOKEN"
+printf '\n  console token  %s\n' "$FIRST_TOKEN"
 printf '  (Settings -> Control plane token; stored in this browser only)\n'
+printf '  to add another operator: ADMIN_TOKEN="%s,<new>" on the next install\n' "$FIRST_TOKEN"

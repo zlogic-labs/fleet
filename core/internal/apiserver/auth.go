@@ -16,23 +16,25 @@ import (
 // key spends money; it does not get to set the price, mint other keys, or close
 // an invoice. An operator does, and an operator is one person or a handful of
 // people who already have shell access — so the audience here is small by
-// construction, and a shared token is the honest shape for it rather than a
-// role table pretending otherwise. Per-role permissions are an enterprise
+// construction, and a flat set of tokens is the honest shape for it rather than
+// a role table pretending otherwise. Per-role permissions are an enterprise
 // capability precisely because they matter at a scale this does not have.
 //
-// One admin token, checked in constant time, with no route-level exemptions
-// beyond the probes.
+// Several tokens rather than one, but still no roles: a shared credential means
+// that one person leaving forces a rotation, and rotation invalidates whatever
+// the others are using at the time. Several tokens turns "you must rotate" into
+// "stop using theirs".
 
-// requireAdmin rejects a request that does not carry the admin token.
+// requireAdmin rejects a request that does not carry one of the admin tokens.
 //
-// Empty token means the caller asserted nothing and is accepted, which is only
-// safe because Config refuses to build a non-loopback server without one. That
-// pairing is the whole safety argument, so the two are asserted together in
-// NewServer rather than left to a comment.
-func requireAdmin(token string) func(http.Handler) http.Handler {
+// No tokens at all means the caller asserted nothing and is accepted, which is
+// only safe because NewServer refuses to build a non-loopback server without
+// one. That pairing is the whole safety argument, so the two are asserted
+// together in NewServer rather than left to a comment.
+func requireAdmin(tokens []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if token != "" && !adminPresented(r, token) {
+			if len(tokens) > 0 && !adminPresented(r, tokens) {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="fleet-control-plane"`)
 				writeError(w, errs.Unauthenticated(
 					"the control plane needs its admin token; set it on both sides"))
@@ -43,19 +45,54 @@ func requireAdmin(token string) func(http.Handler) http.Handler {
 	}
 }
 
-// adminPresented reports whether the request carries the token.
+// adminPresented reports whether the request carries one of the tokens.
 //
-// Constant time so a caller cannot learn the token one byte at a time by
-// timing how long the comparison took. That matters more than usual here: the
-// token is a shared operator credential, and unlike a password it is expected
-// to travel over a plain link on a private network, where an oracle is cheap.
-func adminPresented(r *http.Request, token string) bool {
+// Constant time so a caller cannot learn a token one byte at a time by timing
+// how long the comparison took. That matters more than usual here: an operator
+// credential is expected to travel over a plain link on a private network,
+// where an oracle is cheap.
+//
+// Every token is compared on every request, including after one has matched.
+// Returning at the first match would make the elapsed time say which token
+// matched, and stopping early would make it say how many were tried.
+//
+// Nothing tests that: a short-circuiting guard and this one return the same
+// answer, and the difference is only in how long they take. It is here because
+// the reasoning holds, not because a test failed without it.
+func adminPresented(r *http.Request, tokens []string) bool {
 	got := BearerToken(r)
 	if got == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	match := 0
+	for _, t := range tokens {
+		match |= subtle.ConstantTimeCompare([]byte(got), []byte(t))
+	}
+	return match == 1
 }
+
+// adminTokens drops blank entries.
+//
+// A blank token must not count as configured: "--admin-token ”" would then look
+// like protection while every request is rejected, which reads as a broken
+// install rather than as the misconfiguration it is.
+func adminTokens(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, t := range in {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// adminTokens is the cleaned form the guard and the startup check both use.
+//
+// They have to agree: if the guard saw a blank token as configured it would
+// refuse every request, and if the startup check saw none it would let a
+// wildcard bind through. Cleaning in one place is cheaper than remembering that
+// two places must not drift.
+func (c Config) adminTokens() []string { return adminTokens(c.AdminTokens) }
 
 // BearerToken reads the credential from the three places a client may put one.
 //

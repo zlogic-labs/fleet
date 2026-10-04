@@ -46,16 +46,20 @@ type Config struct {
 	FileConcurrency int
 	// AllowedOrigins is the CORS allowlist. Empty means loopback only.
 	AllowedOrigins []string
-	// AdminToken guards every management route. It is deliberately separate
+	// AdminTokens guards every management route. It is deliberately separate
 	// from a tenant key: a tenant may spend, and this may set the price, mint
 	// keys and close an invoice.
+	//
+	// A set rather than one, and deliberately not roles: a shared credential
+	// means one person leaving forces a rotation, and rotation invalidates what
+	// the others are using. Several tokens turns that into "stop using theirs".
 	//
 	// Optional only on a loopback listen address. A server bound to the
 	// wildcard without one would hand the whole money surface of the platform
 	// to anything that can open a socket, so NewServer refuses that instead.
-	AdminToken string
-	Version    string
-	Edition    string
+	AdminTokens []string
+	Version     string
+	Edition     string
 }
 
 const apiPrefix = "/api/v1"
@@ -99,7 +103,7 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	// server where anyone who can open a socket can mint a credential, set a
 	// price and close a billing period. Refusing to start is the only answer
 	// that cannot be discovered after the fact.
-	if cfg.AdminToken == "" && listensOffHost(cfg.Listen) {
+	if len(cfg.adminTokens()) == 0 && listensOffHost(cfg.Listen) {
 		return nil, errs.InvalidArgument(
 			"apiserver: listening on %s exposes tenants, keys and billing to the network, "+
 				"so an admin token is required; set FLEET_ADMIN_TOKEN, or bind 127.0.0.1:8081",
@@ -160,7 +164,7 @@ func (s *Server) Handler() http.Handler {
 		// read-only routes. A registry listing is not sensitive on its own,
 		// but an unauthenticated GET that returns 200 while the mutations
 		// return 401 is a map of what is worth attacking.
-		r.Use(requireAdmin(s.cfg.AdminToken))
+		r.Use(requireAdmin(s.cfg.adminTokens()))
 
 		// A wildcard, not a named parameter. A model name is owner/name, and
 		// chi's {name} and {name:.+} both stop at the first slash, so

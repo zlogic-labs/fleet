@@ -32,7 +32,7 @@ type flags struct {
 	dataDir        string
 	hubURL         string
 	hubToken       string
-	adminToken     string
+	adminTokens    tokens
 	pullConc       int
 	fileConc       int
 	allowedOrigins []string
@@ -51,9 +51,11 @@ func run() error {
 		"address to serve the management API on")
 	fs.StringVar(&f.databaseURL, "database", envOr("FLEET_DATABASE_URL", ""),
 		"PostgreSQL URL; without one the control plane runs but has no tenancy")
-	fs.StringVar(&f.adminToken, "admin-token", envOr("FLEET_ADMIN_TOKEN", ""),
+	fs.Var(&f.adminTokens, "admin-token",
 		"bearer token guarding every management route; required unless bound to loopback. "+
-			"The gateway and the console must be given the same value")
+			"Repeatable, so one person's departure is a revocation rather than a rotation that "+
+			"breaks everyone else. FLEET_ADMIN_TOKEN may carry a comma-separated list. "+
+			"The gateway and the console must be given one of the same values")
 	// Defaults to true, unlike the same flag on fleet-gateway, and the difference
 	// is deliberate rather than an oversight: this is the management process, so
 	// it is the one an operator starts by hand and the one that owns the
@@ -91,6 +93,7 @@ func run() error {
 		"in --dev, pause this long per file, so a pull is slow enough to watch or cancel")
 	fs.StringVar(&f.logLevel, "log-level", "info", "debug, info, warn or error")
 	fs.BoolVar(&f.showVer, "version", false, "print the version and exit")
+	f.adminTokens.seed("FLEET_ADMIN_TOKEN")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -161,7 +164,7 @@ func run() error {
 		PullConcurrency: f.pullConc,
 		FileConcurrency: f.fileConc,
 		AllowedOrigins:  f.allowedOrigins,
-		AdminToken:      f.adminToken,
+		AdminTokens:     f.adminTokens,
 		Version:         version,
 		DB:              db,
 		Policies:        policySource,
