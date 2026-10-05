@@ -82,12 +82,24 @@ func TestTheSchemaLooksLikeItWasWritten(t *testing.T) {
 		"ORDER BY (toDate(occurred_at), tenant, model)",
 		"PARTITION BY toYYYYMM(occurred_at)",
 		"idx_endpoint",
-		"accounting",
 		"Enum8('engine' = 1, 'counted' = 2, 'reserved' = 3)",
+		// The breakdown has to be nullable or the mirror turns an absent
+		// breakdown into a zero on the way in.
+		"Nullable(Int64)",
 	} {
 		if !contains(created, want) {
 			t.Errorf("the created table does not contain %q", want)
 		}
+	}
+
+	// And it must not contain the projection that was measured to read exactly
+	// as many rows as the table and then removed from the DDL. It sat in this
+	// list for a while, asserting an artefact of an earlier version rather than
+	// the current design -- and it passed, because the shared test database
+	// still had the old projection in it. Asserting its absence is what makes
+	// this test say something about the schema rather than about a leftover.
+	if contains(created, "accounting") {
+		t.Error("the table still carries the projection that was measured to do nothing")
 	}
 }
 

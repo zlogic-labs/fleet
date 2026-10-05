@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/catalog"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/handler"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
@@ -34,7 +35,10 @@ import (
 // exactly the moment nobody is watching; the handler reads through a
 // function instead and the refresher is what makes that function's answer
 // change.
-func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logger, version string) (http.Handler, *catalog.Refresher, error) {
+// sink is the reporting replica, or nil for none. It is a parameter rather
+// than something Build opens, for the same reason db is: Build composes and
+// Run owns the process. A nil is the shape with nothing behind it.
+func Build(cfg Config, db *sqlstore.DB, sink detail.Sink, lic entitlement.License, log *slog.Logger, version string) (http.Handler, *catalog.Refresher, error) {
 	static := staticEndpoints(cfg.Upstreams)
 
 	// Validated here as well as in Load. Load is the path a config file takes,
@@ -102,6 +106,7 @@ func Build(cfg Config, db *sqlstore.DB, lic entitlement.License, log *slog.Logge
 		Pricer:           prices,
 		Recorder:         ledger,
 		Budget:           budget,
+		Detail:           sink,
 	}
 	opts.Observed = obs
 	// One resolver for both handlers. It already counted every prompt; now it
@@ -171,7 +176,23 @@ func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Log
 		defer db.Close()
 	}
 
-	handler, refresher, err := Build(cfg, db, lic, log, version)
+	// Opened before the handler so a misconfigured replica fails the start
+	// rather than the first settlement. Once running it may fail freely: the
+	// queue drops and logs, because the ledger has already been written.
+	detailCtx, cancelDetail := context.WithTimeout(ctx, detailTimeout)
+	sink, closeDetail, err := detailSink(detailCtx, cfg, log)
+	cancelDetail()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := closeDetail(context.WithoutCancel(ctx)); err != nil {
+			log.Warn("the detail store did not close cleanly", "err", err)
+		}
+	}()
+	startBackfill(ctx, db, sink, log)
+
+	handler, refresher, err := Build(cfg, db, sink, lic, log, version)
 	if err != nil {
 		return err
 	}

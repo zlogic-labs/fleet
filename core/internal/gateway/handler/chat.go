@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/routing"
@@ -61,6 +62,8 @@ type ChatOptions struct {
 	// Observed is nil for a gateway built without a registry, and every
 	// metric call is then a no-op rather than a nil check at each site.
 	Observed Observer
+	// Detail mirrors each settled record into the reporting store. Optional.
+	Detail detail.Sink
 	// Tokens is the same resolver NewChat was given. It is here because the
 	// settler needs it to count an answer the engine declined to report, and a
 	// gateway that did not measure the prompt cannot measure the output

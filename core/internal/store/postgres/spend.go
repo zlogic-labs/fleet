@@ -78,7 +78,7 @@ func (db *DB) SpendByTenant(ctx context.Context, tenant string, w Window) ([]Spe
 	}
 	const q = `
 		SELECT COALESCE(project_id, ''), SUM(amounts_micro), COUNT(*),
-		       SUM(prompt_tokens), SUM(completion_tokens), SUM(cached_tokens),
+		       SUM(prompt_tokens), SUM(completion_tokens), COALESCE(SUM(cached_tokens), 0),
 		       COUNT(*) FILTER (WHERE NOT usage_known)
 		  FROM usage_events
 		 WHERE tenant_id = $1 AND occurred_at >= $2 AND occurred_at < $3
@@ -106,7 +106,7 @@ func (db *DB) SpendByScope(ctx context.Context, w Window) ([]Spend, error) {
 		SELECT CASE WHEN project_id IS NULL OR project_id = ''
 		            THEN tenant_id ELSE project_id END AS scope,
 		       SUM(amounts_micro), COUNT(*),
-		       SUM(prompt_tokens), SUM(completion_tokens), SUM(cached_tokens),
+		       SUM(prompt_tokens), SUM(completion_tokens), COALESCE(SUM(cached_tokens), 0),
 		       COUNT(*) FILTER (WHERE NOT usage_known)
 		  FROM usage_events
 		 WHERE occurred_at >= $1 AND occurred_at < $2
@@ -125,7 +125,7 @@ func (db *DB) SpendByModel(ctx context.Context, w Window) ([]Spend, error) {
 	}
 	const q = `
 		SELECT model, SUM(amounts_micro), COUNT(*),
-		       SUM(prompt_tokens), SUM(completion_tokens), SUM(cached_tokens),
+		       SUM(prompt_tokens), SUM(completion_tokens), COALESCE(SUM(cached_tokens), 0),
 		       COUNT(*) FILTER (WHERE NOT usage_known)
 		  FROM usage_events
 		 WHERE occurred_at >= $1 AND occurred_at < $2
@@ -170,6 +170,13 @@ func (db *DB) EstimatedUsage(ctx context.Context, w Window, limit int) ([]int64,
 }
 
 // spend runs one grouped aggregation and scans it.
+//
+// The cached-token column is COALESCEd in the queries above, and that is not
+// tidiness. It is nullable because an engine that reports totals without a
+// breakdown has said nothing, and SUM over a group where every row said
+// nothing is NULL rather than 0. Scanning NULL into an int fails the whole
+// report, so a month served entirely by engines that omit the breakdown -- a
+// real and common month -- would return an error instead of a number.
 //
 // Shared so the three reports cannot drift in what they count: same columns,
 // same FILTER for estimates, same order. A report that counts estimates

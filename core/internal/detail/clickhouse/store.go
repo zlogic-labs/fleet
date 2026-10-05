@@ -154,6 +154,14 @@ func splitURL(raw string) (string, error) {
 // Pool returns the underlying connection, for callers that need a query.
 func (s *Store) Pool() driver.Conn { return s.conn }
 
+// Database is the name this store reads and writes.
+//
+// Exposed because a caller outside the package that builds its own SQL has to
+// qualify its table names, and a hard-coded "fleet_detail" in two places is
+// exactly how a query ends up reading the wrong database after an operator
+// renames one.
+func (s *Store) Database() string { return s.db }
+
 // Close releases the connection.
 func (s *Store) Close() error { return s.conn.Close() }
 

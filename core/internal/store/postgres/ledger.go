@@ -55,7 +55,8 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		// this from the endpoint it actually reached.
 		r.Model, r.Endpoint, nullIfEmpty(r.PriceBook),
 		r.Usage.PromptTokens, r.Usage.CompletionTokens,
-		r.Usage.CachedPromptTokens(), r.Usage.ReasoningTokens(),
+		breakdown(r.Usage.CachedPromptTokens(), r.Usage.PromptTokensDetails != nil),
+		breakdown(r.Usage.ReasoningTokens(), r.Usage.CompletionTokensDetails != nil),
 		int64(r.Amount), r.UsageKnown, sourceOrEngine(r.UsageSource), r.Truncated,
 		r.TTFT.Milliseconds(), r.Duration.Milliseconds(), r.Streamed, r.OccurredAt,
 	).Scan(&id)
@@ -98,7 +99,9 @@ func (l *Ledger) Reconcile(ctx context.Context, id int64, r billing.Record) erro
 		 WHERE id = $1 AND NOT usage_known`
 	if _, err := l.db.pool.Exec(ctx, q, id,
 		r.Usage.PromptTokens, r.Usage.CompletionTokens,
-		r.Usage.CachedPromptTokens(), r.Usage.ReasoningTokens(), int64(r.Amount),
+		breakdown(r.Usage.CachedPromptTokens(), r.Usage.PromptTokensDetails != nil),
+		breakdown(r.Usage.ReasoningTokens(), r.Usage.CompletionTokensDetails != nil),
+		int64(r.Amount),
 		sourceOrEngine(r.UsageSource)); err != nil {
 		return fmt.Errorf("postgres: reconcile usage event %d: %w", id, err)
 	}
@@ -116,4 +119,19 @@ func nullIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// breakdown stores a token sub-count, or NULL when the engine reported none.
+//
+// The value and the presence are separate claims. CachedPromptTokens() returns
+// 0 for an absent breakdown because arithmetic needs a number; writing that 0
+// would turn "the engine said nothing" into "the engine said none", and the
+// fresh/cached split on an invoice would then be a guess wearing a
+// measurement's clothes.
+func breakdown(n int, present bool) *int64 {
+	if !present {
+		return nil
+	}
+	v := int64(n)
+	return &v
 }

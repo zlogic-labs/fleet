@@ -33,8 +33,14 @@ CREATE TABLE IF NOT EXISTS usage_detail
 
     prompt_tokens       Int64,
     completion_tokens  Int64,
-    cached_tokens      Int64,
-    reasoning_tokens   Int64,
+
+    -- Nullable for the same reason the ledger's are: an engine that reports
+    -- totals without a breakdown has said nothing, and a non-nullable column
+    -- here would put the mirror at odds with the book it is supposed to agree
+    -- with -- every reconciliation of the two would then disagree about a row
+    -- where the engine simply omitted a field.
+    cached_tokens      Nullable(Int64),
+    reasoning_tokens   Nullable(Int64),
 
     -- Micro-units, exactly as the ledger stores them. Money is never a float and
     -- never a rounded decimal: a rounding rule that differed between the two
@@ -96,5 +102,39 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("creating the %s: %w", stmt.name, err)
 		}
 	}
+	return s.widen(ctx)
+}
+
+// widen brings an existing table up to the current column types.
+//
+// CREATE TABLE IF NOT EXISTS is "create it if it is missing", not "make it
+// agree". A table written by an earlier version keeps its old shape forever,
+// and the symptom is the mirror quietly disagreeing with the ledger: a nullable
+// breakdown written into a non-nullable column arrives as a zero, so every row
+// whose engine omitted the field reads back as "no cached tokens" -- the exact
+// claim the ledger was changed to stop making.
+//
+// The stale projection has to go first, and not as a formality: ClickHouse
+// refuses to widen a column a projection reads, with CANNOT_CONVERT_TYPE and a
+// message about projection accounting. That projection was measured to read
+// exactly as many rows as the table and then removed from the DDL, so dropping
+// it loses nothing that was ever working.
+//
+// MODIFY COLUMN here rewrites metadata, not parts, which is the same line the
+// ledger's own migrations are drawn on: a statement that does not rewrite data
+// belongs in the schema; one that does belongs in a migration tool.
+func (s *Store) widen(ctx context.Context) error {
+	for _, stmt := range widenDDL {
+		if err := s.Exec(ctx, fmt.Sprintf(stmt.query, s.db)); err != nil {
+			return fmt.Errorf("widening the %s: %w", stmt.name, err)
+		}
+	}
 	return nil
+}
+
+var widenDDL = []struct{ name, query string }{
+	// The projection an earlier version declared and a later one removed.
+	{"stale projection", "ALTER TABLE %s.usage_detail DROP PROJECTION IF EXISTS accounting"},
+	{"usage_detail breakdown", "ALTER TABLE %s.usage_detail MODIFY COLUMN cached_tokens Nullable(Int64)"},
+	{"usage_detail reasoning", "ALTER TABLE %s.usage_detail MODIFY COLUMN reasoning_tokens Nullable(Int64)"},
 }

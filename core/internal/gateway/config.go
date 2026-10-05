@@ -42,6 +42,10 @@ type Config struct {
 	// silently created an empty in-memory store because a URL was mistyped
 	// would refuse every tenant while reporting itself healthy.
 	Database DatabaseConfig `yaml:"database"`
+	// Detail is the reporting replica. Unlike Database this is never required:
+	// the database is the ledger and a gateway without one cannot bill, but the
+	// replica only answers questions the ledger can also answer more slowly.
+	Detail DetailConfig `yaml:"detail"`
 }
 
 // DatabaseConfig points at Fleet's PostgreSQL.

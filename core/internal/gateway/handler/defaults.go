@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/pkg/tokenizer"
 )
@@ -42,6 +43,12 @@ func withDefaults(opts ChatOptions, tokens tokenizer.Resolver) ChatOptions {
 		// handler's hot path should not branch on whether the deployment
 		// configured a limit.
 		opts.Limiter = ratelimit.NewMemory(nil)
+	}
+	if opts.Detail == nil {
+		// The detail store is optional, and no store configured is not a
+		// degraded mode: it is the same shape with nothing behind it. A nil
+		// here would panic inside settlement, on the path that records money.
+		opts.Detail = detail.Nop{}
 	}
 	return opts
 }

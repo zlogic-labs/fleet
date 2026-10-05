@@ -316,14 +316,29 @@ type FleetDeploymentSpec struct {
 | `endpoints` | 运行中的 vLLM 实例：ready、load、affinity 标签 |
 | `clusters` / `nodes` / `gpus` | GPU 库存，`gpus` 含 uuid / 型号 / 显存 / 互联拓扑 |
 | `price_books` | 计价：per 1M tokens，分 in / out / cached |
-| `usage_events` | 权威用量（高量走 ClickHouse，Postgres 只留账本） |
-| `ledger_entries` | **权威账本**，只增不改 |
+| `usage_events` | **权威账本**，只增不改。ClickHouse 里是可重建的明细副本，不是第二个账本 |
+| ~~`ledger_entries`~~ | ~~权威账本~~ —— **不存在**。`usage_events` 就是账本；另起一张名字更好听的表只会让"哪张是权威"变成一个要回答的问题 |
 | `wallets` / `balances` | 内部记账单位余额 |
 | `rate_limit_policies` | ~~限流策略~~ —— **已取消**。限额是 `tenants` 与 `projects` 上的列，不是一张独立表：一个 scope 的限额和它的预算是同一个对象上的两列，分表只会让"这个租户总共能花多少"需要跨表才能回答 |
 
 ### ClickHouse
 
-`usage_events` 明细，按 `(tenant_id, model, toDate(ts))` 排序，用于用量分析和成本报表。Postgres 存聚合后的账本，ClickHouse 存明细，**对账任务比对两者**。
+**Postgres 是账本，ClickHouse 是可以丢的副本。** 顺序不能反：副本丢了可以从账本重建，账本丢了就只能向租户道歉。
+
+副本里放的是用量明细的宽列（端点、模型、租户、口径、TTFT、时长、金额），按 `(toDate(occurred_at), tenant, model)` 排序、按月分区。它**允许丢行** —— 写入走结算路径上的一个有界队列，队列满时丢的是新到的行而不是已记账的行，丢掉的行下一次回填会补上。
+
+写入 `usage_source` 是 `Enum8`（engine / counted / reserved）而不是 String：审计要按它分组，未知的值是一个值得失败的 bug，不是一个值得存下的值。
+
+两个效果是真的、也是当初验证过的：
+
+- **日期前缀让区间查询只读需要的 granule**（一小时区间读 1/3 granule，全扫是 1/1）
+- **端点索引出现在 EXPLAIN 里**（`idx_endpoint`）
+
+曾经还写过一个按天分组的 projection，**实测完全没被用上** —— 读的行数和读主表一模一样，因为 planner 匹配的是表达式而不是别名。已删：静默无效的 projection 按写入放大和磁盘收费，同时让 schema 看起来优化过。
+
+**明细列的可空性和账本一致。** `cached_tokens` / `reasoning_tokens` 在两边都是 nullable：引擎报了总数但没报明细时，它说的是"没说"，不是"缓存 token 为 0"。写成 `NOT NULL DEFAULT 0` 会让账本替所有省略该字段的引擎做这个断言，而发票上的 fresh/cached 拆分就会是一个穿着测量外衣的猜测。
+
+**回填是游标式的**，因为每次启动全扫权威表不可接受：它停在启动时的 `max(id)`，一页一页往前推，每页推进后落盘游标。游标存的是**本页读到的最后一个 id**，不是它的下一个 —— 谓词是 `id > cursor`，本身已经排除了游标，多加一会在每个页边界永久跳过一行，而且没有任何东西会报告这个缺口。
 
 ## 6. 计费模型（核心差异化）
 
@@ -466,7 +481,7 @@ k3s + WSL2，**仅用于控制面开发**。一键脚本：`deploy/k3s-dev/setup
 | 1 | `pkg/*` + `internal/engine` + gateway transport | curl 打到 mock endpoint，SSE 完整透传，usage 能取到 |
 | 2 | auth + 限流 + 配额预留/结算 | 超限返回 429，预留正确回滚（已完成） |
 | 3 | routing：一致性哈希 + 健康 | 同前缀命中同端点，熔断能恢复 |
-| 4 | 计价 + 账本 + ClickHouse | 账实一致，对账任务能跑（计价与 PostgreSQL 账本已落地，ClickHouse 明细与对账任务尚未） |
+| 4 | 计价 + 账本 + ClickHouse | 账实一致（计价与 PostgreSQL 账本已落地；ClickHouse 明细副本、游标回填与一致性核对已落地，**跨库对账任务尚未**） |
 | 5 | fleet-serving：CRD → K8s 原生 Deployment + Service | k3s 上 `kubectl apply` 能起一个引擎（已落地，`make e2e` 18 条断言） |
 | 6 | 成本分摊 + 控制台 | 成本报表数字对得上 |
 | 7 | autoscaling + 调度器 | 队列深度驱动扩缩，无抖动 |

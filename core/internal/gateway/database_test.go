@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 )
@@ -194,7 +195,7 @@ func buildWired(t *testing.T, db *sqlstore.DB, engineURL string) http.Handler {
 		Database:  DatabaseConfig{URL: "postgres://configured-but-unused"},
 		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: engineURL}},
 	}
-	h, _, err := Build(cfg, db, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	h, _, err := Build(cfg, db, detail.Nop{}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
@@ -48,6 +49,11 @@ type settler struct {
 	// is the point at which the model, the tokens and the amount are all known
 	// and consistent with each other.
 	Observed Observer
+
+	// Detail mirrors the record into a store shaped for reporting. It cannot
+	// fail and cannot block: the ledger write above is the authoritative one,
+	// and a reporting replica is not a reason to lose money.
+	Detail detail.Sink
 }
 
 // Observer is the metric surface the handlers write to. Declared here rather
@@ -188,14 +194,15 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 	s.record(settleCtx, rec)
 }
 
-// record writes the ledger row.
+// record writes the ledger row and hands it to the detail mirror.
 //
 // The context is detached from the request on purpose: a client that
 // disconnects mid-stream must not cancel the write of a request that was
 // billed. The work is Fleet's, and the tokens were spent whether or not the
 // caller stayed to hear the answer.
 func (s *settler) record(ctx context.Context, rec billing.Record) {
-	if _, err := s.Recorder.Record(ctx, rec); err != nil {
+	id, err := s.Recorder.Record(ctx, rec)
+	if err != nil {
 		// The one place Fleet loses money by failing. Logged with every
 		// dimension needed to reconstruct the row, because a record that
 		// failed to write is recoverable only by someone who can tell which
@@ -205,7 +212,15 @@ func (s *settler) record(ctx context.Context, rec billing.Record) {
 			"model", rec.Model, "endpoint", rec.Endpoint,
 			"total_tokens", rec.Usage.TotalTokens,
 			"amount_micro", int64(rec.Amount), "err", err)
+		return
 	}
+
+	// The mirror is keyed on the ledger's row id, so it is filled in here
+	// rather than in the recorder: the id is only known after the insert, and a
+	// backfill needs to be able to match the two stores by identity rather than
+	// by content. Two identical requests would otherwise be indistinguishable.
+	rec.LedgerID = id
+	s.Detail.Enqueue(rec)
 }
 
 // outOfBudget answers a refused budget.

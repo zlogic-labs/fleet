@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 )
@@ -131,6 +132,14 @@ func TestAnEngineWithoutUsageIsChargedForTheAnswerNotTheCeiling(t *testing.T) {
 		t.Errorf("usage_source = %q, want %q — the gateway counted the answer",
 			rec.UsageSource, billing.SourceCounted)
 	}
+	// The engine said nothing about cached tokens, so the ledger must store
+	// that it said nothing. Storing zero would be Fleet asserting "no cached
+	// tokens" on the engine's behalf, and every fresh/cached split built from
+	// this row would then be a guess.
+	if rec.Usage.PromptTokensDetails != nil {
+		t.Errorf("a gateway-counted answer came back with a breakdown %+v; it should carry none",
+			rec.Usage.PromptTokensDetails)
+	}
 	// "ok" is one token by any tokenizer. The old figure was 1024.
 	if rec.Usage.CompletionTokens > 8 {
 		t.Errorf("charged %d completion tokens for a two-character answer; this is the bug",
@@ -208,7 +217,7 @@ func TestNoDatabaseMeansNoLedgerAndStillServes(t *testing.T) {
 		Auth:      AuthConfig{Required: true, Keys: []string{"acme/research/k"}},
 		Upstreams: []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: up.URL}},
 	}
-	h, _, err := Build(cfg, nil, entitlement.Community(), discardLogger(), "test")
+	h, _, err := Build(cfg, nil, detail.Nop{}, entitlement.Community(), discardLogger(), "test")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

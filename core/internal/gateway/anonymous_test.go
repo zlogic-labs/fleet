@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 )
@@ -62,7 +63,7 @@ func buildAnonymousWired(t *testing.T, db *sqlstore.DB, engineURL string) http.H
 		// none is needed.
 		Database:  DatabaseConfig{URL: "postgres://configured-but-unused"},
 		Upstreams: []UpstreamConfig{{ID: "e1", Model: "demo", BaseURL: engineURL}},
-	}, db, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	}, db, detail.Nop{}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

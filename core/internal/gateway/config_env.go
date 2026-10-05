@@ -34,6 +34,14 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.Database.URL, "FLEET_DATABASE_URL")
 	setDuration(&cfg.Database.PriceRefresh, "FLEET_DATABASE_PRICE_REFRESH")
 
+	// Taken as a block rather than field by field: the four settings describe one
+	// server, and setting three of them from the environment while the fourth
+	// was defaulted is how a URL points at the wrong database's credentials.
+	if os.Getenv("FLEET_CLICKHOUSE_URL") != "" {
+		d := detailConfigFromEnv()
+		cfg.Detail = d
+	}
+
 	if v := os.Getenv("FLEET_DATABASE_MIGRATE"); v != "" {
 		cfg.Database.Migrate = v == "1" || strings.EqualFold(v, "true")
 	}

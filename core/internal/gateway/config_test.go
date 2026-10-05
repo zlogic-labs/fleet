@@ -7,6 +7,7 @@ import (
 
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 )
 
@@ -54,7 +55,7 @@ func TestStartupRejectsAuthMisconfiguration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := Build(Config{
 				Listen: "127.0.0.1:0", MaxBodyMB: 1, Auth: tc.auth,
-			}, nil, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+			}, nil, detail.Nop{}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 			if err == nil {
 				t.Fatal("startup succeeded, want an error")
 			}
@@ -77,7 +78,7 @@ func TestValidAuthConfigStarts(t *testing.T) {
 			Tenants:  []string{"acme|rpm=600,tpm=200000"},
 			Projects: []string{"acme/research|rpm=60,tpm=20000"},
 		},
-	}, nil, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	}, nil, detail.Nop{}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("a valid auth config was rejected: %v", err)
 	}

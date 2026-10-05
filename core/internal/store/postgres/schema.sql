@@ -202,10 +202,20 @@ CREATE TABLE IF NOT EXISTS usage_events (
     price_book_id text,
 
     -- Raw engine-reported usage (P6: the only authority).
+    --
+    -- The two breakdown columns are nullable, and that is the point. An engine
+    -- that reports totals without a breakdown has not said "zero cached
+    -- tokens"; it has said nothing, and the difference decides whether the
+    -- fresh/cached split on an invoice is a measurement or a guess. NOT NULL
+    -- DEFAULT 0 would make the ledger assert the second for every engine that
+    -- omits the field, which is most of them.
+    --
+    -- There is no DEFAULT either, so a writer that forgets the column stores
+    -- the absence rather than a zero.
     prompt_tokens      integer NOT NULL DEFAULT 0,
     completion_tokens  integer NOT NULL DEFAULT 0,
-    cached_tokens      integer NOT NULL DEFAULT 0,
-    reasoning_tokens   integer NOT NULL DEFAULT 0,
+    cached_tokens      integer,
+    reasoning_tokens   integer,
 
     -- Priced result, in millionths of a quota unit.
     amounts_micro bigint NOT NULL DEFAULT 0,
@@ -247,6 +257,16 @@ CREATE INDEX IF NOT EXISTS usage_events_project_time_idx
     WHERE project_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS usage_events_model_time_idx
     ON usage_events (model, occurred_at DESC);
+
+-- Dropping a NOT NULL constraint rewrites no rows, so it belongs here beside
+-- the CREATE rather than in a migration. Rows written before this had the
+-- zeros an earlier version asserted on the engine's behalf; they keep them,
+-- because a row that says zero cannot be turned back into a row that says
+-- nothing, and inventing the absence would be the larger lie.
+ALTER TABLE usage_events ALTER COLUMN cached_tokens    DROP NOT NULL;
+ALTER TABLE usage_events ALTER COLUMN cached_tokens    DROP DEFAULT;
+ALTER TABLE usage_events ALTER COLUMN reasoning_tokens DROP NOT NULL;
+ALTER TABLE usage_events ALTER COLUMN reasoning_tokens DROP DEFAULT;
 
 -- usage_source names what a row was charged on: the engine's own report, the
 -- gateway's count of the answer it forwarded, or the reservation.
@@ -517,3 +537,20 @@ CREATE TABLE IF NOT EXISTS cost_adjustments (
 );
 
 CREATE INDEX IF NOT EXISTS cost_adjustments_corrected_idx ON cost_adjustments (for_period);
+
+-- Where the backfill into the detail store has reached.
+--
+-- A single row keyed by name rather than a column on usage_events, because it is
+-- state about the replica and not about a request. Storing it here rather than in
+-- the replica keeps the authoritative table untouched by the fact that a replica
+-- exists, which is the whole reason the replica can be dropped and rebuilt.
+--
+-- The value is text because it is read with COALESCE against a default and
+-- written as text; a bigint would need a cast on the read path and would fail
+-- there rather than here if the row were ever hand-edited.
+CREATE TABLE IF NOT EXISTS detail_state
+(
+    key        text PRIMARY KEY,
+    value      text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);

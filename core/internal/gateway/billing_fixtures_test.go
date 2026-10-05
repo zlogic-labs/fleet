@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
@@ -103,7 +104,7 @@ func buildPricedWiredWithMax(t *testing.T, db *sqlstore.DB, engineURL string, ma
 		Database:         DatabaseConfig{URL: "postgres://configured-but-unused"},
 		Upstreams:        []UpstreamConfig{{ID: "e1", Model: pricedModel, BaseURL: engineURL}},
 	}
-	h, _, err := Build(cfg, db, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
+	h, _, err := Build(cfg, db, detail.Nop{}, entitlement.Community(), slog.New(slog.DiscardHandler), "test")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -206,7 +207,8 @@ func onlyRecord(t *testing.T, db *sqlstore.DB) storedRecord {
 	rows, err := db.Pool().Query(context.Background(), `
 		SELECT tenant_id, COALESCE(project_id,''), COALESCE(key_id,''),
 		       model, COALESCE(price_book_id,''), amounts_micro, usage_known,
-		       usage_source, prompt_tokens, completion_tokens, cached_tokens
+		       usage_source, prompt_tokens, completion_tokens, cached_tokens,
+		       reasoning_tokens
 		  FROM usage_events`)
 	if err != nil {
 		t.Fatalf("read the ledger: %v", err)
@@ -218,12 +220,27 @@ func onlyRecord(t *testing.T, db *sqlstore.DB) storedRecord {
 		var (
 			r      storedRecord
 			source string
-			cached int
+			// Nullable, because the ledger stores the absence. A row whose engine
+			// omitted the breakdown has to read back as an absent breakdown, or
+			// this helper would report "zero cached tokens" for it.
+			cached    *int64
+			reasoning *int64
 		)
 		if err := rows.Scan(&r.Tenant, &r.Project, &r.KeyID, &r.Model, &r.PriceBook,
 			&r.Amount, &r.UsageKnown, &source,
-			&r.Usage.PromptTokens, &r.Usage.CompletionTokens, &cached); err != nil {
+			&r.Usage.PromptTokens, &r.Usage.CompletionTokens,
+			&cached, &reasoning); err != nil {
 			t.Fatalf("scan the ledger: %v", err)
+		}
+		if cached != nil {
+			r.Usage.PromptTokensDetails = &openai.PromptTokensDetails{
+				CachedTokens: int(*cached),
+			}
+		}
+		if reasoning != nil {
+			r.Usage.CompletionTokensDetails = &openai.CompletionTokensDetails{
+				ReasoningTokens: int(*reasoning),
+			}
 		}
 		r.UsageSource = billing.Source(source)
 		r.Usage.TotalTokens = r.Usage.PromptTokens + r.Usage.CompletionTokens
