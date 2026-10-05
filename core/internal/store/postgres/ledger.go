@@ -44,8 +44,9 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 			tenant_id, project_id, key_id, model, endpoint_id, price_book_id,
 			prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
 			amounts_micro, usage_known, usage_source, truncated,
-			ttft_ms, duration_ms, streamed, occurred_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+			ttft_ms, duration_ms, streamed, occurred_at,
+			engine_queue_ms, engine_ttft_ms, engine_decode_ms)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		RETURNING id`
 
 	var id int64
@@ -59,11 +60,27 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		breakdown(r.Usage.ReasoningTokens(), r.Usage.CompletionTokensDetails != nil),
 		int64(r.Amount), r.UsageKnown, sourceOrEngine(r.UsageSource), r.Truncated,
 		r.TTFT.Milliseconds(), r.Duration.Milliseconds(), r.Streamed, r.OccurredAt,
+		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.QueueMS }),
+		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.TTFTMS }),
+		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.DecodeMS }),
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: append usage event: %w", err)
 	}
 	return id, nil
+}
+
+// engineTiming reads one of an engine's own timing figures, or NULL.
+//
+// A nil timings block and a nil field inside it both land on NULL, which is
+// the point: "this engine publishes no per-request timings" and "this engine
+// measured the queue but not the decode" are different facts that happen to
+// share the only honest value a double column can hold.
+func engineTiming(e *billing.EngineTimings, pick func(*billing.EngineTimings) *float64) *float64 {
+	if e == nil {
+		return nil
+	}
+	return pick(e)
 }
 
 // sourceOrEngine keeps an unset source out of the table.

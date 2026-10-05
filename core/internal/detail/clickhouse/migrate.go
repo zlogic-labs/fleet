@@ -58,6 +58,15 @@ CREATE TABLE IF NOT EXISTS usage_detail
     duration_ms    Int64,
     streamed       Bool,
 
+    -- What the engine said about its own timing, as opposed to what the
+    -- gateway measured from the bytes. Nullable for the same reason the
+    -- breakdown above is: null is what an engine that does not publish
+    -- per-request timings returns, and zero is the answer that would make an
+    -- unmeasured queue look like an idle one.
+    engine_queue_ms   Nullable(Float64),
+    engine_ttft_ms    Nullable(Float64),
+    engine_decode_ms  Nullable(Float64),
+
     -- One skip index per query the ordering key cannot serve, and no others.
     --
     -- The metering audit groups by endpoint. Endpoint is not in the ordering key
@@ -129,6 +138,11 @@ func (s *Store) widen(ctx context.Context) error {
 			return fmt.Errorf("widening the %s: %w", stmt.name, err)
 		}
 	}
+	for _, stmt := range addColumnDDL {
+		if err := s.Exec(ctx, fmt.Sprintf(stmt.query, s.db)); err != nil {
+			return fmt.Errorf("adding the %s: %w", stmt.name, err)
+		}
+	}
 	return nil
 }
 
@@ -137,4 +151,13 @@ var widenDDL = []struct{ name, query string }{
 	{"stale projection", "ALTER TABLE %s.usage_detail DROP PROJECTION IF EXISTS accounting"},
 	{"usage_detail breakdown", "ALTER TABLE %s.usage_detail MODIFY COLUMN cached_tokens Nullable(Int64)"},
 	{"usage_detail reasoning", "ALTER TABLE %s.usage_detail MODIFY COLUMN reasoning_tokens Nullable(Int64)"},
+}
+
+// Missing columns are added rather than widened: an ADD COLUMN does not
+// rewrite the parts, which is the same line the ledger draws, and a table whose
+// predecessor never had them is otherwise permanently the wrong shape.
+var addColumnDDL = []struct{ name, query string }{
+	{"usage_detail queue", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS engine_queue_ms Nullable(Float64)"},
+	{"usage_detail engine ttft", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS engine_ttft_ms Nullable(Float64)"},
+	{"usage_detail engine decode", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS engine_decode_ms Nullable(Float64)"},
 }

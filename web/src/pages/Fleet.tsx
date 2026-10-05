@@ -141,7 +141,7 @@ export function Fleet() {
           size="small"
           rowKey={(_, i) => String(i)}
           pagination={false}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1100 }}
           dataSource={data.recent.slice(0, 12)}
           columns={[
             {
@@ -182,6 +182,12 @@ export function Fleet() {
               width: 110,
               align: 'right',
               render: (_, r) => <DecodeRate r={r} />,
+            },
+            {
+              title: 'Queue',
+              width: 100,
+              align: 'right',
+              render: (_, r) => <Queue r={r} />,
             },
             {
               title: 'Tokens',
@@ -258,4 +264,18 @@ function DecodeRate({ r }: { r: RecentSample }) {
     return <Text type="secondary">—</Text>;
   }
   return <>{((r.completionTokens * 1000) / r.decodeMs).toFixed(1)} tok/s</>;
+}
+
+// How long the engine held the request before decoding it.
+//
+// The engine's own figure, when it publishes one, and blank when it does not.
+// Blank is the honest answer rather than zero: no engine in Fleet's inventory
+// reports a queue time unless its server was started to, and a zero there would
+// read as "this fleet never queues" — which is exactly what an unmeasured queue
+// looks like to an operator deciding whether to buy another GPU.
+function Queue({ r }: { r: RecentSample }) {
+  if (r.queueMs === undefined) {
+    return <Text type="secondary">—</Text>;
+  }
+  return <>{Math.round(r.queueMs)} ms</>;
 }

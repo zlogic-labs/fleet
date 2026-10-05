@@ -28,12 +28,16 @@ func scanDetailRow(rows pgx.Rows) (billing.Record, error) {
 		reasoning *int64
 		source    string
 		amount    int64
+		queueMS   *float64
+		engTTFT   *float64
+		engDecode *float64
 	)
 	err := rows.Scan(
 		&r.LedgerID, &r.Tenant, &project, &keyID, &r.Model, &r.Endpoint, &priceBook,
 		&r.Usage.PromptTokens, &r.Usage.CompletionTokens, &cached, &reasoning,
 		&amount, &r.UsageKnown, &source, &r.Truncated,
 		&r.TTFT, &r.Duration, &r.Streamed, &r.OccurredAt,
+		&queueMS, &engTTFT, &engDecode,
 	)
 	if err != nil {
 		return r, fmt.Errorf("postgres: reading a usage row for the detail store: %w", err)
@@ -70,6 +74,18 @@ func scanDetailRow(rows pgx.Rows) (billing.Record, error) {
 	// ledger's in the last digits.
 	r.TTFT = time.Duration(r.TTFT) * time.Millisecond
 	r.Duration = time.Duration(r.Duration) * time.Millisecond
+
+	// A row whose engine published no timings leaves all three NULL, and a row
+	// whose engine published only a decode time leaves the other two NULL. Both
+	// become a timings block that is partly nil rather than a block of zeroes,
+	// so the mirror keeps saying "not measured" where the ledger does.
+	if queueMS != nil || engTTFT != nil || engDecode != nil {
+		r.Engine = &billing.EngineTimings{
+			QueueMS:  queueMS,
+			TTFTMS:   engTTFT,
+			DecodeMS: engDecode,
+		}
+	}
 	return r, nil
 }
 

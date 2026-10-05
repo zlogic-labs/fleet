@@ -84,7 +84,23 @@ func appendRecord(b driver.Batch, r billing.Record) error {
 		r.TTFT.Milliseconds(),
 		r.Duration.Milliseconds(),
 		r.Streamed,
+		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.QueueMS }),
+		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.TTFTMS }),
+		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.DecodeMS }),
 	)
+}
+
+// engineTiming reads one of an engine's own timing figures, or NULL.
+//
+// Deliberately not shared with the ledger's identically-named helper. The two
+// stores are separate modules and this one is a copy that is allowed to be
+// dropped and rebuilt from the ledger, so a shared helper would be a shared
+// dependency on the one thing the mirror is not.
+func engineTiming(e *billing.EngineTimings, pick func(*billing.EngineTimings) *float64) *float64 {
+	if e == nil {
+		return nil
+	}
+	return pick(e)
 }
 
 // Close satisfies detail.Writer. There is nothing buffered here, because the

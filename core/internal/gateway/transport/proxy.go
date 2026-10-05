@@ -31,15 +31,25 @@ type Options struct {
 	// connection open for the entire generation time of a request.
 	Transport http.RoundTripper
 	Authorize Authorize
+	// Profiles resolves an endpoint's engine family to the per-request timings
+	// it publishes. May be nil: a proxy without profiles reads no engine
+	// timings, which is the same state as an engine that publishes none.
+	//
+	// The proxy resolves it rather than the tap because the tap is given a
+	// Tap and a body and nothing else, and threading a registry through the
+	// per-request path to reach one field would put a dependency on every
+	// engine's vocabulary into the streaming hot loop.
+	Profiles *engine.Profiles
 }
 
 type Proxy struct {
 	rp        *httputil.ReverseProxy
 	authorize Authorize
+	profiles  *engine.Profiles
 }
 
 func New(opts Options) *Proxy {
-	p := &Proxy{authorize: opts.Authorize}
+	p := &Proxy{authorize: opts.Authorize, profiles: opts.Profiles}
 	p.rp = &httputil.ReverseProxy{
 		Transport:      opts.Transport,
 		Rewrite:        p.rewrite,
@@ -57,6 +67,13 @@ func New(opts Options) *Proxy {
 func (p *Proxy) Serve(w http.ResponseWriter, r *http.Request, ep engine.Endpoint, tap *Tap) {
 	ctx := withEndpoint(r.Context(), ep)
 	if tap != nil {
+		if p.profiles != nil {
+			// Labels["engine"] is what the operator reported; an endpoint
+			// configured by hand has none, and For then returns the default
+			// profile, which declares no timings. Reading nothing is the
+			// right answer for both.
+			tap.RequestTimings(p.profiles.For(ep.Labels["engine"]).Request)
+		}
 		ctx = withTap(ctx, tap)
 	}
 	p.rp.ServeHTTP(w, r.WithContext(ctx))

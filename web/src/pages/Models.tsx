@@ -478,6 +478,22 @@ function EngineCard({ engines }: { engines?: EngineProfile[] }) {
             ),
           },
           {
+            title: 'Queue time',
+            dataIndex: 'queueTime',
+            width: 130,
+            render: (v: boolean, r) => (
+              <Tooltip
+                title={
+                  v
+                    ? `${r.queueTimeField} — ${r.requestTimingsNote || 'the engine reports how long it held a request before decoding it'}`
+                    : 'The engine does not separate queueing from prompt evaluation, so time to first token cannot be split.'
+                }
+              >
+                <Tag color={v ? 'green' : 'default'}>{v ? 'engine reports' : 'not separable'}</Tag>
+              </Tooltip>
+            ),
+          },
+          {
             title: 'Notes',
             dataIndex: 'notes',
             render: (v: string) => (

@@ -75,7 +75,21 @@ func VLLMProfile() Profile {
 			MaxConcurrencyLabel: "kv_cache_max_concurrency",
 		},
 		MinCompute: 75,
-		Notes:      "Requires compute capability 7.5+ (T4, RTX 20-series and newer). No MIG before 7.5.",
+		Request: RequestSpec{
+			// PerRequestMetrics, top-level and a sibling of usage. Verified in
+			// vllm/entrypoints/generate/base/protocol.py on main, 2026-10-05;
+			// the chat-completion handlers now live under
+			// vllm/entrypoints/openai/chat_completion/.
+			Gate: "metrics",
+			Paths: map[RequestField]string{
+				RequestQueueMS:  "queue_time_ms",
+				RequestTTFTMS:   "time_to_first_token_ms",
+				RequestDecodeMS: "generation_time_ms",
+			},
+			Note: "Per-request timings need --enable-per-request-metrics, are suppressed " +
+				"for n > 1, and reach a stream only on the frame that carries usage.",
+		},
+		Notes: "Requires compute capability 7.5+ (T4, RTX 20-series and newer). No MIG before 7.5.",
 	}
 }
 
@@ -135,6 +149,24 @@ func LlamaCPPProfile() Profile {
 			MaxConcurrencyLabel: "",
 		},
 		MinCompute: 0,
+		Request: RequestSpec{
+			// timings, top-level, only on the final frame unless the request
+			// asked for timings_per_token. Verified in
+			// tools/server/server-common.cpp on master, 2026-10-05.
+			Gate: "timings",
+			Paths: map[RequestField]string{
+				// predicted_ms alone. prompt_ms is deliberately not declared:
+				// it spans queueing plus prompt evaluation, and filing that as
+				// queue time would invent a number that separates waiting from
+				// computing on an engine that does not separate them. The
+				// gateway already measures that whole span as time to first
+				// token, so declaring it here would add a second copy of a
+				// figure that already exists rather than new information.
+				RequestDecodeMS: "predicted_ms",
+			},
+			Note: "llama-server reports decode time only. It does not separate queueing " +
+				"from prompt evaluation, so there is no queue figure to compare.",
+		},
 		Notes: "GGUF only. No /tokenize, so prompt counts come from the gateway's own " +
 			"tokenizer. Metrics require the server to be started with --metrics, and it " +
 			"publishes no KV cache capacity.",

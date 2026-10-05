@@ -192,6 +192,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		PromptEst:  promptTokens,
 		Requested:  req.ResolveMaxTokens(0),
 		Streamed:   req.Stream,
+		Queue:      queuedMS(result),
 	})
 	h.Log.Debug("chat completion",
 		"model", req.Model, "endpoint", ep.ID, "tenant", tenant, "project", project,

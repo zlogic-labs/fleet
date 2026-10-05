@@ -93,7 +93,8 @@ func (db *DB) detailPage(ctx context.Context, cursor, ceiling int64, limit int) 
 		SELECT id, tenant_id, project_id, key_id, model, endpoint_id, price_book_id,
 		       prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
 		       amounts_micro, usage_known, usage_source, truncated,
-		       ttft_ms, duration_ms, streamed, occurred_at
+		       ttft_ms, duration_ms, streamed, occurred_at,
+		       engine_queue_ms, engine_ttft_ms, engine_decode_ms
 		FROM usage_events
 		WHERE id > $1 AND id <= $2
 		ORDER BY id

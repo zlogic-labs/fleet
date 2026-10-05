@@ -174,6 +174,11 @@ type Profile struct {
 	Tokenize Candidates
 	// Metrics drives autoscaling. May be absent.
 	Metrics MetricsSpec
+	// Request declares where this engine puts its per-request timings, if it
+	// does. May be absent, and its absence is a real answer: an engine that
+	// publishes none leaves queue time unmeasured, because the gateway cannot
+	// separate queueing from prefill on its own.
+	Request RequestSpec
 	// MinCompute is the NVIDIA compute capability this engine needs, 0 when
 	// the constraint does not apply. Checked at admission so an impossible
 	// combination is refused in seconds rather than pending forever.

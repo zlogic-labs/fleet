@@ -296,6 +296,33 @@ CREATE INDEX IF NOT EXISTS usage_events_unestimated_idx
     ON usage_events (occurred_at)
     WHERE NOT usage_known;
 
+-- What the engine said about its own timing, as opposed to what the gateway
+-- measured by watching bytes go past. Nullable throughout and never defaulted:
+-- an engine that does not publish per-request timings is not a deployment
+-- where the queue was zero, and every one of these engines leaves the fields
+-- null unless its server was started to publish them.
+--
+-- queue_ms is the column this exists for. ttft_ms on a row above is queueing
+-- plus prefill plus network, and nothing in the gateway can tell those apart;
+-- when the engine does, the split is the only thing that separates "the fleet
+-- needs capacity" from "the prompt was long", which look identical from the
+-- outside and call for opposite responses.
+ALTER TABLE usage_events
+    ADD COLUMN IF NOT EXISTS engine_queue_ms  double precision;
+ALTER TABLE usage_events
+    ADD COLUMN IF NOT EXISTS engine_ttft_ms   double precision;
+ALTER TABLE usage_events
+    ADD COLUMN IF NOT EXISTS engine_decode_ms double precision;
+
+-- A partial index over the rows that can answer "where did the time go". Small
+-- by construction -- only engines started with per-request metrics publish it --
+-- so it costs little to keep, and without it the question means a sequential
+-- scan of every request the fleet has ever served.
+CREATE INDEX IF NOT EXISTS usage_events_engine_timings_idx
+    ON usage_events (occurred_at)
+    WHERE engine_queue_ms IS NOT NULL OR engine_ttft_ms IS NOT NULL
+       OR engine_decode_ms IS NOT NULL;
+
 -- ── budgets ────────────────────────────────────────────────────────────────
 --
 -- A budget is a set of rules, not a number. Each rule is "this much of this

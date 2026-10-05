@@ -132,6 +132,7 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 		Duration:   result.Duration,
 		Streamed:   streamed,
 		OccurredAt: time.Now(),
+		Engine:     engineTimings(result),
 	}
 	if p, ok := authn.FromContext(r.Context()); ok {
 		// The ledger records the project *id*, not its bare name, so that

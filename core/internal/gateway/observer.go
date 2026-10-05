@@ -37,6 +37,7 @@ type observer struct {
 	requests  *metrics.Counter
 	duration  *metrics.Histogram
 	ttft      *metrics.Histogram
+	queueMs   *metrics.Histogram
 	tokens    *metrics.Counter
 	spend     *metrics.Counter
 	estimated *metrics.Counter
@@ -59,6 +60,12 @@ func newObserver(reg *metrics.Registry) *observer {
 		latencyBuckets, "tenant", "project", "model")
 	o.ttft = reg.Histogram("fleet_request_first_token_seconds",
 		"Seconds to the first token. Streaming requests only; absent is not zero.",
+		latencyBuckets, "tenant", "project", "model")
+	o.queueMs = reg.Histogram("fleet_request_engine_queue_seconds",
+		"Seconds the engine held the request before decoding it, as the engine "+
+			"itself reported it. Engines that publish no per-request timings "+
+			"contribute no samples, so a low count here means the figure is "+
+			"unmeasured rather than that the queue is short.",
 		latencyBuckets, "tenant", "project", "model")
 	o.tokens = reg.Counter("fleet_tokens_total",
 		"Tokens billed, by which side of the bill they are on.",
@@ -97,6 +104,13 @@ func (o *observer) served(rec billing.Record, duration, ttft float64, streamed b
 	o.duration.Observe(duration, tenant, project, rec.Model)
 	if streamed && ttft >= 0 {
 		o.ttft.Observe(ttft, tenant, project, rec.Model)
+	}
+	// Only when the engine said so. A fleet whose engines publish no queue time
+	// produces no samples here at all, and that has to read as unmeasured on a
+	// dashboard rather than as a queue of zero — which is what a missing sample
+	// would look like to anyone who forgot this comment.
+	if rec.Engine != nil && rec.Engine.QueueMS != nil {
+		o.queueMs.Observe(*rec.Engine.QueueMS/1000, tenant, project, rec.Model)
 	}
 	u := rec.Usage
 	o.tokens.Add(float64(u.PromptTokens), tenant, project, rec.Model, "prompt")

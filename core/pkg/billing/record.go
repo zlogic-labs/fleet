@@ -66,6 +66,33 @@ type Record struct {
 	Duration   time.Duration
 	Streamed   bool
 	OccurredAt time.Time
+
+	// Engine is what the engine itself said about this request's timing, as
+	// opposed to what the gateway measured by watching the bytes go past. It is
+	// nil when the engine published no timings, which is the normal case for
+	// engines whose server was not started to publish them.
+	//
+	// The field is worth its column because of QueueMS. Time to first token
+	// is queueing plus prefill plus network, and the gateway can measure the
+	// sum but not the parts; when an engine separates them, the difference is
+	// the only thing that distinguishes "the fleet is short of capacity" from
+	// "the prompt was long", which are the same symptom and opposite
+	// remedies.
+	Engine *EngineTimings
+}
+
+// EngineTimings are an engine's own figures for one request, in milliseconds.
+//
+// Pointers throughout, and that is the load-bearing decision. Every engine in
+// practice answers with null for fields it did not measure — vLLM leaves all of
+// them null unless the server runs with per-request metrics enabled, and
+// llama-server omits a field whose divisor it does not know. A zero here would
+// be read as "no time was spent waiting", which is the single most reassuring
+// wrong number available and the one an operator is most likely to act on.
+type EngineTimings struct {
+	QueueMS  *float64
+	TTFTMS   *float64
+	DecodeMS *float64
 }
 
 // Source is where a settled request's token count came from.

@@ -3,9 +3,7 @@ package gateway
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/http"
-	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/detail"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/catalog"
@@ -63,11 +61,16 @@ func Build(cfg Config, db *sqlstore.DB, sink detail.Sink, lic entitlement.Licens
 	obs := newObserver(registry)
 	obs.version(version, "community")
 
+	// One profile registry for the process, shared by the scraper and the
+	// proxy. Two registries would be the same data read twice, and a
+	// registration made to one would be invisible to the other.
+	profiles := engine.BuiltinProfiles()
+
 	picker := routing.NewRendezvous(static)
 	refresher := &catalog.Refresher{
 		Client:   catalog.NewClient(cfg.ControlPlane.URL, cfg.ControlPlane.Token),
 		Discover: cfg.ControlPlane.URL != "",
-		Profiles: engine.BuiltinProfiles(),
+		Profiles: profiles,
 		Log:      log,
 		Interval: cfg.ControlPlane.Every,
 		// Discovered endpoints are added to, never substituted for, the
@@ -88,6 +91,7 @@ func Build(cfg Config, db *sqlstore.DB, sink detail.Sink, lic entitlement.Licens
 	proxy := transport.New(transport.Options{
 		Transport: outboundTransport(cfg.Timeouts),
 		Authorize: upstreamAuthorizer(cfg.Upstreams),
+		Profiles:  profiles,
 	})
 
 	limiter, err := limiterFor(cfg, db)
@@ -210,48 +214,5 @@ func Run(ctx context.Context, cfg Config, lic entitlement.License, log *slog.Log
 		go startPruner(ctx, log, ps...)
 	}
 
-	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: handler,
-		// No WriteTimeout: a streamed completion can legitimately run for
-		// minutes, and a write deadline would cut it off mid-answer. The
-		// per-request context is what bounds a client that has gone away.
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		// Every in-flight request derives from ctx, so a signal cancels
-		// generation rather than leaving streams hanging until the deadline.
-		BaseContext: func(net.Listener) context.Context { return ctx },
-	}
-
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		return err
-	}
-	log.Info("fleet-gateway listening",
-		"addr", cfg.Listen, "edition", lic.Edition, "version", version,
-		"upstreams", len(cfg.Upstreams), "ui", "http://"+cfg.Listen+"/")
-
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
-
-	select {
-	case err := <-serveErr:
-		if err != nil && err != http.ErrServerClosed {
-			return err
-		}
-		return nil
-	case <-ctx.Done():
-		log.Info("shutting down")
-	}
-
-	// A bounded drain: in-flight streams need time to finish writing, but a
-	// wedged one must not stop the pod from exiting.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return err
-	}
-	log.Info("fleet-gateway stopped")
-	return nil
+	return serve(ctx, cfg, handler, lic, log, version)
 }

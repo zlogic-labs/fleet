@@ -158,8 +158,18 @@ type recentSample struct {
 	// once it had started. A fleet with a slow queue has a large TTFT and a
 	// normal decode rate, and an operator cannot tell those apart from the two
 	// numbers alone.
-	DecodeMs   int64 `json:"decodeMs"`
-	UsageKnown bool  `json:"usageKnown"`
+	DecodeMs int64 `json:"decodeMs"`
+	// QueueMs is how long the engine held the request before decoding it, from
+	// the engine's own per-request metrics. Absent when the engine published
+	// none, which is the ordinary case and is not the same as zero.
+	//
+	// It is the third cut of the same latency, and the only one the gateway
+	// cannot take itself: TTFT covers queueing, prompt evaluation and the
+	// network together, so a fleet that is short of capacity and a fleet with
+	// long prompts produce identical numbers. An engine that reports the queue
+	// separates them; one that does not leaves the question open.
+	QueueMs    *float64 `json:"queueMs,omitempty"`
+	UsageKnown bool     `json:"usageKnown"`
 
 	PromptTokens     int `json:"promptTokens"`
 	CompletionTokens int `json:"completionTokens"`
@@ -182,6 +192,7 @@ func recent(samples []Sample) []recentSample {
 			TTFTMs:     s.TTFT.Milliseconds(),
 			DurationMs: s.Duration.Milliseconds(),
 			DecodeMs:   decodeMs(s),
+			QueueMs:    s.Queue,
 			UsageKnown: s.UsageKnown,
 			Estimated:  !s.UsageKnown,
 		}

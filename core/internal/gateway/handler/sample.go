@@ -31,6 +31,15 @@ type Sample struct {
 	PromptEst  int
 	Requested  int
 	Streamed   bool
+	// Queue is how long the engine held the request before decoding it, or nil
+	// when the engine published no per-request timings.
+	//
+	// It is here rather than only in the ledger because it is the answer to the
+	// question a high time-to-first-token raises and cannot answer by itself:
+	// whether the tenant waited for capacity or for a long prompt. An engine
+	// that does not report it leaves the cell empty, which reads correctly —
+	// "not measured" rather than "no wait".
+	Queue *float64
 }
 
 // SampleLog keeps the last limit requests.

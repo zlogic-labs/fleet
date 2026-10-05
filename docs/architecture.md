@@ -32,13 +32,15 @@
 
 | 轴 | 是什么 | 数量 | 落在哪 |
 |---|---|---|---|
-| 怎么说话 | `engine.Adapter` | **1 个** | `core/pkg/engine/openai` |
+| 怎么说话 | 探测实现（`openai.Adapter`） | **1 个** | `core/pkg/engine/openai` |
 | 找什么 | `engine.Profile` | N 个，纯数据 | `core/pkg/engine/profile.go` |
 | 渲染成什么 | renderer | N 个，注册进 `render.Registry` | fleet-serving 的 `internal/render` |
 
 `Adapter` **按协议**分，不按厂商分。引擎差异全部是 `Profile` 里的字面量：能加载什么权重格式、健康检查端点候选、要额外探测哪些扩展、指标路径与 series 名、最低 compute capability。
 
 `Profile` 里的端点路径是**候选列表**而非单值，探测时逐个试。这是 P4 从"版本"推广到"端点名"的直接结论：把 `/health` 写死成一个字符串，上游改个名就变成"永远 not ready"，而这个故障从外面看像镜像拉不下来。写错一个候选的代价是一个 404，不是错的 `Capability`。
+
+同一条纪律也管**响应体里的字段名**。`Profile.Request` 声明一个容器名加一组相对容器的点分路径——vLLM 的容器叫 `metrics`，llama-server 的叫 `timings`，Fleet 不为任何厂商写 `if`、也不把字段名写进代码。代价记在 §11.11：声明不了的就诚实地声明不了（llama.cpp 分不开排队与 prefill，于是没有队列时间），上游给 null 的就是 null，不是 0。
 
 **硬门只有一个**：健康检查。其余全部软失败——`/tokenize`、`/version` 缺失只记录，不阻断。一个能 chat 但没有 `/tokenize` 的引擎完全可用，让整个探测失败等于把它踢出轮转。`llama-cpp` 的 `Tokenize` 候选列表**故意为空**，不做无用往返，也不谎称能精确计数。
 
@@ -219,25 +221,30 @@ POST /api/v1/cost-rates       → 200   把所有租户的 GPU 小时费率改�
 | 包 | 职责 | 关键类型 |
 |---|---|---|
 | `pkg/errs` | 分级错误 + HTTP 映射 | `Error{Kind, Code}` |
-| `pkg/ptr` | 指针辅助（nullable 列扫描） | `To`, `From` |
-| `pkg/tokenizer` | 预检计数，三级回退 | `Tokenizer` |
-| `pkg/log` | slog 上下文封装 | `Logger` |
-| `internal/config` | 配置加载（env + yaml） | `Config` |
-| `internal/engine` | 引擎抽象：Adapter（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Capacity`, `Profile`, `Adapter`, `Scraper` |
-| `pkg/cost` | 成本池的时间积分与分摊，纯函数 | `Close`, `Sweep`, `Span`, `Integrate`, `Period` |
+| `pkg/httpx` | 两个 HTTP 服务共用的一层：状态记录、请求日志、recoverer | `Recorder`, `RequestLog`, `Recoverer` |
+| `pkg/logconf` | slog 构造，两个 cmd 共用一份 switch | `New` |
+| `pkg/tokenizer` | 预检计数，三级回退 | `Resolver` |
+| `pkg/openai` | 协议类型：请求、响应、SSE 帧、用量、错误信封 | `ChatRequest`, `ChatChunk`, `Usage` |
+| `pkg/engine` | 引擎抽象：探测实现（一个）+ Profile（数据） | `Endpoint`, `Capability`, `Capacity`, `Profile`, `RequestSpec`, `Profiles` |
+| `pkg/cost` | 成本池的时间积分与分摊、跨周期修正，纯函数 | `Close`, `Sweep`, `Span`, `Integrate`, `Period`, `Diff` |
 | `pkg/weights` | 权重格式分类，决定谁能加载 | `Format`, `Of` |
-| `pkg/inventory` | operator → 控制面的上报契约（跨 module 共享，所以不能放 internal） | `Report`, `Cluster`, `Deployment` |
-| `pkg/prom` | Prometheus 文本解析（只读四个 gauge，不引 client 库） | `Parse`, `Sample` |
+| `pkg/inventory` | operator → 控制面的上报契约（跨 module 共享，所以不能放 internal） | `Report`, `Cluster`, `Deployment`, `ContractVersion` |
+| `pkg/prom` | Prometheus 文本解析（不引 client 库） | `Parse`, `Sample` |
+| `pkg/metrics` | Prometheus 文本导出（同样手写，理由见 §11.9） | `Registry`, `Counter`, `Histogram` |
+| `internal/gateway` | 组装：配置、中间件、路由表、观察者、监听与排空 | `Build`, `Run`, `serve`, `observer` |
 | `internal/gateway/routing` | endpoint 选择（rendezvous + 健康） | `Picker`, `Rendezvous` |
 | `internal/gateway/catalog` | 端点集合的活订阅：拉控制面 + 抓 load | `Refresher`, `Client` |
-| `internal/gateway/transport` | SSE 透传 + usage tap | `Proxy`, `Tap` |
-| `pkg/authn` | 凭据解析与主体（`internal/gateway/auth.go` 只是它的中间件接线） | `Principal`, `KeyStore`, `Limits` |
+| `internal/gateway/transport` | SSE 透传 + usage / 时延 tap | `Proxy`, `Tap`, `EngineTimings` |
+| `pkg/authn` | 凭据解析与主体（`internal/gateway/auth.go` 只是它的中间件接线） | `Principal`, `KeyStore` |
 | `internal/gateway/ratelimit` | 预留-结算式分层限流 | `Limiter`, `Scope`, `Policies`, `Limited` |
 | `internal/gateway/quota` | 预留-结算式分层预算（tenant + project 两层） | `Limiter`, `Reservation`, `Exceeded`, `Window` |
-| `internal/gateway/handler` | OpenAI 端点 handler | `Chat`, `Samples` |
-| `pkg/billing` | 计价算术与账本行类型 | `Rate`, `Price`, `Pricer`, `Record`, `Recorder` |
-| `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流读路径与计数器、价格本、账本、配额、成本池 | `DB`, `KeyStore`, `PolicySource`, `RateLimiter`, `Quota`, `PriceStore`, `Ledger`, `CostStore` |
-| `internal/apiserver` | 控制台 REST API | — |
+| `internal/gateway/handler` | OpenAI 端点 handler 与结算 | `Chat`, `Embeddings`, `settler`, `Sample` |
+| `pkg/billing` | 计价算术、账本行类型、用量一致性核对 | `Rate`, `Pricer`, `Record`, `Verify` |
+| `internal/store/postgres` | 领域仓储：租户、项目、密钥、限流与配额计数器、价格本、账本、成本池 | `DB`, `KeyStore`, `PolicySource`, `RateLimiter`, `Quota`, `PriceStore`, `Ledger`, `CostStore` |
+| `internal/detail` + `internal/detail/clickhouse` | 用量明细副本：可丢、可由账本重建 | `Sink`, `Queue`, `Store`, `Writer` |
+| `internal/blobstore` + `internal/hub` | 对象存储（S3 兼容或目录）与模型仓库下载 | `Blobstore`, `FS`, `S3`, `Hub` |
+| `internal/registry` | 模型注册表与拉取任务（`--demo` 之外的进程内实现） | `Memory`, `Pull`, `Worker` |
+| `internal/apiserver` | 控制面 REST API | `Server` |
 
 ### `fleet-serving`（module `github.com/zlogic-labs/fleet-serving`，另一仓库）
 
@@ -710,6 +717,7 @@ embedding 请求走和 chat 完全相同的生命周期（预留 → 选副本 �
 | `fleet_requests_total` | counter | tenant, project, model, outcome | 谁在用 |
 | `fleet_request_duration_seconds` | histogram | 同上 | 延迟 |
 | `fleet_request_first_token_seconds` | histogram | 同上 | **只有流式才有** |
+| `fleet_request_engine_queue_seconds` | histogram | 同上 | **只有引擎自报才有**（§11.11）：样本数低 = 没测，不是队列短 |
 | `fleet_tokens_total` | counter | 同上 + **kind** | 见下 |
 | `fleet_spend_micro_total` | counter | 同上 | 计费口径 |
 | `fleet_usage_estimated_total` | counter | 同上 + **source** | 哪些账是估的（P6）：counted / reserved |
@@ -757,6 +765,26 @@ embedding 请求走和 chat 完全相同的生命周期（预留 → 选副本 �
 于是 `Allocated ≠ Pool` 只在一种情况下成立，而且报告必须自己说出来：本期替更早的月份收着差额。这时 `allocation` 的行也一起加上差额（不是另开一张表），因为"表格加起来等于总额"是操作员第一个会验的性质，把修正放在旁边的清单里第一次出现修正就会破坏它。一个不再发请求的租户也要有行——**那正是修正存在的意义**，而把行丢掉等于钱在租户停用的那一刻蒸发。
 
 `cost_adjustments` 是 append-only，和账本同一条纪律。它同时是两端都能读的线索：`amended` 告诉你这个周期被谁改过、改了多少，报表上直接显示，因为一份"被改过但看不出被改过"的发票和没有发票差不多。
+
+### 11.11 引擎自报的每请求时延，以及它为什么是声明不是代码
+
+网关自己测 TTFT 和 decode，这两件事对每一次请求都成立。**队列时间不一样**：它只能由引擎给，因为网关看到的是"转发出去的瞬间"和"首字节到达的瞬间"，两者之间是排队加 prefill，没有任何可观察的边界。而这个切分值全部的钱——"队列长"和"prompt 长"在 TTFT 上是同一个数，缓解手段却相反。
+
+做法是 `engine.Profile.Request`：一个**容器名**加一组**相对容器的点分路径**。vLLM 把它叫 `metrics`，llama-server 叫 `timings`，Fleet 不为任何厂商写字段名（P4 从"版本"推广到"报文形状"，和 `Candidates` 是同一条纪律）。热路径上只有一次子串判断，和 `usageMarker` 同一形态，所以一条几百帧的流不会为时延碰 JSON parser。
+
+**llama.cpp 的 `prompt_ms` 刻意不声明。** 它跨了排队与 prompt evaluation，把它当成队列时间等于在一个不分这两者的引擎上凭空造一个切分。网关本来就测了整段 TTFT，声明它只是把一个已有的数字抄第二遍，不产生新信息。这个 profile 因此**没有队列时间**，而控制台的 Engines 表会照实写"not separable"。
+
+三处 null 而不是 0，这是全篇最要紧的一条：
+
+- vLLM 的 `enable_per_request_metrics` 默认关，此时三个字段全是 `null`；`n > 1` 会显式抑制它们
+- llama-server 在除数未知时把该字段写成 `0.0`（`server-common.h` 明写这一点），而 `timings` 只在最后一帧出现
+- vLLM 的流式只在**带 usage 的那一帧**上附 `metrics`，所以 tap 取**最后一帧**的读数而不是第一帧
+
+`0` 是合法测量值（请求直接进到空闲引擎，队列时间确实是 0），`null` 是没测。两者存进同一个 double 列，唯一诚实的值只能是 NULL，所以 `engine_queue_ms` / `engine_ttft_ms` / `engine_decode_ms` 全部可空且没有默认值。控制台的 Queue 列在没测时是空的——**空的字面意思是"没测"**，而 0 会读成"这个机群从来不排队"，正是操作员决定要不要买第二张卡时最不该看到的那个数。
+
+上面第二条给了一个额外的理由：**llama-server 的 0 有可能是占位而不是测量**。所以同一个 0，在 vLLM 上是"确实没排队"，在 llama-server 上可能只是"算不出来"。这不是能靠类型系统分辨的，所以这两个数被分开存、并且各自带着来源；真要判断一个引擎的 0 可不可信，看的是 §11.9 那条一致性核对——把引擎自报的数与网关自己数的数放在一起比，而不是相信任何一个。
+
+**写这块时踩到的一个测试陷阱值得留着**：`Timings` 第一版从帧根开始走路径，从没进过 gate，于是每个字段都读不到；而"null 不该读成 0"这个断言**因为错误的原因通过**了——读不到也是一种"不是 0"。同一个断言体里再加一条"另一个字段必须被读出来"才抓到它。所以 null 测试必须同时断言一个正例，这不是形式。
 
 ## 12. 控制面的凭据，以及什么留给企业版
 

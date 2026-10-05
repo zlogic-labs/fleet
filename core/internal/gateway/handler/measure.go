@@ -69,3 +69,34 @@ func (s *settler) counted(ep engine.Endpoint, result transport.Result, prompt, n
 		TotalTokens:      prompt + n,
 	}
 }
+
+// engineTimings converts what the tap read into what the ledger stores.
+//
+// The two types are separate on purpose. transport describes an observation;
+// billing describes a row, and a row outlives the request that produced it. A
+// nil in, a nil out: an engine that published no timings leaves the column
+// null rather than zero, because zero queue time is a claim about a deployment
+// that nobody made.
+func engineTimings(result transport.Result) *billing.EngineTimings {
+	if result.Engine == nil {
+		return nil
+	}
+	return &billing.EngineTimings{
+		QueueMS:  result.Engine.QueueMS,
+		TTFTMS:   result.Engine.TTFTMS,
+		DecodeMS: result.Engine.DecodeMS,
+	}
+}
+
+// queuedMS is the engine's queue figure for the console, or nil.
+//
+// Nil is the answer for every engine that does not publish one, which is most
+// of them: llama-server in particular reports a span that covers queueing and
+// prompt evaluation together, and calling that a queue time would draw a line
+// on the chart that no measurement supports.
+func queuedMS(result transport.Result) *float64 {
+	if result.Engine == nil {
+		return nil
+	}
+	return result.Engine.QueueMS
+}

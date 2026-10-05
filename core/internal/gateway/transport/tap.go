@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -51,6 +52,14 @@ type Tap struct {
 	usage    *openai.Usage
 	sawUsage bool
 
+	// request is the endpoint's declared timings spec, set before the first
+	// frame. An endpoint that declares none leaves timingsMarker nil and the
+	// whole step is skipped.
+	request       engine.RequestSpec
+	timingsMarker []byte
+	timings       *EngineTimings
+	timingsSeen   bool
+
 	text     []byte
 	textFull bool
 
@@ -83,6 +92,12 @@ type Result struct {
 	// rather than the whole answer, which is the safe direction: it
 	// under-bills instead of billing a client for a length nobody read.
 	TextTruncated bool
+
+	// Engine is what the engine reported about this request's own timing, read
+	// through the endpoint's profile. Nil when the engine published none,
+	// which for most engines is the ordinary case: the figures are opt-in on
+	// the server.
+	Engine *EngineTimings
 }
 
 // NewTap starts an observation. clock is injectable so tests need not sleep.
@@ -100,6 +115,12 @@ func NewTap(retainCap int, clock func() time.Time) *Tap {
 // Content-Type rather than trusting the client's stream flag, because a
 // client can ask for a stream and still be served JSON.
 func (t *Tap) UseSSE(on bool) { t.sse = on }
+
+// RequestTimings declares which of the engine's own per-request timings to
+// read. The proxy calls it with the endpoint's profile before forwarding; an
+// endpoint whose profile declares none is read with no timings at all, and the
+// console then says the engine did not report them rather than showing zero.
+func (t *Tap) RequestTimings(spec engine.RequestSpec) { t.setTimings(spec) }
 
 // Reader wraps the upstream body. Reads pass through untouched; the tap only
 // watches. Close is forwarded so the pooled connection is released normally.
@@ -157,6 +178,7 @@ func (t *Tap) drainFrames() {
 		if data := sseData(frame); len(data) > 0 {
 			t.considerUsage(data)
 			t.considerText(data)
+			t.considerTimings(data, t.request)
 		}
 	}
 }
@@ -183,6 +205,7 @@ func (t *Tap) seal() {
 		return
 	}
 	t.considerText(t.buf)
+	t.considerTimings(t.buf, t.request)
 	if t.sawUsage {
 		return
 	}
@@ -205,5 +228,6 @@ func (t *Tap) Result() Result {
 		Bytes:         t.bytes,
 		Text:          string(t.text),
 		TextTruncated: t.textFull,
+		Engine:        t.timings,
 	}
 }

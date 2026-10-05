@@ -29,7 +29,20 @@ type engineView struct {
 	// MinComputeLabel renders 75 as the vendor's name for it, so an operator
 	// can match it against a card without doing the translation themselves.
 	MinComputeLabel string `json:"minComputeLabel"`
-	Notes           string `json:"notes"`
+	// QueueTime says this engine reports how long it held a request before
+	// decoding it. It is the one latency the gateway cannot measure for
+	// itself, and an engine that omits it leaves the console unable to tell a
+	// fleet short of capacity from a fleet with long prompts.
+	QueueTime bool `json:"queueTime"`
+	// RequestTimingsNote carries the engine-specific caveat — which server flag
+	// turns it on, or which span is missing — because "yes" alone would send an
+	// operator looking for a queue column that never appears.
+	RequestTimingsNote string `json:"requestTimingsNote"`
+	// QueueTimeField is the full path Fleet reads, container included, so an
+	// operator can look it up in the engine's own response instead of guessing
+	// which object the number sits in.
+	QueueTimeField string `json:"queueTimeField"`
+	Notes          string `json:"notes"`
 }
 
 func (s *Server) listEngines(w http.ResponseWriter, _ *http.Request) {
@@ -46,7 +59,12 @@ func (s *Server) listEngines(w http.ResponseWriter, _ *http.Request) {
 			KnownModels:     engine.EnginesFor(p.Format),
 			RequiresGPU:     p.MinCompute > 0,
 			MinComputeLabel: computeLabel(p.MinCompute),
-			Notes:           p.Notes,
+			QueueTime:       p.Request.Paths[engine.RequestQueueMS] != "",
+			// Only shown when there is something to say. An engine with no
+			// note does not need one: its row already reads "no".
+			RequestTimingsNote: p.Request.Note,
+			QueueTimeField:     p.Request.Field(engine.RequestQueueMS),
+			Notes:              p.Notes,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -287,6 +287,18 @@ check "vllm declares autoscaling metrics" "True" \
   "$(printf '%s' "$E" | jqp "[e['metrics'] for e in d if e['name']=='vllm'][0]")"
 check "llama-cpp declares no engine tokenizer" "False" \
   "$(printf '%s' "$E" | jqp "[e['tokenize'] for e in d if e['name']=='llama-cpp'][0]")"
+# Queue time is the one latency the gateway cannot measure for itself, so it is
+# worth knowing which engines publish it and, for those that do, the exact path
+# to look for. llama-server's prompt_ms is queue plus prompt evaluation; filing
+# it as queue time would manufacture a split that does not exist.
+check "vllm reports queue time" "True" \
+  "$(printf '%s' "$E" | jqp "[e['queueTime'] for e in d if e['name']=='vllm'][0]")"
+check "and says where to find it" "metrics.queue_time_ms" \
+  "$(printf '%s' "$E" | jqp "[e['queueTimeField'] for e in d if e['name']=='vllm'][0]")"
+check "llama-cpp reports no queue time" "False" \
+  "$(printf '%s' "$E" | jqp "[e['queueTime'] for e in d if e['name']=='llama-cpp'][0]")"
+check "and carries no path while claiming none" "" \
+  "$(printf '%s' "$E" | jqp "[e['queueTimeField'] for e in d if e['name']=='llama-cpp'][0]")"
 
 # ── weight formats ─────────────────────────────────────────────────
 section "weight formats"

@@ -77,3 +77,27 @@ func equalLabels(got, want map[string]string) bool {
 	}
 	return true
 }
+
+// The invariant behind the test above: every series a served request produces
+// names its tenant.
+//
+// Checking one family at a time means a family added later -- a histogram, a
+// queue-time gauge -- gets no coverage until someone remembers to enumerate it,
+// and an unlabelled per-tenant series is indistinguishable from a fleet-wide
+// one. Sweeping the exposition catches that at the point the family is added.
+func TestEverySeriesAServedRequestProducesNamesItsTenant(t *testing.T) {
+	reg, obs := newTestObserver()
+	obs.Served(record(billing.Record{Endpoint: "e", Amount: 1}), time.Second, time.Millisecond, true)
+
+	families := map[string]int{}
+	for _, s := range prom.Parse([]byte(reg.String())) {
+		families[s.Name]++
+		if tenant, ok := s.Label("tenant"); !ok || tenant == "" {
+			t.Errorf("series %s is not labelled with a tenant: %v", s.Name, s.Labels)
+		}
+	}
+	if len(families) < 5 {
+		t.Fatalf("a served request produced only %d series, so this sweep proves nothing: %v",
+			len(families), families)
+	}
+}

@@ -44,6 +44,13 @@ export interface RecentSample {
   durationMs: number;
   /** durationMs minus ttftMs: the part that produced the answer. */
   decodeMs: number;
+  /**
+   * How long the engine held the request before decoding it, from the engine's
+   * own per-request metrics. Absent — not zero — when the engine publishes none,
+   * which is the ordinary case: vLLM needs `--enable-per-request-metrics` and
+   * llama-server does not separate queueing from prompt evaluation at all.
+   */
+  queueMs?: number;
   usageKnown: boolean;
   promptTokens: number;
   completionTokens: number;
@@ -94,6 +101,12 @@ export interface EngineProfile {
   requiresGpu: boolean;
   metrics: boolean;
   tokenize: boolean;
+  /** Whether the engine reports how long it held a request before decoding it. */
+  queueTime: boolean;
+  /** The engine-specific caveat: which flag turns it on, or why it cannot. */
+  requestTimingsNote: string;
+  /** The full path Fleet reads, container included, e.g. "metrics.queue_time_ms". */
+  queueTimeField: string;
   knownModels: string[];
   notes: string;
 }
