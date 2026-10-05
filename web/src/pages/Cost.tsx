@@ -1,8 +1,9 @@
-import { Alert, App as AntApp, Col, Form, Row } from 'antd';
+import { App as AntApp, Col, Form, Row } from 'antd';
 import { useCallback, useState } from 'react';
 
 import { costPeriods, costRates, usageAgreement } from '../api/control';
 import { usePoll } from '../hooks';
+import { ControlPlaneAlert } from '../parts/control-plane';
 import type { CostRate } from '../types';
 import { Agreement } from './cost/Agreement';
 import { PeriodsCard } from './cost/PeriodsCard';
@@ -76,12 +77,10 @@ export function Cost() {
   return (
     <>
       {(rates$.error || periods$.error) && (
-        <Alert
-          showIcon
-          type="info"
+        <ControlPlaneAlert
+          error={rates$.error || periods$.error}
           style={{ marginBottom: 16 }}
-          message="No control plane is answering"
-          description="Rates, periods and allocations come from fleet-apiserver with a database behind it."
+          hint="Rates, periods and allocations come from fleet-apiserver with a database behind it."
         />
       )}
 

@@ -1,10 +1,8 @@
 import {
   Alert,
-  App as AntApp,
   Button,
   Form,
   InputNumber,
-  Popconfirm,
   Select,
   Space,
   Table,
@@ -12,12 +10,14 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
-import { useCallback, useMemo, useState } from 'react';
+import { PlusOutlined } from '@ant-design/icons';
+import { useCallback, useMemo } from 'react';
 
 import { budgetRules } from '../../api/control';
 import type { BudgetDimension, BudgetRule } from '../../types';
 import { humanWindow, windowNote } from '../../hooks';
+import { RowDelete } from '../../crud/RowDelete';
+import { useCrud } from '../../crud/useCrud';
 
 const { Text } = Typography;
 
@@ -58,62 +58,33 @@ export interface BudgetsProps {
 }
 
 export function Budgets({ scopeKind, scopeId, title, onChanged }: BudgetsProps) {
-  const { message } = AntApp.useApp();
-  const [rules, setRules] = useState<BudgetRule[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [form] = Form.useForm();
+  const [form] = Form.useForm<{ dimension: BudgetDimension; window: string; limit: number }>();
 
-  const reload = useCallback(async () => {
-    try {
-      setRules(await budgetRules.list(scopeId));
-      setLoaded(true);
-    } catch (err) {
-      message.error(`cannot read the budgets: ${err}`);
-    }
-  }, [scopeId, message]);
+  const read = useCallback(() => budgetRules.list(scopeId), [scopeId]);
 
-  // Loaded when the scope changes rather than on a poll: a budget is set by a
-  // person, and re-reading it every few seconds would fight the form.
-  const [seenScope, setSeenScope] = useState<string>();
-  if (seenScope !== scopeId) {
-    setSeenScope(scopeId);
-    setLoaded(false);
-    void reload();
-  }
-
-  const add = useCallback(
-    async (values: { dimension: BudgetDimension; window: string; limit: number }) => {
-      setBusy(true);
-      try {
-        await budgetRules.save({ scopeKind, scopeId, ...values });
-        form.resetFields();
-        await reload();
-        onChanged();
-      } catch (err) {
-        message.error(`cannot set the budget: ${err}`);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [scopeKind, scopeId, form, reload, onChanged, message],
+  // The window is part of the id because one dimension may be capped over
+  // several windows, and removing one must not remove the others. The server
+  // has one duration and cannot echo back the spelling the operator typed, so
+  // the id is rebuilt from the seconds it sends -- the same function the
+  // Window column renders, which is why it has to round the same way.
+  const removeByRule = useCallback(
+    (r: BudgetRule) =>
+      budgetRules.remove(`${scopeKind}/${scopeId}/${r.dimension}/${humanWindow(r.windowSeconds)}`),
+    [scopeKind, scopeId],
   );
 
-  const remove = useCallback(
-    async (rule: BudgetRule) => {
-      // The window is part of the id because one dimension may be capped over
-      // several windows, and removing one must not remove the others.
-      const id = `${scopeKind}/${scopeId}/${rule.dimension}/${humanWindow(rule.windowSeconds)}`;
-      try {
-        await budgetRules.remove(id);
-        await reload();
-        onChanged();
-      } catch (err) {
-        message.error(`cannot remove the budget: ${err}`);
-      }
-    },
-    [scopeKind, scopeId, reload, onChanged, message],
-  );
+  const { rows: rules, emptyText, busy, create: add, remove } = useCrud<BudgetRule, { dimension: BudgetDimension; window: string; limit: number }>({
+    read,
+    scope: scopeId,
+    create: (values) => budgetRules.save({ scopeKind, scopeId, ...values }),
+    remove: removeByRule,
+    form,
+    readError: 'cannot read the budgets',
+    empty: 'no cap set — this scope is unlimited',
+    createError: 'cannot set the budget',
+    removeError: 'cannot remove the budget',
+    onChanged,
+  });
 
   const data = useMemo<BudgetRow[]>(
     () =>
@@ -139,8 +110,12 @@ export function Budgets({ scopeKind, scopeId, title, onChanged }: BudgetsProps) 
             </Text>
           </Space>
         )}
-        locale={{ emptyText: loaded ? 'no cap set — this scope is unlimited' : 'loading' }}
+        locale={{ emptyText }}
         pagination={false}
+        // The Limit column has no width of its own and holds a number with a
+        // unit in it, so it is the first thing to collapse when the panel is
+        // narrow. A floor lets it scroll instead.
+        scroll={{ x: 520 }}
         rowKey="key"
         dataSource={data}
         columns={[
@@ -167,9 +142,7 @@ export function Budgets({ scopeKind, scopeId, title, onChanged }: BudgetsProps) 
             title: '',
             width: 40,
             render: (_, r) => (
-              <Popconfirm title="Remove this cap?" onConfirm={() => remove(r)}>
-                <Button type="text" danger size="small" icon={<DeleteOutlined />} />
-              </Popconfirm>
+              <RowDelete row={r} title="Remove this cap?" description="Only this dimension and window." onConfirm={remove} />
             ),
           },
         ]}

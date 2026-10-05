@@ -48,6 +48,7 @@ export function RatesCard({
         size="small"
         rowKey="cluster"
         pagination={false}
+        scroll={{ x: 380 }}
         locale={{ emptyText: 'no rate declared; every period closes unpriced' }}
         dataSource={rates}
         columns={[

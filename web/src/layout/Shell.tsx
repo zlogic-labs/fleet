@@ -14,12 +14,11 @@ import {
   CloudServerOutlined,
   DashboardOutlined,
   DollarOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
 import { useLocation, useNavigate } from 'react-router-dom';
 
+import { Bar } from './Bar';
 import { HOME, NAV, SETTINGS, groupOf } from './nav';
 import { Settings } from '../pages/Settings';
 
@@ -42,8 +41,16 @@ export function Shell({ children, edition, status }: ShellProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
+  // Below antd's lg breakpoint the sider cannot be 224px: at a 430px window
+  // that left 190px of content, which is narrower than the tables it holds and
+  // produced the one-character-per-line layout this replaced. antd already
+  // watches the width for us, so the state is its answer rather than a
+  // matchMedia of our own that could disagree with the one the Sider uses.
+  const [narrow, setNarrow] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [open, setOpen] = useState<string[]>([]);
+
+  const folded = collapsed || narrow;
 
   // '/' is Overview, not Playground. Collapsing the root onto another page
   // made the root a dead entry: a deep link to / served a screen that nothing
@@ -77,7 +84,10 @@ export function Shell({ children, edition, status }: ShellProps) {
     <Layout style={{ height: '100vh' }}>
       <Sider
         collapsible
-        collapsed={collapsed}
+        collapsed={folded}
+        breakpoint="lg"
+        collapsedWidth={80}
+        onBreakpoint={setNarrow}
         onCollapse={setCollapsed}
         trigger={null}
         theme="light"
@@ -88,13 +98,13 @@ export function Shell({ children, edition, status }: ShellProps) {
           flexDirection: 'column',
         }}
       >
-        <Brand collapsed={collapsed} edition={edition} />
+        <Brand collapsed={folded} edition={edition} />
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           <Menu
             mode="inline"
             selectedKeys={[selected]}
-            openKeys={collapsed ? undefined : open}
+            openKeys={folded ? undefined : open}
             onOpenChange={setOpen}
             onClick={(e) => navigate(e.key)}
             items={items}
@@ -103,14 +113,18 @@ export function Shell({ children, edition, status }: ShellProps) {
         </div>
 
         <Foot
-          collapsed={collapsed}
+          collapsed={folded}
           onSettings={() => setSettingsOpen(true)}
           status={status}
         />
       </Sider>
 
-      <Layout>
-        <Bar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} title={titleFor(selected)} />
+      {/* minWidth 0, not for tidiness. A flex child defaults to min-width
+          auto, so one wide descendant -- a Card whose title and extra share a
+          row is enough -- pushes this column past the viewport and the content
+          is clipped at the right edge with no scrollbar to explain why. */}
+      <Layout style={{ minWidth: 0 }}>
+        <Bar folded={folded} narrow={narrow} onToggle={() => setCollapsed((c) => !c)} title={titleFor(selected)} />
         <Content style={{ overflowY: 'auto', padding: selected === '/playground' ? 0 : 20 }}>
           {children}
         </Content>
@@ -165,41 +179,6 @@ function Brand({ collapsed, edition }: { collapsed: boolean; edition?: string })
           )}
         </Space>
       )}
-    </div>
-  );
-}
-
-function Bar({
-  collapsed,
-  onToggle,
-  title,
-}: {
-  collapsed: boolean;
-  onToggle: () => void;
-  title: string;
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        height: 52,
-        padding: '0 16px 0 8px',
-        background: '#fff',
-        borderBottom: '1px solid rgba(5,5,5,0.08)',
-        flex: '0 0 auto',
-      }}
-    >
-      <Button
-        type="text"
-        onClick={onToggle}
-        icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-        aria-label={collapsed ? 'Expand the sidebar' : 'Collapse the sidebar'}
-      />
-      <Text strong style={{ fontSize: 15 }}>
-        {title}
-      </Text>
     </div>
   );
 }

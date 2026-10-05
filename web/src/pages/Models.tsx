@@ -35,6 +35,7 @@ import {
 import { models as modelsApi, engines as enginesApi, pulls, storage } from '../api/control';
 import { errorText } from '../api/client';
 import { usePoll, humanBytes, humanAge } from '../hooks';
+import { ControlPlaneAlert } from '../parts/control-plane';
 import type { EngineProfile, PullJob, RegistryModel } from '../types';
 
 const { Text, Paragraph } = Typography;
@@ -123,11 +124,9 @@ export function Models() {
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       {!reachable && !storage$.loading && (
-        <Alert
-          type="info"
-          showIcon
-          message="No control plane is answering"
-          description={
+        <ControlPlaneAlert
+          error={storage$.error ?? models.error}
+          hint={
             <>
               Model registry, pulls and cluster status come from <code>fleet-apiserver</code>, not
               from the gateway. Start it on port 8081, or set its address under Settings.

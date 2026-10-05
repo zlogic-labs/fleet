@@ -1,15 +1,25 @@
-import { Alert, App as AntApp, Button, Card, Col, Form, Input, InputNumber, Popconfirm, Row, Space, Table, Tag, Typography } from 'antd';
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import { Button, Card, Col, Form, Input, InputNumber, Row, Space, Table, Tag, Typography } from 'antd';
+import { PlusOutlined } from '@ant-design/icons';
 import { useCallback, useState } from 'react';
 
 import { tenants as tenantsApi } from '../api/control';
-import { usePoll } from '../hooks';
 import type { Tenant } from '../types';
+import { RowDelete } from '../crud/RowDelete';
+import { useCrud } from '../crud/useCrud';
+import { ControlPlaneAlert } from '../parts/control-plane';
 import { Budgets } from './tenancy/Budgets';
 import { Keys } from './tenancy/Keys';
 import { Projects } from './tenancy/Projects';
 
 const { Text } = Typography;
+
+/** What the add-tenant form collects. The server also wants active, which the form never sets. */
+interface TenantFields {
+  id: string;
+  name: string;
+  requestLimit: number;
+  tokenLimit: number;
+}
 
 /**
  * Tenancy: who may call this platform, and what each of them may spend.
@@ -21,62 +31,41 @@ const { Text } = Typography;
  * for a project, not a way to spend against a tenant directly.
  */
 export function Tenancy() {
-  const { message } = AntApp.useApp();
-  const tenants$ = usePoll((signal) => tenantsApi.list(signal), 15000);
   const [picked, setPicked] = useState<string>();
   const [project, setProject] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [form] = Form.useForm();
+  const [form] = Form.useForm<TenantFields>();
 
-  const refresh = tenants$.refresh;
-  const reload = useCallback(() => refresh(), [refresh]);
+  const read = useCallback(() => tenantsApi.list(), []);
+  const { rows: tenants, answered, error, busy, emptyText, create, remove, reload } = useCrud<Tenant, TenantFields>({
+    read,
+    scope: 'tenants',
+    pollMs: 15000,
+    create: (values) => tenantsApi.create({ ...values, active: true }),
+    remove: (t) => tenantsApi.remove(t.id),
+    form,
+    readError: 'cannot read the tenants',
+    empty: 'none yet',
+    createError: 'cannot create the tenant',
+    removeError: 'cannot delete the tenant',
+    onRemoved: () => {
+      setPicked('');
+      setProject('');
+    },
+  });
 
-  const tenants = tenants$.data ?? [];
   // Selection follows the data: a poll can remove the tenant that was picked,
   // and then the page would render detail for a scope that no longer exists.
   const current = tenants.find((t) => t.id === picked) ?? tenants[0];
-
-  const create = useCallback(
-    async (values: { id: string; name: string; requestLimit: number; tokenLimit: number }) => {
-      setBusy(true);
-      try {
-        await tenantsApi.create({ ...values, active: true });
-        form.resetFields();
-        reload();
-      } catch (err) {
-        message.error(`cannot create the tenant: ${err}`);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [form, reload, message],
-  );
-
-  const remove = useCallback(
-    async (id: string) => {
-      try {
-        await tenantsApi.remove(id);
-        setPicked('');
-        setProject('');
-        reload();
-      } catch (err) {
-        message.error(`cannot delete the tenant: ${err}`);
-      }
-    },
-    [reload, message],
-  );
 
   const projectName = project.split('/').slice(1).join('/');
 
   return (
     <>
-      {tenants$.error && tenants$.data === undefined && (
-        <Alert
-          showIcon
-          type="info"
+      {error && !answered && (
+        <ControlPlaneAlert
+          error={error}
           style={{ marginBottom: 16 }}
-          message="No control plane is answering"
-          description="Tenants, projects, keys and budgets live in fleet-apiserver, not in the gateway. Start it on port 8081, or set its address under Settings."
+          hint="Tenants, projects, keys and budgets live in fleet-apiserver, not in the gateway. Start it on port 8081, or set its address under Settings."
         />
       )}
 
@@ -91,7 +80,8 @@ export function Tenancy() {
               size="small"
               rowKey="id"
               pagination={false}
-              locale={{ emptyText: 'none yet' }}
+              scroll={{ x: 260 }}
+              locale={{ emptyText }}
               dataSource={tenants}
               onRow={(t) => ({ onClick: () => setPicked(t.id), style: { cursor: 'pointer' } })}
               rowClassName={(t) => (t.id === current?.id ? 'fleet-selected' : '')}
@@ -106,13 +96,12 @@ export function Tenancy() {
                   title: '',
                   width: 40,
                   render: (_, t) => (
-                    <Popconfirm
+                    <RowDelete
+                      row={t}
                       title="Delete this tenant?"
                       description="Refused if anything was billed under it. An inactive tenant is the honest way to stop traffic."
-                      onConfirm={() => remove(t.id)}
-                    >
-                      <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={(e) => e.stopPropagation()} />
-                    </Popconfirm>
+                      onConfirm={remove}
+                    />
                   ),
                 },
               ]}

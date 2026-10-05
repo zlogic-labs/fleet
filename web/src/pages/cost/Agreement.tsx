@@ -111,6 +111,7 @@ export function Agreement({ report }: { report?: UsageAgreement }) {
           dataSource={keys}
           columns={columns}
           pagination={false}
+          scroll={{ x: 620 }}
         />
       )}
     </Card>

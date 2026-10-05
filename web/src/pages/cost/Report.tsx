@@ -107,6 +107,7 @@ export function Report({ report }: { report: CostReport }) {
             rowKey="key"
             title={() => 'By tenant'}
             pagination={false}
+            scroll={{ x: 560 }}
             locale={{ emptyText: 'nobody used anything' }}
             dataSource={report.tenants}
             columns={[
@@ -148,6 +149,7 @@ export function Report({ report }: { report: CostReport }) {
             rowKey="name"
             title={() => 'By deployment'}
             pagination={false}
+            scroll={{ x: 460 }}
             locale={{ emptyText: 'no deployments reported' }}
             dataSource={report.deployments}
             columns={[

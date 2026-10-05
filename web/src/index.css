@@ -45,3 +45,17 @@ code {
     animation: none;
   }
 }
+
+/* A Card's extra cannot shrink: antd gives it flex-shrink 0 and nowrap, so one
+   sentence beside a title sets a floor on the card's width and pushes the whole
+   page wider than the window — the content is then clipped at the right edge
+   with nothing to scroll. Letting the header wrap moves the extra to its own
+   line instead of hiding it, and one rule covers every card on the console. */
+.ant-card-head-wrapper {
+  flex-wrap: wrap;
+}
+
+.ant-card-extra {
+  margin-inline-start: auto;
+  white-space: normal;
+}

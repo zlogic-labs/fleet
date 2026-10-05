@@ -16,6 +16,7 @@ import { CloudServerOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-de
 
 import { cluster as clusterApi, deployments as deploymentsApi } from '../api/control';
 import { usePoll, humanAge } from '../hooks';
+import { ControlPlaneAlert } from '../parts/control-plane';
 import type { ClusterNode, ClusterReport, Deployment } from '../types';
 
 const { Text, Paragraph } = Typography;
@@ -39,11 +40,9 @@ export function Cluster() {
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       {noControlPlane && (
-        <Alert
-          type="info"
-          showIcon
-          message="No control plane is answering"
-          description="Cluster inventory is reported by the operator. Start fleet-apiserver on port 8081."
+        <ControlPlaneAlert
+          error={status.error}
+          hint="Cluster inventory is reported by the operator. Start fleet-apiserver on port 8081."
         />
       )}
 

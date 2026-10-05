@@ -46,6 +46,7 @@ export function PeriodsCard({
         size="small"
         rowKey="period"
         pagination={false}
+        scroll={{ x: 420 }}
         locale={{ emptyText: 'nothing closed yet' }}
         dataSource={periods}
         onRow={(p) => ({ onClick: () => onPick(p.period), style: { cursor: 'pointer' } })}
