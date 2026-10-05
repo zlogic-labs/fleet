@@ -20,6 +20,11 @@ type Refresher struct {
 	Client *Client
 	// Discover polls the control plane for deployments. Set by Run when a
 	// control plane address is configured.
+	//
+	// Off when none is, which is not an error: a gateway with three
+	// hand-written upstreams has everything it needs to route and nothing to
+	// ask. The scrape loop runs either way, so endpoint metrics are published
+	// by a gateway that never discovers anything.
 	Discover bool
 	Profiles *engine.Profiles
 	Log      *slog.Logger
@@ -28,8 +33,9 @@ type Refresher struct {
 	// restart is not turned into a request storm.
 	Interval time.Duration
 	// ScrapeEvery skips most scrapes. Metrics are expensive relative to the
-	// deployment list, and a load sample that is five seconds old is still
-	// the truth for routing purposes.
+	// deployment list, and at the defaults -- a 15-second Interval with
+	// ScrapeEvery of 4 -- a load sample is at most a minute old, which is what
+	// engine.StaleAfter is sized against.
 	ScrapeEvery int
 
 	// Apply receives each new endpoint set. The gateway wires this to the
@@ -129,9 +135,8 @@ func (r *Refresher) Run(ctx context.Context) error {
 	}
 }
 
-// Discover turns the deployment fetch on. Off when no control plane is
-// configured, which is not an error: a gateway with three hand-written
-// upstreams has everything it needs to route and nothing to ask.
+// scrapeIfDue scrapes on every ScrapeEvery-th pass, so a metrics sweep does
+// not run on the ticks that only refresh the deployment list.
 func (r *Refresher) scrapeIfDue(ctx context.Context, i int) {
 	if i%r.ScrapeEvery != 0 {
 		return
@@ -218,9 +223,11 @@ func (r *Refresher) scrapeAll(ctx context.Context) {
 	if r.Apply != nil {
 		r.Apply(eps)
 	}
-	if r.Report != nil {
-		r.Report(eps)
-	}
+	// No Report here: the loop in Run publishes on every tick, including this
+	// one, and it publishes the set this call just installed. Reporting from
+	// both places meant every scrape tick published twice in a row -- once with
+	// the previous tick's load and once with this one's -- which is twice the
+	// work for a gauge whose second write is the one that counts.
 }
 
 // profileFor picks the engine profile for an endpoint, from the label the

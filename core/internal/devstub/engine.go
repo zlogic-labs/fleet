@@ -36,10 +36,17 @@ type Config struct {
 	Silent bool
 }
 
+// DemoModel is the identifier the stub serves when nobody named one.
+//
+// Exported because cmd/fleet-gateway declares the same upstream, and a stub
+// whose /v1/models answer did not contain the model the gateway routes to would
+// look like a discovery bug rather than a duplicated literal.
+const DemoModel = "demo/Qwen2.5-1.5B-Instruct"
+
 func (c *Config) withDefaults() Config {
 	out := *c
 	if len(out.Models) == 0 {
-		out.Models = []string{"demo/Qwen2.5-1.5B-Instruct"}
+		out.Models = []string{DemoModel}
 	}
 	if out.PromptTokens <= 0 {
 		out.PromptTokens = 412

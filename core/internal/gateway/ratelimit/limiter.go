@@ -110,6 +110,10 @@ func Project(tenant, project string) Scope {
 // handler that recovers the retry time from the message breaks the first time
 // somebody rewords the message, and it fails as a client that does not honour
 // Retry-After and therefore retries in a tight loop.
+//
+// Only RetryAfter is read by this codebase today. The rest is the payload a
+// caller gets instead of parsing Err, and is kept for that reason rather than
+// for a reader that has not been written yet.
 type Limited struct {
 	// Scope is the level that refused. A caller that must tell a tenant their
 	// own budget apart from one project's budget needs this, and the message

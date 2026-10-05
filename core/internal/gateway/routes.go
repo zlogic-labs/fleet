@@ -9,6 +9,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
+	"github.com/zlogic-labs/fleet/core/pkg/httpx"
 	"github.com/zlogic-labs/fleet/core/pkg/metrics"
 )
 
@@ -31,7 +32,7 @@ func routes(d routesDeps) chi.Router {
 	// Order matters and is the order it is in: recoverer is outermost so a
 	// panic in any later middleware still becomes an envelope; authentication
 	// runs before the body is read so an invalid key costs nothing.
-	r.Use(recoverer(d.log), requestLog(d.log))
+	r.Use(httpx.Recoverer(d.log), httpx.RequestLog(d.log))
 
 	// Health is registered before the authenticated subrouter rather than
 	// exempted from the middleware. A Kubernetes probe cannot hold a

@@ -7,11 +7,19 @@ import (
 )
 
 // ContentPart is one element of a multimodal message. Only the fields we act
-// on are modelled; unknown parts round-trip through Raw.
+// on are modelled.
+//
+// An image_url or input_audio part decodes to a Type and nothing else: the
+// payload is not captured, so Text is empty and the part contributes nothing to
+// a token estimate. That is the intended reading rather than an oversight --
+// the request is forwarded as the bytes the client sent (ensureIncludeUsage
+// edits one byte position and never re-encodes), so the engine still receives
+// the image; what is lost is Fleet's own estimate of its prompt, which is why
+// an engine's reported usage outranks it (P6) and why the row says which of
+// the two it used.
 type ContentPart struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	Raw  string `json:"-"`
 }
 
 // Content holds a message body that may arrive either as a plain string or as

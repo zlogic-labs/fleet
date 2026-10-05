@@ -10,9 +10,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
@@ -74,15 +72,6 @@ func (l Limits) OrDefaults(d Limits) Limits {
 	return l
 }
 
-// Granted reports whether the caller's licence covers a capability.
-//
-// The licence is the server's, not the key's: a key cannot grant what the
-// deployment does not have. That is what makes GET /fleet/status a fact rather
-// than a claim, and what stops a stale page badge from unlocking anything.
-func (p Principal) Granted(c entitlement.Capability, now time.Time, lic entitlement.License) bool {
-	return lic.Granted(c, now)
-}
-
 // KeyStore resolves a presented credential.
 //
 // It returns a zero Principal and ok=false for an unknown key rather than an
@@ -99,7 +88,6 @@ type KeyStore interface {
 // Authenticator turns a request into a Principal.
 type Authenticator struct {
 	Store KeyStore
-	Lic   entitlement.License
 }
 
 // Authenticate resolves the credential on r.

@@ -34,24 +34,23 @@ var latencyBuckets = []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 type observer struct {
 	reg *metrics.Registry
 
-	requests   *metrics.Counter
-	duration   *metrics.Histogram
-	ttft       *metrics.Histogram
-	tokens     *metrics.Counter
-	spend      *metrics.Counter
-	estimated  *metrics.Counter
-	refused    *metrics.Counter
-	endpoints  *metrics.Gauge
-	queue      *metrics.Gauge
-	running    *metrics.Gauge
-	kvCache    *metrics.Gauge
-	buildInfo  *metrics.Gauge
-	allBuckets []float64
+	requests  *metrics.Counter
+	duration  *metrics.Histogram
+	ttft      *metrics.Histogram
+	tokens    *metrics.Counter
+	spend     *metrics.Counter
+	estimated *metrics.Counter
+	refused   *metrics.Counter
+	endpoints *metrics.Gauge
+	queue     *metrics.Gauge
+	running   *metrics.Gauge
+	kvCache   *metrics.Gauge
+	buildInfo *metrics.Gauge
 }
 
 // newObserver declares every family, once, with its help text.
 func newObserver(reg *metrics.Registry) *observer {
-	o := &observer{reg: reg, allBuckets: latencyBuckets}
+	o := &observer{reg: reg}
 	o.requests = reg.Counter("fleet_requests_total",
 		"Requests finished, by the model that served them and how it ended.",
 		"tenant", "project", "model", "outcome")

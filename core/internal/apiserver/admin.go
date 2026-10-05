@@ -8,6 +8,7 @@ import (
 
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/httpx"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -31,8 +32,8 @@ func writeError(w http.ResponseWriter, err error) {
 // failInternal answers 500 and records the cause for the log. The caller never
 // sees it, which is the point — but it has to reach the operator somewhere.
 func failInternal(w http.ResponseWriter, err error) {
-	if f, ok := w.(interface{ Fail(error) }); ok {
-		f.Fail(err)
+	if rec, ok := httpx.RecorderOf(w); ok {
+		rec.Fail(err)
 	}
 	writeError(w, errs.Internal(err))
 }

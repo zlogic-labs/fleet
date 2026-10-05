@@ -49,12 +49,11 @@ type Model struct {
 	// Tokenizer names the tokenizer to use for local token counting. It is
 	// empty for GGUF, where the tokenizer is embedded in the weights and a
 	// separate id would be a fiction.
-	Tokenizer  string    `json:"tokenizerId"`
-	Context    int       `json:"contextLimit"`
-	Message    string    `json:"message,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	ReportedAt time.Time `json:"reportedAt,omitempty"`
+	Tokenizer string    `json:"tokenizerId"`
+	Context   int       `json:"contextLimit"`
+	Message   string    `json:"message,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // PullState is a job's lifecycle.

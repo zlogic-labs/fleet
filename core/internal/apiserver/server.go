@@ -19,6 +19,7 @@ import (
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
+	"github.com/zlogic-labs/fleet/core/pkg/httpx"
 	"github.com/zlogic-labs/fleet/core/pkg/inventory"
 )
 
@@ -30,8 +31,6 @@ type Config struct {
 	// Hub is the model repository. Nil means the stub, which only has
 	// synthetic repositories.
 	Hub hub.Hub
-	// Token authenticates to gated Hub repositories.
-	Token string
 	// DB is where tenants, keys, budgets and the ledger live.
 	DB *sqlstore.DB
 	// Policies, Keys and Quota are the stores the tenancy routes write
@@ -58,8 +57,6 @@ type Config struct {
 	// wildcard without one would hand the whole money surface of the platform
 	// to anything that can open a socket, so NewServer refuses that instead.
 	AdminTokens []string
-	Version     string
-	Edition     string
 }
 
 const apiPrefix = "/api/v1"
@@ -82,7 +79,6 @@ type Server struct {
 	cfg      Config
 	store    registry.Store
 	blobs    blobstore.Store
-	hub      hub.Hub
 	profiles *engine.Profiles
 	puller   *Puller
 	worker   *registry.Worker
@@ -135,7 +131,7 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	worker.Start(puller.Run)
 
 	return &Server{
-		cfg: cfg, store: store, blobs: blobs, hub: h, profiles: profiles,
+		cfg: cfg, store: store, blobs: blobs, profiles: profiles,
 		puller: puller, worker: worker, log: log,
 		db: cfg.DB, policies: cfg.Policies, keys: cfg.Keys, quota: cfg.Quota, cost: cfg.Cost,
 	}, nil
@@ -150,7 +146,7 @@ func (s *Server) Close() {
 // Handler builds the route table.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	r.Use(cors(s.cfg.AllowedOrigins), requestLog(s.log), recoverer(s.log))
+	r.Use(cors(s.cfg.AllowedOrigins), httpx.RequestLog(s.log), httpx.Recoverer(s.log))
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

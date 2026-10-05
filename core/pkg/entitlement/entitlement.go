@@ -13,8 +13,6 @@ package entitlement
 
 import (
 	"time"
-
-	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
 // Edition is which build is running.
@@ -63,12 +61,6 @@ type License struct {
 	ExpiresAt time.Time
 
 	Capabilities map[Capability]bool
-
-	// Numeric limits. Zero means unlimited, so the community default does not
-	// need to pick an arbitrary ceiling.
-	MaxNodes int
-	MaxGPUs  int
-	MaxUsers int
 }
 
 // Community returns the licence for an unlicensed build: no gated capability,
@@ -110,51 +102,8 @@ func (l License) Granted(c Capability, now time.Time) bool {
 	return l.Capabilities[c]
 }
 
-// Allow reports whether a numeric limit has room. A limit of zero is unlimited.
-func (l License) Allow(limit int, current int) bool {
-	return limit == 0 || current < limit
-}
-
-// Require returns a typed error when the capability is not granted. Handlers
-// call it and let errs decide the status, so no handler has to know the
-// edition rules.
-func (l License) Require(c Capability, now time.Time) error {
-	if l.Granted(c, now) {
-		return nil
-	}
-	return errs.New(
-		errs.KindPermissionDenied,
-		"feature_requires_enterprise",
-		"%s is an enterprise capability; this deployment runs the %s edition",
-		c, l.Edition,
-	)
-}
-
-// RequireLimit is the numeric counterpart of Require.
-func (l License) RequireLimit(name string, limit, current int) error {
-	if l.Allow(limit, current) {
-		return nil
-	}
-	return errs.New(
-		errs.KindPermissionDenied,
-		"quota_exceeded",
-		"this deployment is limited to %d %s; %d are in use",
-		limit, name, current,
-	)
-}
-
-// Checker is what handlers depend on rather than a concrete License, so that
-// tests can substitute one without touching a clock or a file.
-type Checker interface {
-	License() License
-	Has(Capability) bool
-}
-
-// Static is a Checker over a fixed License. It is the community build's
-// implementation and the fallback everywhere else.
-type Static struct{ lic License }
-
-func NewStatic(l License) Static { return Static{lic: l} }
-
-func (s Static) License() License      { return s.lic }
-func (s Static) Has(c Capability) bool { return s.lic.Granted(c, time.Now()) }
+// There is no numeric limit here and no Checker interface, and that is also a
+// decision. A limit with nothing counting against it is a constant; a Checker
+// with one implementation and no caller is a promise about a substitution
+// nobody has needed. When a limit is required, the thing being limited will
+// say what "current" means for it -- which is the only part that is hard.

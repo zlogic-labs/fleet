@@ -93,12 +93,7 @@ func (m *Memory) Reserve(_ context.Context, req Request) (Reservation, error) {
 	scope := req.Scope.Normalized()
 	policies := m.policiesFor(scope)
 	if policies.Unlimited() {
-		return Reservation{
-			tenant:        scope.Tenant,
-			project:       scope.Project,
-			tenantPolicy:  policies.Envelope,
-			projectPolicy: policies.Partition,
-		}, nil
+		return Reservation{tenant: scope.Tenant, project: scope.Project}, nil
 	}
 
 	now := m.now()
@@ -128,13 +123,11 @@ func (m *Memory) Reserve(_ context.Context, req Request) (Reservation, error) {
 	}
 
 	return Reservation{
-		id:            fmt.Sprintf("rsv-%d-%s", m.seq.Add(1), scope),
-		tenant:        scope.Tenant,
-		project:       scope.Project,
-		tenantPolicy:  policies.Envelope,
-		projectPolicy: policies.Partition,
-		Reserved:      req.Tokens,
-		counted:       true,
+		id:       fmt.Sprintf("rsv-%d-%s", m.seq.Add(1), scope),
+		tenant:   scope.Tenant,
+		project:  scope.Project,
+		Reserved: req.Tokens,
+		counted:  true,
 	}, nil
 }
 

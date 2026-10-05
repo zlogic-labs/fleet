@@ -19,11 +19,6 @@ type Reservation struct {
 	// project is the partition charged, empty when the request was charged to
 	// the tenant envelope alone.
 	project string
-	// policies are the limits in force at reservation time, kept for the
-	// refusal path and for reporting. Settlement does not re-read them: a limit
-	// lowered mid-flight must not change what an in-flight request releases.
-	tenantPolicy  Policy
-	projectPolicy Policy
 	// Reserved is what was deducted. Settlement removes all of it and records
 	// the actual amount instead.
 	Reserved int
@@ -50,30 +45,23 @@ type Reservation struct {
 // Limiter cannot: the fields are unexported on purpose, because a caller that
 // invents a reservation holding neither the scope it was charged to nor the
 // second it was charged in cannot have its settlement applied correctly.
-func NewReservation(id, tenant, project string, p Policies, reserved int, at time.Time) Reservation {
+func NewReservation(id, tenant, project string, reserved int, at time.Time) Reservation {
 	return Reservation{
-		id:            id,
-		tenant:        tenant,
-		project:       project,
-		tenantPolicy:  p.Envelope,
-		projectPolicy: p.Partition,
-		Reserved:      reserved,
-		counted:       true,
-		at:            at.Unix(),
+		id:       id,
+		tenant:   tenant,
+		project:  project,
+		Reserved: reserved,
+		counted:  true,
+		at:       at.Unix(),
 	}
 }
 
 // Admitted is a reservation that was allowed through and charged nothing,
-// because no limit applied. It still carries the scope and the policies, so a
-// caller reporting on it names the right thing, and its settlement is a no-op
-// rather than a credit against a counter that was never incremented.
-func Admitted(tenant, project string, p Policies) Reservation {
-	return Reservation{
-		tenant:        tenant,
-		project:       project,
-		tenantPolicy:  p.Envelope,
-		projectPolicy: p.Partition,
-	}
+// because no limit applied. It still carries the scope, so a caller reporting
+// on it names the right thing, and its settlement is a no-op rather than a
+// credit against a counter that was never incremented.
+func Admitted(tenant, project string) Reservation {
+	return Reservation{tenant: tenant, project: project}
 }
 
 // ID identifies the reservation for logs.

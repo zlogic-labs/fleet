@@ -36,6 +36,12 @@ type Puller struct {
 	FileConcurrency int
 }
 
+// DefaultFileConcurrency is how many files within one pull download at once
+// when the operator expressed no preference. NewServer overwrites it with the
+// configured value; the default exists so a Puller built directly is still
+// usable rather than serial.
+const DefaultFileConcurrency = 3
+
 func NewPuller(store registry.Store, blobs blobstore.Store, h hub.Hub,
 	profiles *engine.Profiles, log *slog.Logger) *Puller {
 	if profiles == nil {
@@ -47,7 +53,7 @@ func NewPuller(store registry.Store, blobs blobstore.Store, h hub.Hub,
 		Hub:             h,
 		Profiles:        profiles,
 		Log:             log,
-		FileConcurrency: 3,
+		FileConcurrency: DefaultFileConcurrency,
 	}
 }
 
@@ -107,6 +113,18 @@ func (p *Puller) Run(ctx context.Context, job *registry.Pull) error {
 	job.BytesDone = 0
 	job.Progress = 0
 
+	// Everything the worker sets on its own copy has to be published, because
+	// the store took its copy before any of it was known. The console reads the
+	// stored job, so a field set only on the worker's is a field the console
+	// never sees.
+	if _, err := p.Store.UpdatePull(ctx, job.ID, func(q *registry.Pull) {
+		q.Commit, q.Prefix, q.Format = job.Commit, job.Prefix, job.Format
+		q.FilesTotal, q.BytesTotal = job.FilesTotal, job.BytesTotal
+		q.BytesDone, q.Progress = 0, 0
+	}); err != nil {
+		return err
+	}
+
 	// The tokenizer is set from the format here, not only on completion.
 	// UpsertModel treats a zero field as "not provided" and inherits the
 	// stored value, so a GGUF model that should have no tokenizer id would
@@ -131,17 +149,29 @@ func (p *Puller) Run(ctx context.Context, job *registry.Pull) error {
 		bytesDone int64
 		filesDone int
 	)
+	// Total is fixed before the first file, so it is safe to read outside the
+	// accumulator's lock.
+	total := job.BytesTotal
 	progress := func(file string, n int64) {
 		mu.Lock()
-		defer mu.Unlock()
 		bytesDone += n
 		filesDone++
-		job.BytesDone = bytesDone
-		job.FilesDone = filesDone
-		job.CurrentFile = file
-		if job.BytesTotal > 0 {
-			job.Progress = float64(bytesDone) / float64(job.BytesTotal)
+		done, files := bytesDone, filesDone
+		mu.Unlock()
+
+		fraction := 0.0
+		if total > 0 {
+			fraction = float64(done) / float64(total)
 		}
+		// Both copies, deliberately. The worker's is what runOne publishes at
+		// the end; the store's is what the console polls while the pull runs.
+		// Writing only the worker's made the console show a job frozen at zero
+		// until it finished, and writing the stored one directly raced every
+		// poll -- which is what this replaced.
+		job.BytesDone, job.FilesDone, job.CurrentFile, job.Progress = done, files, file, fraction
+		_, _ = p.Store.UpdatePull(ctx, job.ID, func(q *registry.Pull) {
+			q.BytesDone, q.FilesDone, q.CurrentFile, q.Progress = done, files, file, fraction
+		})
 	}
 
 	if err := p.fetchAll(ctx, h, repo, prefix, progress); err != nil {
@@ -152,6 +182,10 @@ func (p *Puller) Run(ctx context.Context, job *registry.Pull) error {
 	job.CurrentFile = ""
 	job.Progress = 1
 	mu.Unlock()
+	_, _ = p.Store.UpdatePull(ctx, job.ID, func(q *registry.Pull) {
+		q.CurrentFile = ""
+		q.Progress = 1
+	})
 
 	if _, err := p.Store.UpsertModel(ctx, registry.Model{
 		Name:      owner + "/" + name,

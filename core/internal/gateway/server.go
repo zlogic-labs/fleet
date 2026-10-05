@@ -54,7 +54,7 @@ func Build(cfg Config, db *sqlstore.DB, sink detail.Sink, lic entitlement.Licens
 	if err != nil {
 		return nil, nil, err
 	}
-	auth := &authn.Authenticator{Store: keys, Lic: lic}
+	auth := &authn.Authenticator{Store: keys}
 
 	// One registry for the whole process. Declared here rather than in each
 	// component because /metrics is one document: two registries would publish
@@ -82,10 +82,12 @@ func Build(cfg Config, db *sqlstore.DB, sink detail.Sink, lic entitlement.Licens
 	// plane configured behaves exactly as it did before any of this existed.
 	refresher.Set(static)
 
+	// The tap's retention cap is not an option here on purpose: it is
+	// transport.DefaultRetainCap, owned by the tap that enforces it. Two places
+	// able to set it meant a caller could set one and silently get the other.
 	proxy := transport.New(transport.Options{
 		Transport: outboundTransport(cfg.Timeouts),
 		Authorize: upstreamAuthorizer(cfg.Upstreams),
-		RetainCap: 1 << 20,
 	})
 
 	limiter, err := limiterFor(cfg, db)
@@ -150,16 +152,8 @@ func staticEndpoints(ups []UpstreamConfig) []engine.Endpoint {
 	return out
 }
 
-// keyStore builds the credential store.
-//
-// A database, when configured, wins over the config file's key list. Not as a
-// precedence rule but because the two answer different questions: the file says
-// "these keys exist", the database says "these keys exist and here is what they
-// are allowed to do". A gateway pointed at Postgres and holding a stale key list
-// from a laptop experiment would otherwise accept credentials the tenant has
-// since revoked.
-//
-// The return type is the interface, not a concrete pointer, and that is the
+// keyStore lives in store.go; the note that matters at this call site is this:
+// the return type is the interface, not a concrete pointer, and that is the
 // whole point of the signature: returning a nil *authn.Memory in an interface
 // field produces a non-nil interface holding a nil pointer, so `store == nil`
 // downstream is false and a gateway with authentication disabled rejects every

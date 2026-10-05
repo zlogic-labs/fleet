@@ -10,7 +10,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
@@ -32,9 +31,6 @@ type Options struct {
 	// connection open for the entire generation time of a request.
 	Transport http.RoundTripper
 	Authorize Authorize
-	// RetainCap bounds the response bytes kept for usage parsing.
-	RetainCap int
-	Clock     func() time.Time
 }
 
 type Proxy struct {

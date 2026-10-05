@@ -91,6 +91,7 @@ func budgetFor(db *sqlstore.DB) quota.Limiter {
 // A configured database that will not connect stops the process. Carrying on
 // with an empty in-memory store would refuse every tenant while reporting
 // itself healthy, which is the worst of both: an outage that looks like a
+// healthy empty deployment.
 
 func openDatabase(ctx context.Context, cfg Config, log *slog.Logger) (*sqlstore.DB, error) {
 	if cfg.Database.URL == "" {

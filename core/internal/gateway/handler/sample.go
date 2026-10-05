@@ -44,7 +44,21 @@ type SampleLog struct {
 	limit   int
 }
 
+// DefaultSampleLimit is how many requests the recent-requests table holds when
+// the operator expressed no preference.
+const DefaultSampleLimit = 50
+
+// NewSampleLog builds the ring.
+//
+// A non-positive limit becomes DefaultSampleLimit rather than a log that
+// silently keeps nothing: with limit 0 the trim below discards every sample the
+// moment it is added, so /fleet/status reported an empty recent list and the
+// console looked like a gateway that had served no traffic. An unconfigured
+// buffer is not the same as a buffer of nothing.
 func NewSampleLog(limit int) *SampleLog {
+	if limit <= 0 {
+		limit = DefaultSampleLimit
+	}
 	return &SampleLog{limit: limit}
 }
 

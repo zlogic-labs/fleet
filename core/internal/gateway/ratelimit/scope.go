@@ -73,10 +73,16 @@ func (s Scope) String() string {
 	return s.Tenant + "/" + s.Project
 }
 
-// Anonymous is the scope of a request that authenticated to nobody.
+// Anonymous is the scope of a request that authenticated to nobody: the empty
+// scope, both fields unset.
 //
-// Its own value rather than a zero Scope, so a caller cannot accidentally
-// construct the anonymous bucket by leaving a field unset and then spend from
-// it. The limiter treats it as unlimited, which is the honest reading: nothing
-// is being charged for it, so there is nothing to ration.
+// It is a named value rather than something callers write out, and it does
+// exactly what Scope{} does -- which is the point worth stating, because the
+// alternative reading ("a distinct scope that cannot be constructed by
+// accident") is false: this *is* the zero Scope, so it can. What the limiter
+// does with it is unlimited, because nothing is charged for anonymous traffic
+// and there is nothing to ration.
+//
+// Kept as a named value only because it reads better at the call site than an
+// empty literal whose meaning has to be inferred.
 var Anonymous = Scope{}

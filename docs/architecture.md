@@ -786,7 +786,7 @@ POST /api/v1/cost-rates  200   所有租户的 GPU 小时费率被改写
 
 **它仍然不是角色系统。** 多个 token 是"几个完全相同的人"，不是"管理员和只读"。看起来像角色但行为不是角色的东西更坏，因为使用它的人会以为它做了它没做的事。按角色授权属于企业版能力，正是因为它在一个 audience 天然很小的控制面上没有意义。
 
-**企业版接的是 SSO，不是密码。** `sso` 是 `pkg/entitlement` 里的能力常量，接缝存在，但"启用 SSO 时走 OIDC、把身份映射到角色"这条路径目前一行代码都没有——`requireCapability` 定义了却没有任何路由在用，`entitlement` 的数值能力半边也从不被读。**这是接缝，不是实现**，写在这里是为了让下一个人知道缺的是什么。
+**企业版接的是 SSO，不是密码。** `sso` 是 `pkg/entitlement` 里的能力常量，`/fleet/status` 从 `License.Granted` 报出它有没有——**但没有任何代码把它变成一次拒绝**。中间件 `requireCapability` 曾以"接缝"的名义存在却没有任何路由调用，那种接缝比没有更糟：路由表会声称检查了它、测试会声称它能用，而第一个真正的付费功能会在运行时才发现。**所以它被删了**，`pkg/entitlement` 里那半边从不被读的数值能力（`MaxNodes`/`MaxGPUs`/`MaxUsers`）和只有一个实现、零个调用者的 `Checker` 接口一起删掉了。边界是 `License.Granted`，中间件在有路由可挂的时候才出现。控制台上"gated in the gateway, not hidden in the browser"这句话目前对凭据成立，对能力还不成立——写清楚比留一个假的门要好。
 
 ## 13. 社区版与企业版
 

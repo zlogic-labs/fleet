@@ -9,10 +9,6 @@ import (
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 )
 
-// Name identifies the protocol, not the engine family. Every runtime Fleet
-// supports speaks this, which is why there is one Adapter and several Profiles.
-func (a *Adapter) Name() string { return "openai-compatible" }
-
 // Probe reports what the endpoint can do.
 //
 // Only an unreachable or unhealthy endpoint is a hard failure. Every other

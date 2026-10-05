@@ -165,7 +165,6 @@ func run() error {
 		FileConcurrency: f.fileConc,
 		AllowedOrigins:  f.allowedOrigins,
 		AdminTokens:     f.adminTokens,
-		Version:         version,
 		DB:              db,
 		Policies:        policySource,
 		Keys:            keyStore,

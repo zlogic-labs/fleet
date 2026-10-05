@@ -8,7 +8,6 @@
 package engine
 
 import (
-	"context"
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/pkg/weights"
@@ -57,9 +56,13 @@ func (l Load) Stale(now time.Time, maxAge time.Duration) bool {
 
 // StaleAfter is how long a load sample stays actionable.
 //
-// Two minutes is generous against a five-minute scrape interval and short
-// enough that an engine which stopped answering stops being routed to within
-// the time an operator is still watching a dashboard.
+// Two minutes against a one-minute scrape interval (a 15-second refresh taking
+// every fourth pass) is two missed scrapes of slack, and short enough that an
+// engine which stopped answering stops being routed to while an operator is
+// still watching a dashboard. The margin has to be a multiple of the scrape
+// interval rather than a round number: a constant expressed as "two minutes"
+// invites someone to compare it against the refresh period and conclude it is
+// generous.
 const StaleAfter = 2 * time.Minute
 
 // Ready reports whether the endpoint is answering.
@@ -112,21 +115,16 @@ type Capability struct {
 	ProbedAt time.Time
 }
 
-// Adapter probes a running engine.
+// There was an Adapter interface here, one implementation per protocol, and it
+// is gone for the same reason the adapter registry went before it: there is one
+// protocol (P1), so there was one implementation, so the interface promised a
+// second implementation that the architecture forbids. Anyone reaching for it
+// to accommodate a second engine is about to re-create the vendor coupling P1
+// exists to prevent -- the answer is a Profile, which is a literal, or a new
+// probe inside pkg/engine/openai.
 //
-// There is one implementation of this interface per protocol, not per vendor,
-// because there is exactly one protocol (P1). Engine diversity lives in
-// Profile, which is data. Anyone tempted to add a second Adapter to
-// accommodate a second engine is about to re-create the vendor coupling P1
-// exists to prevent — the answer is a Profile, or a new probe on this one.
-type Adapter interface {
-	// Name identifies the protocol, not the engine family.
-	Name() string
-	// Probe reports capabilities. It must not fail hard when an optional
-	// capability is missing; only an unreachable engine is a hard failure.
-	// The profile says which optional endpoints to look for; the adapter says
-	// how to ask.
-	Probe(ctx context.Context, ep Endpoint, p Profile) (Capability, error)
-	// Models lists the model identifiers the endpoint serves.
-	Models(ctx context.Context, ep Endpoint) ([]string, error)
-}
+// What probing costs, now stated plainly: nothing in the gateway calls it. The
+// operator probes, in fleet-serving, and reports the result through the
+// inventory contract; that is where the endpoint's Capability comes from. This
+// package's probe is the same logic kept next to the Profile it reads, for the
+// autoscaler that will need it and for anyone verifying a profile by hand.

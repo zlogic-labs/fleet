@@ -60,7 +60,7 @@ func (l *RateLimiter) Reserve(ctx context.Context, req ratelimit.Request) (ratel
 	scope := req.Scope.Normalized()
 	policies := l.policies(scope)
 	if policies.Unlimited() {
-		return ratelimit.Admitted(scope.Tenant, scope.Project, policies), nil
+		return ratelimit.Admitted(scope.Tenant, scope.Project), nil
 	}
 
 	now := l.now()
@@ -89,7 +89,7 @@ func (l *RateLimiter) Reserve(ctx context.Context, req ratelimit.Request) (ratel
 	}
 
 	id := fmt.Sprintf("rsv-%d-%s", l.seq.Add(1), scope)
-	return ratelimit.NewReservation(id, scope.Tenant, scope.Project, policies, req.Tokens, now), nil
+	return ratelimit.NewReservation(id, scope.Tenant, scope.Project, req.Tokens, now), nil
 }
 
 // lockTenant serialises every scope belonging to one tenant against the others.

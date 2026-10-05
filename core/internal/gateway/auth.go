@@ -2,11 +2,8 @@ package gateway
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
-	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
-	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
 
@@ -34,25 +31,16 @@ func authenticate(auth *authn.Authenticator) func(http.Handler) http.Handler {
 	}
 }
 
-// requireCapability rejects a caller the licence does not cover.
+// There is deliberately no capability gate here yet, and that is a decision
+// rather than an omission.
 //
-// It is a separate middleware rather than a check inside a handler because the
-// answer is the same for every route that uses it, and a handler that forgets
-// to ask would expose a paid capability for free — the one failure an edition
-// boundary exists to prevent.
-func requireCapability(auth *authn.Authenticator, c entitlement.Capability) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p, _ := authn.FromContext(r.Context())
-			if !p.Granted(c, time.Now(), auth.Lic) {
-				openai.WriteError(w, errs.PermissionDenied(
-					"this capability (%s) is not in your edition", c))
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
+// A gate with no gated feature is a gate nobody tests: the route list would say
+// which endpoints check it, the tests would say the check works, and the first
+// real feature would find out at runtime. So the entitlement boundary is
+// License.Granted -- which /fleet/status already answers from, and which no
+// handler consults -- and the middleware appears when there is a route to put
+// it on. The claim the console makes, "gated in the gateway, not hidden in the
+// browser", is true of the credential and of nothing else yet.
 
 func unauthorized(w http.ResponseWriter, err error) {
 	// RFC 6750 says a 401 must advertise how to authenticate. An SDK that

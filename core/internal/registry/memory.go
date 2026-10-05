@@ -2,7 +2,6 @@ package registry
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 )
@@ -99,72 +98,6 @@ func (m *Memory) DeleteModel(_ context.Context, name string) error {
 	return nil
 }
 
-func (m *Memory) CreatePull(_ context.Context, p *Pull) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.pulls[p.ID]; ok {
-		return errors.New("registry: pull already exists: " + p.ID)
-	}
-	if p.done == nil {
-		p.done = make(chan struct{})
-	}
-	if p.StartedAt.IsZero() {
-		p.StartedAt = time.Now().UTC()
-	}
-	m.pulls[p.ID] = p
-	m.order = append(m.order, p.ID)
-	return nil
-}
-
-func (m *Memory) UpdatePull(_ context.Context, id string, fn func(*Pull)) (*Pull, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok := m.pulls[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	fn(p)
-	return p, nil
-}
-
-func (m *Memory) GetPull(_ context.Context, id string) (*Pull, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	p, ok := m.pulls[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return p.clone(), nil
-}
-
-func (m *Memory) ListPulls(_ context.Context) ([]*Pull, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]*Pull, 0, len(m.pulls))
-	for _, id := range m.order {
-		if p, ok := m.pulls[id]; ok {
-			out = append(out, p.clone())
-		}
-	}
-	return out, nil
-}
-
-func (m *Memory) CancelPull(_ context.Context, id string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok := m.pulls[id]
-	if !ok {
-		return false, ErrNotFound
-	}
-	if !p.State.Running() {
-		return false, nil
-	}
-	if p.cancel != nil {
-		p.cancel()
-	}
-	return true, nil
-}
-
 func (m *Memory) ReportCluster(_ context.Context, c Cluster) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -211,38 +144,5 @@ func inherit[T comparable](dst *T, prev T) {
 	var zero T
 	if *dst == zero {
 		*dst = prev
-	}
-}
-
-// clone copies a pull for a reader. The live job is mutated by its worker
-// without the store's lock held, so handing out the pointer would be a data
-// race with the progress the console is polling.
-func (p *Pull) clone() *Pull {
-	if p == nil {
-		return nil
-	}
-	cp := *p
-	return &cp
-}
-
-// AttachCancel wires the worker's cancel function to a stored job.
-func (p *Pull) AttachCancel(fn context.CancelFunc) { p.cancel = fn }
-
-// Finish releases anyone waiting on Done and stamps the end time. It is
-// idempotent, so a worker that reports failure after cancellation does not
-// panic on a second close.
-func (p *Pull) Finish(state PullState, errMsg string) {
-	p.State = state
-	p.Error = errMsg
-	t := time.Now().UTC()
-	p.FinishedAt = &t
-	if state == PullDone {
-		p.Progress = 1
-		p.BytesDone = p.BytesTotal
-		p.FilesDone = p.FilesTotal
-	}
-	if p.done != nil {
-		close(p.done)
-		p.done = nil
 	}
 }

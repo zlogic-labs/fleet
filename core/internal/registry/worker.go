@@ -86,7 +86,14 @@ func (w *Worker) Start(run func(context.Context, *Pull) error) {
 			go func() {
 				defer w.wg.Done()
 				for job := range w.queue {
-					job.State = PullRunning
+					// Published, not written on the job. The store holds its own
+					// copy now, so a cancel func set here alone would be
+					// invisible to CancelPull -- and cancellation would stop
+					// working while still looking like it did.
+					_, _ = w.Store.UpdatePull(context.Background(), job.ID, func(p *Pull) {
+						job.State = PullRunning
+						p.State = PullRunning
+					})
 					w.runOne(run, job)
 				}
 			}()
@@ -99,6 +106,7 @@ func (w *Worker) runOne(run func(context.Context, *Pull) error, job *Pull) {
 	// others; AttachCancel below points the stored job at it.
 	ctx, cancel := context.WithCancel(context.Background())
 	job.AttachCancel(cancel)
+	_, _ = w.Store.UpdatePull(context.Background(), job.ID, func(p *Pull) { p.cancel = cancel })
 	defer cancel()
 
 	err := run(ctx, job)

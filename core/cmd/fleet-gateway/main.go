@@ -108,7 +108,7 @@ func addStub(cfg *gateway.Config, log *slog.Logger, silent bool) (*devstub.Engin
 	if len(cfg.Upstreams) == 0 {
 		cfg.Upstreams = append(cfg.Upstreams, gateway.UpstreamConfig{
 			ID:                  "devstub",
-			Model:               "demo/Qwen2.5-1.5B-Instruct",
+			Model:               devstub.DemoModel,
 			BaseURL:             baseURL,
 			Engine:              "devstub",
 			Replicas:            1,
