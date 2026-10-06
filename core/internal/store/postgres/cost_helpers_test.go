@@ -19,7 +19,7 @@ const billingUnits = billing.MicroPerUnit
 
 // costTables is everything a close reads or writes.
 var costTables = []string{
-	"cost_adjustments", "cost_allocations", "cost_periods", "cost_rates",
+	"cost_adjustments", "cost_allocations", "cost_providers", "cost_periods", "cost_rates",
 	"deployment_samples", "capacity_samples", "usage_events",
 }
 

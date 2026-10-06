@@ -80,9 +80,11 @@ export function RatesCard({
           })
         }
       >
+        {/* Labels on all three fields, matching the table's own column headers, so
+            the form reads as a row rather than as two rows interleaved. */}
         <Space wrap style={{ marginTop: 12, alignItems: 'flex-start' }}>
-          <Form.Item name="cluster" rules={[{ required: true, message: 'which cluster' }]}>
-            <Input placeholder="cluster name" style={{ width: 150 }} />
+          <Form.Item name="cluster" label="Cluster" rules={[{ required: true, message: 'which cluster' }]}>
+            <Input placeholder="k3s-dev" style={{ width: 150 }} />
           </Form.Item>
           <Form.Item
             name="gpuHour"
@@ -91,9 +93,11 @@ export function RatesCard({
           >
             <InputNumber min={0.000001} step={0.25} style={{ width: 150 }} placeholder="2.00" />
           </Form.Item>
-          <Form.Item name="currency" initialValue="USD" rules={[{ required: true }]}>
+          <Form.Item name="currency" label="Currency" initialValue="USD" rules={[{ required: true }]}>
             <Input placeholder="USD" style={{ width: 80 }} />
           </Form.Item>
+          {/* The label is invisible rather than absent: without it the button
+              would sit on the label line instead of the input line. */}
           <Form.Item label={<span style={{ visibility: 'hidden' }}>.</span>}>
             <Button type="primary" htmlType="submit" icon={<PlusOutlined />} loading={busy}>
               Declare

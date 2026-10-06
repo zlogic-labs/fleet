@@ -29,7 +29,16 @@ CREATE TABLE IF NOT EXISTS usage_detail
     key_id         String,
     model          LowCardinality(String),
     endpoint       LowCardinality(String),
-    price_book     String,
+    -- Who served the request, empty for the fleet's own engines. The mirror
+    -- carries it so a spend-by-vendor report can run here rather than on the
+    -- ledger, which is the one store that must stay small enough to query
+    -- rarely.
+    --
+    -- LowCardinality for the same reason as model: a fleet has a handful of
+    -- providers and an unbounded number of tenants, and this column has far
+    -- fewer distinct values than the tenant beside it.
+    provider     LowCardinality(String),
+    price_book   String,
 
     prompt_tokens       Int64,
     completion_tokens  Int64,
@@ -160,4 +169,5 @@ var addColumnDDL = []struct{ name, query string }{
 	{"usage_detail queue", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS engine_queue_ms Nullable(Float64)"},
 	{"usage_detail engine ttft", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS engine_ttft_ms Nullable(Float64)"},
 	{"usage_detail engine decode", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS engine_decode_ms Nullable(Float64)"},
+	{"usage_detail provider", "ALTER TABLE %s.usage_detail ADD COLUMN IF NOT EXISTS provider LowCardinality(String)"},
 }

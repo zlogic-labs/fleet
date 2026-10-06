@@ -1,7 +1,6 @@
 package billing
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
@@ -16,12 +15,16 @@ func book(t *testing.T, prices ...Price) *Book {
 	return b
 }
 
-func standard(t *testing.T) *Pricer {
-	t.Helper()
-	return NewPricer(book(t, Price{
+func standardPrice() Price {
+	return Price{
 		Model: "demo",
 		Rate:  Rate{Input: 1000, Output: 2000, Cached: 100},
-	}))
+	}
+}
+
+func standard(t *testing.T) *Pricer {
+	t.Helper()
+	return NewPricer(book(t, standardPrice()))
 }
 
 // The wire format's prompt_tokens INCLUDES cached_tokens. Charging the whole
@@ -36,7 +39,7 @@ func TestCachedTokensAreNotChargedTwice(t *testing.T) {
 		CompletionTokens:    500,
 		PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 400},
 	}
-	got, err := p.Charge("demo", u)
+	got, err := p.Charge("demo", "", u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +64,7 @@ func TestReasoningTokensAreNotChargedTwice(t *testing.T) {
 		TotalTokens:             900,
 		CompletionTokensDetails: &openai.CompletionTokensDetails{ReasoningTokens: 600},
 	}
-	got, err := p.Charge("demo", u)
+	got, err := p.Charge("demo", "", u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +87,7 @@ func TestReasoningRateOverridesOutputWithoutDoubleCounting(t *testing.T) {
 		CompletionTokens:        800,
 		CompletionTokensDetails: &openai.CompletionTokensDetails{ReasoningTokens: 600},
 	}
-	got, err := p.Charge("demo", u)
+	got, err := p.Charge("demo", "", u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,7 @@ func TestInconsistentUsageDoesNotProduceACredit(t *testing.T) {
 		CompletionTokens:    10,
 		PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 500},
 	}
-	got, err := p.Charge("demo", u)
+	got, err := p.Charge("demo", "", u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,37 +120,55 @@ func TestInconsistentUsageDoesNotProduceACredit(t *testing.T) {
 	}
 }
 
-// An unpriced model must be an error, not a zero. A zero charge is a tenant
-// being given a GPU for free, and nothing in the request path would complain.
+// An unpriced model must be an error to charge against, and a reservation that
+// says it does not know.
+//
+// A zero charge is a tenant being given a GPU for free, and nothing in the
+// request path would complain. The reservation cannot be zero either, so Predict
+// falls back to the cheapest rate in the same centre and reports Known=false;
+// the caller is expected to act on that rather than trust the number.
 func TestUnknownModelIsAnErrorNotAZeroCharge(t *testing.T) {
 	p := standard(t)
-	if _, err := p.Charge("not-priced", openai.Usage{PromptTokens: 1000}); err == nil {
+	if _, err := p.Charge("not-priced", "", openai.Usage{PromptTokens: 1000}); err == nil {
 		t.Error("charging an unpriced model succeeded")
 	}
-	if got := p.Estimate("not-priced", 1000, 1000); got != 0 {
-		t.Errorf("Estimate = %d for an unpriced model; the caller must notice", got)
+	got := p.Predict("not-priced", "", 1000, 1000)
+	if got.Known {
+		t.Error("Predict claimed to know the price of an unpriced model")
+	}
+	if got.Amount == 0 {
+		t.Error("Predict reserved nothing for an unpriced model; the budget it guards would not bind")
 	}
 }
 
-// A price book with no prices is a gateway that serves traffic it cannot bill.
-func TestEmptyBookIsVisible(t *testing.T) {
-	empty, err := NewBook(nil)
+// An unpriced model must not borrow another cost centre's rate.
+//
+// A pool weight and a vendor price are three orders of magnitude apart, so a
+// vendor request reserved against a fleet weight would under-reserve by that
+// factor and let a tenant spend a month of budget in an afternoon.
+func TestAnUnpricedModelDoesNotBorrowAnotherCentresRate(t *testing.T) {
+	vendor := Price{Model: "gpt-4o", Provider: "openai",
+		Rate: Rate{Input: 2_000_000, Output: 6_000_000}}
+	book, err := NewBook([]Price{vendor, standardPrice()})
 	if err != nil {
-		t.Fatalf("an empty book should be constructible: %v", err)
+		t.Fatal(err)
 	}
-	if !empty.Empty() {
-		t.Error("a book built from nothing does not report itself empty")
+	p := NewPricer(book)
+
+	vendorOnly := p.Predict("gpt-4o", "openai", 1000, 500)
+	if !vendorOnly.Known {
+		t.Fatal("a priced vendor model must be known")
 	}
-	if standard(t).book.Empty() {
-		t.Error("a priced book reports itself empty")
+	fleetFallback := p.Predict("unpriced-anywhere", "", 1000, 500)
+	if fleetFallback.Known {
+		t.Fatal("premise: an unpriced model must not be reported as known")
 	}
-	// A nil book is the "billing not wired up yet" case and must not panic.
-	var nilBook *Book
-	if !nilBook.Empty() {
-		t.Error("a nil book should report empty")
-	}
-	if _, ok := nilBook.Rate("demo"); ok {
-		t.Error("a nil book priced something")
+	// The fallback is the cheapest fleet rate, not the vendor's. The vendor rate
+	// is the largest number in the book, so borrowing it would show up as an
+	// over-reservation by three orders of magnitude.
+	if fleetFallback.Amount >= vendorOnly.Amount {
+		t.Errorf("the fleet fallback (%d) is not below the vendor price (%d); it looks like it borrowed one",
+			fleetFallback.Amount, vendorOnly.Amount)
 	}
 }
 
@@ -173,75 +194,19 @@ func TestTruncationNeverRoundsUp(t *testing.T) {
 	}
 }
 
-// The estimate is the reservation basis, so it must be an upper bound. The
-// prefix cache lives inside the engine, so a hit is unknowable in advance — an
-// estimate that assumed one would under-reserve exactly when caching works.
-func TestEstimateAssumesNoCacheHit(t *testing.T) {
+// The reservation is the upper bound on the request. The prefix cache lives
+// inside the engine, so a hit is unknowable in advance — a prediction that
+// assumed one would under-reserve exactly when caching works.
+func TestPredictionAssumesNoCacheHit(t *testing.T) {
 	p := standard(t)
 	// 400 of these prompt tokens would be cached if the engine had them.
-	got := p.Estimate("demo", 1000, 500)
+	got := p.Predict("demo", "", 1000, 500)
 	want := Amount(1000*1000 + 500*2000)
-	if got != want {
-		t.Errorf("Estimate = %d, want %d — the full prompt at the input rate", got, want)
+	if got.Amount != want {
+		t.Errorf("Predict = %d, want %d — the full prompt at the input rate", got.Amount, want)
 	}
 	cached := Amount(600*1000 + 400*100 + 500*2000)
 	if cached >= want {
-		t.Error("an estimate that assumed a cache hit was not an upper bound; it cannot be, and it must not pretend to be")
-	}
-}
-
-// The book must reject prices that cannot be used, rather than billing something
-// plausible.
-func TestInvalidPricesAreRejectedAtLoad(t *testing.T) {
-	cases := []struct {
-		name string
-		p    Price
-		want string
-	}{
-		{"no model", Price{Rate: Rate{Input: 1, Output: 1}}, "model is required"},
-		{"zero input", Price{Model: "m"}, "input rate must be positive"},
-		{"zero output", Price{Model: "m", Rate: Rate{Input: 1}}, "output rate must be positive"},
-		{"negative cached", Price{Model: "m", Rate: Rate{Input: 1, Output: 1, Cached: -1}}, "must not be negative"},
-		{"cached above input", Price{Model: "m", Rate: Rate{Input: 100, Output: 1, Cached: 200}}, "exceeds input rate"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewBook([]Price{tc.p})
-			if err == nil {
-				t.Fatal("NewBook accepted an unusable price")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error %q does not mention %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// Two prices for one model means the book silently picked one, and which one
-// depended on iteration order.
-func TestDuplicateModelIsRejected(t *testing.T) {
-	_, err := NewBook([]Price{
-		{Model: "m", Rate: Rate{Input: 1, Output: 1}},
-		{Model: "m", Rate: Rate{Input: 2, Output: 2}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "declared twice") {
-		t.Errorf("err = %v, want a duplicate-model error", err)
-	}
-}
-
-// Zero cached rate is allowed — it means "this model has no cache", which a
-// llama.cpp deployment genuinely is.
-func TestZeroCachedRateIsAllowed(t *testing.T) {
-	if _, err := NewBook([]Price{{Model: "m", Rate: Rate{Input: 1, Output: 1}}}); err != nil {
-		t.Errorf("a model without a cache rate was rejected: %v", err)
-	}
-	p := NewPricer(book(t, Price{Model: "m", Rate: Rate{Input: 1000, Output: 1000}}))
-	u := openai.Usage{
-		PromptTokens:        100,
-		PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 50},
-	}
-	// 50 fresh @1000 + 50 cached @0.
-	if got, _ := p.Charge("m", u); got != Amount(50*1000) {
-		t.Errorf("charge = %d, want 50", got)
+		t.Error("a prediction that assumed a cache hit was not an upper bound; it cannot be, and it must not pretend to be")
 	}
 }

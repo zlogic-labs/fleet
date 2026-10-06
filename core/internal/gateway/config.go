@@ -85,13 +85,31 @@ type ControlPlaneConfig struct {
 }
 
 type UpstreamConfig struct {
-	ID       string `yaml:"id"`
-	Model    string `yaml:"model"`
-	BaseURL  string `yaml:"base_url"`
-	Engine   string `yaml:"engine"`
+	ID      string `yaml:"id"`
+	Model   string `yaml:"model"`
+	BaseURL string `yaml:"base_url"`
+	Engine  string `yaml:"engine"`
+	// Provider names who is being paid for this model's traffic. Empty — the
+	// default, and what every self-hosted engine has — means the fleet's own
+	// capacity, whose cost is a share of a monthly pool.
+	//
+	// Set it to a vendor's name when the base URL is somebody else's API, and
+	// the difference is not cosmetic: a vendor charge is money that leaves the
+	// account per request, so it must not also be allocated out of the pool
+	// (docs/architecture.md §11.12). It also selects the price book, so a
+	// vendor route without a book under this name falls back to the floor rate
+	// in the same centre rather than to the fleet's weighting.
+	//
+	// Deliberately free text. There is no vendor table to join to, because the
+	// only thing a provider is used for is to pick a price, and adding a
+	// registry would make "which vendors exist" a thing to update before a new
+	// one can be routed to.
+	Provider string `yaml:"provider"`
 	Replicas int    `yaml:"replicas"`
 	// APIKey authenticates to the upstream. It is the engine's key, not a
-	// tenant's; tenants authenticate to the gateway.
+	// tenant's; tenants authenticate to the gateway. For a vendor route this is
+	// the vendor's own key, which is why the vendor's rate limits and the
+	// vendor's invoice both belong to this process now.
 	APIKey string `yaml:"api_key"`
 	// AffinityPrefixRunes bounds the prompt prefix that participates in the
 	// routing hash. Long enough to cover a system prompt, short enough that

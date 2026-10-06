@@ -134,6 +134,24 @@ export function Report({ report }: { report: CostReport }) {
                     },
                   ]),
               { title: 'Allocated', dataIndex: 'amount', align: 'right', render: (v: number) => humanMoney(v, cur) },
+              // Present only when there is something in the other cost centre.
+              // A permanently visible column of zeros reads as "this tenant owes
+              // nothing" rather than "this fleet paid a vendor for you".
+              ...(report.direct === 0
+                ? []
+                : [
+                    {
+                      title: 'Vendor',
+                      dataIndex: 'direct',
+                      align: 'right' as const,
+                      render: (v: number) =>
+                        v === 0 ? (
+                          <Text type="secondary">—</Text>
+                        ) : (
+                          humanMoney(v, cur)
+                        ),
+                    },
+                  ]),
               {
                 title: 'Token ledger',
                 dataIndex: 'usageMicro',
@@ -142,6 +160,7 @@ export function Report({ report }: { report: CostReport }) {
               },
             ]}
           />
+          {report.direct > 0 && <VendorNote report={report} />}
         </Col>
         <Col xs={24} lg={12}>
           <Table
@@ -168,5 +187,26 @@ export function Report({ report }: { report: CostReport }) {
         </Col>
       </Row>
     </Card>
+  );
+}
+
+/**
+ * The other cost centre, named per vendor.
+ *
+ * Stated rather than summed into the pool, because the two are not the same
+ * kind of money: the pool is already spent whether anyone used it or not, while
+ * the vendor lines are what someone else actually invoiced. An operator
+ * reconciling against the vendor's statement needs the line items, not a total.
+ */
+function VendorNote({ report }: { report: CostReport }) {
+  const cur = report.currency;
+  return (
+    <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 10 }}>
+      {humanMoney(report.direct, cur)} went to external vendors for the same traffic:{' '}
+      {report.providers.map((p) => `${p.provider} ${humanMoney(p.amount, cur)}`).join(', ')}. This
+      is a separate cost centre from the {humanMoney(report.allocated, cur)} pool share above —
+      the pool is capacity this fleet already paid for, and these are someone
+      else's invoices.
+    </Paragraph>
   );
 }

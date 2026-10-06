@@ -52,11 +52,11 @@ func TestConcurrentSettlementIsSafeAcrossARefresh(t *testing.T) {
 			for r := 0; r < rounds; r++ {
 				// Charge reads the snapshot; BookID reads the map the old code
 				// swapped underneath it. Together they are the race.
-				if _, err := store.Charge(ctx, "m1", usage); err != nil {
+				if _, err := store.Charge(ctx, "m1", "", usage); err != nil {
 					t.Errorf("charge: %v", err)
 					return
 				}
-				_ = store.BookID("m2")
+				_ = store.BookID("m2", "")
 			}
 		}(i)
 	}
@@ -93,12 +93,12 @@ func TestARefreshLeavesThePricerAndTheIdsAgreeing(t *testing.T) {
 		t.Fatalf("refresh: %v", err)
 	}
 	for _, model := range []string{"m1", "m2"} {
-		if got := store.BookID(model); got != model+"-book" {
+		if got := store.BookID(model, ""); got != model+"-book" {
 			t.Errorf("BookID(%s) = %q, want %q", model, got, model+"-book")
 		}
 	}
 	// A model with no book reads empty rather than panicking on a nil map.
-	if got := store.BookID("absent"); got != "" {
+	if got := store.BookID("absent", ""); got != "" {
 		t.Errorf("BookID(absent) = %q, want empty", got)
 	}
 }

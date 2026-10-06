@@ -38,6 +38,15 @@ type Record struct {
 	// rewrite last month's bill.
 	Model    string
 	Endpoint string
+	// Provider names who served the request, empty for the fleet's own engines.
+	//
+	// Recorded per row rather than joined from the endpoint, for the reason the
+	// tenant and project are: an endpoint is repointed. A gateway that moves a
+	// model to a vendor in April would, without this column, make March look
+	// like April's traffic — and March is a closed invoice.
+	//
+	// It also decides which centre the money reaches. See Centre.
+	Provider Provider
 	// PriceBook names the book that was applied, for audit. It is a reference
 	// and is not used to re-price: Amount below is the figure that was charged.
 	PriceBook string
@@ -147,19 +156,20 @@ type PricerSource interface {
 	// that lives in a database needs the caller's deadline, or a stalled
 	// database would hold the request open past the point where anybody is
 	// still waiting for the answer.
-	Charge(ctx context.Context, model string, u openai.Usage) (Amount, error)
-	// BookID names the book in force for a model, or "" when it has none.
-	BookID(model string) string
+	Charge(ctx context.Context, model string, provider Provider, u openai.Usage) (Amount, error)
+	// BookID names the book in force for a model from a provider, or "" when it
+	// has none.
+	BookID(model string, provider Provider) string
 	// Predict is what a request that has not run yet may cost, in tokens as
 	// well as money. A budget reserves against it, and a budget can be stated
 	// in tokens, so the token breakdown has to come out of the same place as
 	// the price rather than being recomputed by each caller.
 	//
 	// Known is false when the model has no price: the figures are then a floor
-	// rate rather than this model's own, which is an over-estimate on purpose.
-	// Reserving nothing for an unpriced model would leave the budget
-	// unenforced for exactly the models nobody has priced yet.
-	Predict(ctx context.Context, model string, promptTokens, maxTokens int) (Prediction, error)
+	// rate from the same cost centre rather than this model's own, which is an
+	// over-estimate on purpose. Reserving nothing for an unpriced model would
+	// leave the budget unenforced for exactly the models nobody has priced yet.
+	Predict(ctx context.Context, model string, provider Provider, promptTokens, maxTokens int) (Prediction, error)
 }
 
 // Prediction is an upper bound on one request's cost, in every dimension.
@@ -167,9 +177,13 @@ type Prediction struct {
 	Usage  openai.Usage
 	Amount Amount
 	// Known is false when the model had no price and these figures come from
-	// the cheapest rate in force instead.
+	// the cheapest rate in force in the same cost centre instead.
 	Known bool
 	// Model the prediction was made for, which is what a caller must record:
 	// the resolved name, never the string the client sent.
 	Model string
+	// Provider the prediction was made against, normalised. A caller must
+	// record it too, or the ledger cannot tell a vendor charge from a share of
+	// the fleet's own cost — and the two must never be added together.
+	Provider Provider
 }

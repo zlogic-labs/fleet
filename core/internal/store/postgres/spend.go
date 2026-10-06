@@ -38,6 +38,17 @@ type Spend struct {
 	// max_tokens guesses, which is a fact the operator needs before they trust
 	// the total.
 	Estimated int64
+	// DirectMicro is the part of UnitsMicro that was charged to a commercial
+	// provider rather than allocated from the fleet's own pool.
+	//
+	// Reported separately because the two are not summable into a price, and a
+	// reader who added them would be averaging a share of fixed capacity with
+	// money per token. A tenant can have DirectMicro with no pool usage at all,
+	// which is the ordinary case for a deployment that only forwards to vendors.
+	//
+	// Zero when every row came from the fleet, which is every row a
+	// self-hosted-only deployment will ever produce.
+	DirectMicro int64
 	// Sources breaks Estimated down by what the figure was measured from.
 	// Without that, "12 estimated requests" cannot be distinguished from "12
 	// requests measured by the gateway", which are very different things to
@@ -79,7 +90,8 @@ func (db *DB) SpendByTenant(ctx context.Context, tenant string, w Window) ([]Spe
 	const q = `
 		SELECT COALESCE(project_id, ''), SUM(amounts_micro), COUNT(*),
 		       SUM(prompt_tokens), SUM(completion_tokens), COALESCE(SUM(cached_tokens), 0),
-		       COUNT(*) FILTER (WHERE NOT usage_known)
+		       COUNT(*) FILTER (WHERE NOT usage_known),
+		       COALESCE(SUM(amounts_micro) FILTER (WHERE provider <> ''), 0)
 		  FROM usage_events
 		 WHERE tenant_id = $1 AND occurred_at >= $2 AND occurred_at < $3
 		 GROUP BY COALESCE(project_id, '')
@@ -107,7 +119,8 @@ func (db *DB) SpendByScope(ctx context.Context, w Window) ([]Spend, error) {
 		            THEN tenant_id ELSE project_id END AS scope,
 		       SUM(amounts_micro), COUNT(*),
 		       SUM(prompt_tokens), SUM(completion_tokens), COALESCE(SUM(cached_tokens), 0),
-		       COUNT(*) FILTER (WHERE NOT usage_known)
+		       COUNT(*) FILTER (WHERE NOT usage_known),
+		       COALESCE(SUM(amounts_micro) FILTER (WHERE provider <> ''), 0)
 		  FROM usage_events
 		 WHERE occurred_at >= $1 AND occurred_at < $2
 		 GROUP BY 1
@@ -126,7 +139,8 @@ func (db *DB) SpendByModel(ctx context.Context, w Window) ([]Spend, error) {
 	const q = `
 		SELECT model, SUM(amounts_micro), COUNT(*),
 		       SUM(prompt_tokens), SUM(completion_tokens), COALESCE(SUM(cached_tokens), 0),
-		       COUNT(*) FILTER (WHERE NOT usage_known)
+		       COUNT(*) FILTER (WHERE NOT usage_known),
+		       COALESCE(SUM(amounts_micro) FILTER (WHERE provider <> ''), 0)
 		  FROM usage_events
 		 WHERE occurred_at >= $1 AND occurred_at < $2
 		 GROUP BY model
@@ -181,6 +195,11 @@ func (db *DB) EstimatedUsage(ctx context.Context, w Window, limit int) ([]int64,
 // Shared so the three reports cannot drift in what they count: same columns,
 // same FILTER for estimates, same order. A report that counts estimates
 // differently from the others is how a total stops matching its parts.
+//
+// The direct-spend column is a FILTER over the same rows rather than a fourth
+// query, so it cannot disagree with the total it is a part of. It is scanned by
+// position like the rest, so a query that forgot it fails to compile rather than
+// silently reading the estimate count into it.
 func (db *DB) spend(ctx context.Context, q string, args ...any) ([]Spend, error) {
 	rows, err := db.pool.Query(ctx, q, args...)
 	if err != nil {
@@ -192,7 +211,8 @@ func (db *DB) spend(ctx context.Context, q string, args ...any) ([]Spend, error)
 	for rows.Next() {
 		var s Spend
 		if err := rows.Scan(&s.Key, &s.UnitsMicro, &s.Requests,
-			&s.PromptTokens, &s.CompletionTokens, &s.CachedTokens, &s.Estimated); err != nil {
+			&s.PromptTokens, &s.CompletionTokens, &s.CachedTokens, &s.Estimated,
+			&s.DirectMicro); err != nil {
 			return nil, fmt.Errorf("postgres: scan spend row: %w", err)
 		}
 		out = append(out, s)

@@ -58,7 +58,7 @@ func TestGatewayPathAgainstADatabase(t *testing.T) {
 
 	// settle and charge
 	u := usage(1000, 200, 0)
-	amount, err := pricer.Charge("qwen-7b", u)
+	amount, err := pricer.Charge("qwen-7b", "", u)
 	if err != nil {
 		t.Fatalf("Charge: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestGatewayPathAgainstADatabase(t *testing.T) {
 	ledger := NewLedger(db)
 	id, err := ledger.Record(ctx, billing.Record{
 		Tenant: p.Tenant, Project: p.Project, KeyID: p.KeyID,
-		Model: "qwen-7b", PriceBook: prices.BookID("qwen-7b"),
+		Model: "qwen-7b", PriceBook: prices.BookID("qwen-7b", ""),
 		Usage: u, Amount: amount, UsageKnown: true,
 	})
 	if err != nil {

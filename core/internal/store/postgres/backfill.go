@@ -90,7 +90,8 @@ const detailPageSize = 2000
 // newer than the last page.
 func (db *DB) detailPage(ctx context.Context, cursor, ceiling int64, limit int) ([]billing.Record, int64, error) {
 	rows, err := db.pool.Query(ctx, `
-		SELECT id, tenant_id, project_id, key_id, model, endpoint_id, price_book_id,
+		SELECT id, tenant_id, project_id, key_id, model, endpoint_id, provider,
+		       price_book_id,
 		       prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
 		       amounts_micro, usage_known, usage_source, truncated,
 		       ttft_ms, duration_ms, streamed, occurred_at,

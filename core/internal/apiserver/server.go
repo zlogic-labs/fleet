@@ -39,6 +39,12 @@ type Config struct {
 	Keys     *sqlstore.KeyStore
 	Quota    *sqlstore.Quota
 	Cost     *sqlstore.CostStore
+	// Prices is where token price books are declared and read back. Separate
+	// from Cost because it is a different resource at a different cadence: a
+	// GPU-hour rate belongs to a cluster and is declared once, a price book
+	// belongs to a model and a provider and is reopened whenever a vendor
+	// changes its list.
+	Prices *sqlstore.PriceStore
 	// PullConcurrency is how many pulls may run at once.
 	PullConcurrency int
 	// FileConcurrency is how many files within one pull may download at once.
@@ -88,6 +94,7 @@ type Server struct {
 	keys     *sqlstore.KeyStore
 	quota    *sqlstore.Quota
 	cost     *sqlstore.CostStore
+	prices   *sqlstore.PriceStore
 }
 
 func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, error) {
@@ -109,8 +116,9 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	// pull queue all work; only tenancy is missing, and its routes say so
 	// rather than answering with an empty list that reads as "no tenants".
 	// A laptop with no PostgreSQL is a supported way to try Fleet.
-	if cfg.DB != nil && (cfg.Policies == nil || cfg.Keys == nil || cfg.Quota == nil || cfg.Cost == nil) {
-		return nil, errs.InvalidArgument("apiserver: Policies, Keys, Quota and Cost are required with DB")
+	if cfg.DB != nil && (cfg.Policies == nil || cfg.Keys == nil || cfg.Quota == nil ||
+		cfg.Cost == nil || cfg.Prices == nil) {
+		return nil, errs.InvalidArgument("apiserver: Policies, Keys, Quota, Cost and Prices are required with DB")
 	}
 	blobs := cfg.Blobs
 	if blobs == nil {
@@ -133,7 +141,8 @@ func NewServer(cfg Config, store registry.Store, log *slog.Logger) (*Server, err
 	return &Server{
 		cfg: cfg, store: store, blobs: blobs, profiles: profiles,
 		puller: puller, worker: worker, log: log,
-		db: cfg.DB, policies: cfg.Policies, keys: cfg.Keys, quota: cfg.Quota, cost: cfg.Cost,
+		db: cfg.DB, policies: cfg.Policies, keys: cfg.Keys, quota: cfg.Quota,
+		cost: cfg.Cost, prices: cfg.Prices,
 	}, nil
 }
 
@@ -203,20 +212,23 @@ func (s *Server) Handler() http.Handler {
 
 		tenancyRoutes(r, s)
 
-		// The cost pool. Rates are what a GPU-hour costs the operator, which
-		// Fleet cannot know; periods are closed reports and are immutable.
+		// The cost pool. GPU-hour rates are what a GPU-hour costs the operator,
+		// which Fleet cannot know. Token price books are keyed by model and
+		// provider, because the same model costs three orders of magnitude more
+		// from a vendor than from this fleet's own pool.
 		r.Get("/cost-rates", s.listCostRates)
 		r.Post("/cost-rates", s.putCostRate)
+		r.Get("/price-books", s.listPriceBooks)
+		r.Post("/price-books", s.putPriceBook)
 		r.Get("/cost-periods", s.listCostPeriods)
-		// PUT, not POST: closing creates the period resource at its own URL.
-		// A second close is a 409 rather than a silent replacement, because an
-		// invoice that can change after it was sent is not an invoice.
+		// PUT, not POST: closing creates the period resource at its own URL. A
+		// second close recomputes rather than replacing, and once a later period
+		// is closed the earlier one is frozen (11.10).
 		r.Put("/cost-periods/{period}", s.closeCostPeriod)
 		r.Get("/cost-periods/{period}", s.getCostPeriod)
 		// The period still running. A separate collection rather than a query
-		// on /cost-periods because it is not a period: there is no resource
-		// here to close, get or delete, and it answers a question the closed
-		// ones cannot.
+		// on /cost-periods because it is not a period: there is no resource here
+		// to close, get or delete.
 		r.Get("/spend", s.getOpenSpend)
 
 		// Fleet's own metering, audited against itself. Read-only, and not a

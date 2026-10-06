@@ -73,7 +73,7 @@ func applyEnv(cfg *Config) {
 	}
 }
 
-// parseUpstream reads "model=…,url=…,id=…,key=…,engine=…,replicas=…".
+// parseUpstream reads "model=…,url=…,id=…,key=…,engine=…,provider=…,replicas=…".
 func parseUpstream(spec string) (UpstreamConfig, error) {
 	var ep UpstreamConfig
 	for _, kv := range strings.Split(spec, ",") {
@@ -90,6 +90,8 @@ func parseUpstream(spec string) (UpstreamConfig, error) {
 			ep.BaseURL = v
 		case "engine":
 			ep.Engine = v
+		case "provider":
+			ep.Provider = v
 		case "key":
 			ep.APIKey = v
 		case "replicas":

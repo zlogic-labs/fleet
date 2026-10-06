@@ -34,7 +34,7 @@ func TestOnlyTheEffectivePriceBookIsLoaded(t *testing.T) {
 		t.Fatalf("Pricer: %v", err)
 	}
 	// 1M input tokens at 3000 micro/unit is 3_000_000_000 micro-units.
-	got, err := pricer.Charge("qwen-7b", openai.Usage{PromptTokens: 1_000_000})
+	got, err := pricer.Charge("qwen-7b", "", openai.Usage{PromptTokens: 1_000_000})
 	if err != nil {
 		t.Fatalf("Charge: %v", err)
 	}

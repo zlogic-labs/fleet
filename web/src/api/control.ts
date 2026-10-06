@@ -16,6 +16,8 @@ import type {
   CostPeriodSummary,
   CostReport,
   OpenSpend,
+  PriceBook,
+  PriceBookInput,
   UsageAgreement,
 } from '../types';
 
@@ -128,6 +130,20 @@ export const budgetRules = {
 export const costRates = {
   list: (signal?: AbortSignal) => request<CostRate[]>(`${BASE}/cost-rates`, { signal }),
   save: (body: CostRate) => request<CostRate>(`${BASE}/cost-rates`, { method: 'POST', body }),
+};
+
+/**
+ * Token price books.
+ *
+ * Separate from costRates because they answer a different question and are keyed
+ * differently: a GPU-hour belongs to a cluster, a price book to a model and the
+ * provider that served it. The same weights cost a share of this fleet's own
+ * pool or the vendor's list price, and which one applies is decided here.
+ */
+export const priceBooks = {
+  list: (signal?: AbortSignal) => request<PriceBook[]>(`${BASE}/price-books`, { signal }),
+  save: (body: PriceBookInput) =>
+    request<PriceBook>(`${BASE}/price-books`, { method: 'POST', body }),
 };
 
 /**

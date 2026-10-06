@@ -106,13 +106,25 @@ func (s *CostStore) store(ctx context.Context, rep cost.Report) error {
 		if _, err := tx.Exec(ctx, `DELETE FROM cost_allocations WHERE period = $1`, rep.Period); err != nil {
 			return fmt.Errorf("postgres: clear allocations of %s: %w", rep.Period, err)
 		}
+		if _, err := tx.Exec(ctx, `DELETE FROM cost_providers WHERE period = $1`, rep.Period); err != nil {
+			return fmt.Errorf("postgres: clear provider charges of %s: %w", rep.Period, err)
+		}
 		for _, t := range rep.Tenants {
 			if _, err := tx.Exec(ctx, `INSERT INTO cost_allocations
-				(period, scope, gpu_seconds, share, amount_micro, usage_micro, revision, adjustment_micro)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+				(period, scope, gpu_seconds, share, amount_micro, usage_micro,
+				 revision, adjustment_micro, direct_micro)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 				rep.Period, t.Key, t.GPUSeconds, t.Share, int64(t.Amount), int64(t.UsageMicro),
-				rep.Revision, int64(t.Adjustment)); err != nil {
+				rep.Revision, int64(t.Adjustment), int64(t.Direct)); err != nil {
 				return fmt.Errorf("postgres: allocation for %s: %w", t.Key, err)
+			}
+		}
+		for _, p := range rep.Providers {
+			if _, err := tx.Exec(ctx, `INSERT INTO cost_providers
+				(period, provider, amount_micro, requests)
+				VALUES ($1,$2,$3,$4)`,
+				rep.Period, p.Provider, int64(p.Amount), p.Requests); err != nil {
+				return fmt.Errorf("postgres: provider charge for %s: %w", p.Provider, err)
 			}
 		}
 		return nil

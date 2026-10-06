@@ -14,7 +14,7 @@ func TestASmallRequestStillCostsSomething(t *testing.T) {
 	p := NewPricer(book(t, Price{Model: "demo", Rate: Rate{Input: 1000, Output: 2000}}))
 
 	u := openai.Usage{PromptTokens: 100, CompletionTokens: 20}
-	got, err := p.Charge("demo", u)
+	got, err := p.Charge("demo", "", u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestASmallRequestStillCostsSomething(t *testing.T) {
 	}
 	// And the smallest plausible request of all.
 	tiny := openai.Usage{PromptTokens: 1}
-	if got, _ := p.Charge("demo", tiny); got == 0 {
+	if got, _ := p.Charge("demo", "", tiny); got == 0 {
 		t.Error("a single-token prompt priced at zero")
 	}
 }

@@ -178,6 +178,20 @@ say "cost rate k3s-dev" \
      -H 'Content-Type: application/json' \
      -d '{"cluster":"k3s-dev","gpuHourMicro":2000000,"currency":"USD"}')"
 
+# Token prices, keyed by model and provider. Two books for the same model on
+# purpose: that is the shape §11.12 is about, and it is what the Cost page has
+# to show two columns for. No vendor upstream is configured here, so the vendor
+# book prices nothing — it exists so the split is visible rather than
+# hypothetical.
+book() {
+  curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/price-books" \
+    -H 'Content-Type: application/json' -d "$1"
+}
+say "price qwen-0.5b-gguf (this fleet)" \
+  "$(book '{"model":"qwen-0.5b-gguf","input":2,"output":8,"cached":1}')"
+say "price qwen-0.5b-gguf (openai)" \
+  "$(book '{"model":"qwen-0.5b-gguf","provider":"OpenAI","input":150,"output":600,"cached":30}')"
+
 # Capacity is a time series, so one report is not a month. A report with no
 # reportedAt is refused outright — Fleet will not guess when a GPU was present
 # — which means a single inventory POST produces a period with 0% coverage and

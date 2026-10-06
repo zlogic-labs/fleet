@@ -41,12 +41,12 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 	}
 	const q = `
 		INSERT INTO usage_events (
-			tenant_id, project_id, key_id, model, endpoint_id, price_book_id,
+			tenant_id, project_id, key_id, model, endpoint_id, provider, price_book_id,
 			prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
 			amounts_micro, usage_known, usage_source, truncated,
 			ttft_ms, duration_ms, streamed, occurred_at,
 			engine_queue_ms, engine_ttft_ms, engine_decode_ms)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 		RETURNING id`
 
 	var id int64
@@ -54,7 +54,7 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		r.Tenant, nullIfEmpty(r.Project), nullIfEmpty(r.KeyID),
 		// The resolved model, not what the client asked for. The handler fills
 		// this from the endpoint it actually reached.
-		r.Model, r.Endpoint, nullIfEmpty(r.PriceBook),
+		r.Model, r.Endpoint, providerOrEmpty(r.Provider), nullIfEmpty(r.PriceBook),
 		r.Usage.PromptTokens, r.Usage.CompletionTokens,
 		breakdown(r.Usage.CachedPromptTokens(), r.Usage.PromptTokensDetails != nil),
 		breakdown(r.Usage.ReasoningTokens(), r.Usage.CompletionTokensDetails != nil),
@@ -68,6 +68,21 @@ func (l *Ledger) Record(ctx context.Context, r billing.Record) (int64, error) {
 		return 0, fmt.Errorf("postgres: append usage event: %w", err)
 	}
 	return id, nil
+}
+
+// providerOrEmpty normalises a provider name for storage.
+//
+// Normalised rather than stored as given, so a book declared under "OpenAI" and
+// a route configured with "openai" are the same provider: a mismatch between
+// the two spellings would price a vendor request at the floor rate and send it
+// to a report as though it were the fleet's own capacity.
+//
+// Empty rather than NULL, matching endpoint_id in the same table and for the
+// same reason: "not attributed" is a value the reports already compare against,
+// so adding a second spelling of absence would mean every query had to know
+// which one it was looking at.
+func providerOrEmpty(p billing.Provider) string {
+	return billing.NormalizeProvider(p)
 }
 
 // engineTiming reads one of an engine's own timing figures, or NULL.

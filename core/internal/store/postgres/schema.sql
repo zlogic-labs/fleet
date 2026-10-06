@@ -83,6 +83,9 @@ CREATE INDEX IF NOT EXISTS projects_tenant_idx ON projects (tenant_id);
 -- the lookup errors — so the deployment looks healthy and enforces the wrong
 -- limits. Adding a column with a default does not rewrite existing rows, which
 -- is the line db.go's Migrate draws between this file and a real migration.
+ALTER TABLE price_books ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT '';
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT '';
+
 ALTER TABLE tenants  ADD COLUMN IF NOT EXISTS request_limit integer NOT NULL DEFAULT 0;
 ALTER TABLE tenants  ADD COLUMN IF NOT EXISTS token_limit   integer NOT NULL DEFAULT 0;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS request_limit integer NOT NULL DEFAULT 0;
@@ -150,6 +153,18 @@ CREATE INDEX IF NOT EXISTS api_keys_project_idx ON api_keys (project_id);
 CREATE TABLE IF NOT EXISTS price_books (
     id            text PRIMARY KEY,
     model         text        NOT NULL,
+    -- Who served the model, empty for the fleet's own engines.
+    --
+    -- Part of the book's identity rather than a note on it, because the same
+    -- model can be served by the fleet and by a vendor at prices three orders
+    -- of magnitude apart: a fleet rate weights token consumption into a share
+    -- of a fixed monthly pool, while a vendor rate is money per token. Keying
+    -- by model alone would let whichever loaded last price both, and the error
+    -- is a thousandfold over- or under-charge rather than a visible one.
+    --
+    -- Empty means the fleet, so a book written before this column existed keeps
+    -- applying to the fleet's own engines.
+    provider      text        NOT NULL DEFAULT '',
     input_rate    bigint      NOT NULL CHECK (input_rate > 0),
     output_rate   bigint      NOT NULL CHECK (output_rate > 0),
     -- A cache hit may not cost more than a miss. Enforced as a constraint so
@@ -168,11 +183,27 @@ CREATE TABLE IF NOT EXISTS price_books (
 -- not on the model alone. Exclude-in-progress is a standard partial index trick:
 -- without it, two open-ended books for one model could both exist and which one
 -- applies would depend on read order.
-CREATE UNIQUE INDEX IF NOT EXISTS price_books_one_open_per_model
-    ON price_books (model)
+--
+-- Keyed by provider as well as model, for the reason the column exists: the
+-- same model is priced independently by the fleet and by each vendor it is
+-- routed to, so uniqueness on the model alone would forbid exactly the
+-- configuration a fallback route needs.
+--
+-- Dropped before it is created rather than guarded by IF NOT EXISTS, because an
+-- index that already exists under this name is the OLD one and CREATE would
+-- skip it. A database that predates the provider column would then keep a
+-- model-only uniqueness and reject the second vendor's book for a model — the
+-- fallback route silently becoming impossible to configure.
+--
+-- Dropping and rebuilding an index rewrites index pages but no table rows, so
+-- it is on this side of the line db.go's Migrate draws.
+DROP INDEX IF EXISTS price_books_one_open_per_model;
+
+CREATE UNIQUE INDEX price_books_one_open_per_model
+    ON price_books (model, provider)
     WHERE effective_to IS NULL;
 
-CREATE INDEX IF NOT EXISTS price_books_lookup_idx ON price_books (model, effective_from DESC);
+CREATE INDEX IF NOT EXISTS price_books_lookup_idx ON price_books (model, provider, effective_from DESC);
 
 -- ── the ledger ─────────────────────────────────────────────────────────
 
@@ -198,6 +229,18 @@ CREATE TABLE IF NOT EXISTS usage_events (
     -- cannot be re-pointed to something cheap to rewrite last month's bill.
     model         text        NOT NULL,
     endpoint_id   text        NOT NULL DEFAULT '',
+    -- Who served the request, empty for the fleet's own engines.
+    --
+    -- Recorded per row rather than joined from the endpoint, for the reason the
+    -- tenant and project are recorded as facts: an endpoint gets repointed. A
+    -- gateway that moves a model to a vendor in April would, without this
+    -- column, rewrite how March reads — and March is closed.
+    --
+    -- It decides which cost centre the money reaches: a named provider is a
+    -- direct charge, paid per request, and must never be allocated out of the
+    -- monthly pool. See docs/architecture.md §11.12 for why the two are not
+    -- summable.
+    provider      text        NOT NULL DEFAULT '',
     -- The price book in force. A reference for audit; not used to re-price.
     price_book_id text,
 
@@ -257,6 +300,12 @@ CREATE INDEX IF NOT EXISTS usage_events_project_time_idx
     WHERE project_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS usage_events_model_time_idx
     ON usage_events (model, occurred_at DESC);
+-- "What did we pay the vendors this month, by whom". Partial on the rows that
+-- are a vendor charge at all, so a fleet-only deployment's reports do not touch
+-- an index that is empty for them.
+CREATE INDEX IF NOT EXISTS usage_events_provider_time_idx
+    ON usage_events (provider, occurred_at DESC)
+    WHERE provider <> '';
 
 -- Dropping a NOT NULL constraint rewrites no rows, so it belongs here beside
 -- the CREATE rather than in a migration. Rows written before this had the
@@ -534,8 +583,37 @@ CREATE TABLE IF NOT EXISTS cost_allocations (
     usage_micro      bigint NOT NULL DEFAULT 0,
     revision         integer NOT NULL DEFAULT 1,
     adjustment_micro bigint NOT NULL DEFAULT 0,
+    -- What commercial providers charged this scope during the period. Real
+    -- money, stored beside the pool share and never added to it: one is an
+    -- apportionment of capacity the operator already paid for, the other is a
+    -- bill that has already been settled.
+    --
+    -- A scope can have direct_micro and no share at all, which is what a tenant
+    -- that only ever called a vendor looks like.
+    direct_micro    bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (period, scope)
 );
+
+CREATE TABLE IF NOT EXISTS cost_providers (
+    period   text   NOT NULL,
+    provider text   NOT NULL,
+    amount_micro bigint NOT NULL DEFAULT 0,
+    requests     bigint NOT NULL DEFAULT 0,
+    PRIMARY KEY (period, provider)
+);
+
+-- Separately from the CREATE above, and for the same reason the limit columns
+-- are: CREATE TABLE IF NOT EXISTS is a no-op on a table that already exists, so
+-- a column added only there never reaches a database created before it. Verified
+-- against the existing fleet_test database, which kept the old eight columns
+-- until this ALTER ran.
+ALTER TABLE cost_allocations ADD COLUMN IF NOT EXISTS direct_micro bigint NOT NULL DEFAULT 0;
+
+-- One vendor's charges per period, held apart from cost_allocations because it
+-- is reconciled against the vendor's own invoice rather than against the pool.
+-- The primary key is the pair, so a report cannot list the same vendor twice for
+-- a month -- which would double its spend against the invoice it is meant to
+-- match.
 
 -- The allocation table holds the current revision only. Superseded values are
 -- not kept: every difference between two revisions is written to

@@ -2,7 +2,6 @@ package cost
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
@@ -36,14 +35,36 @@ type Tenant struct {
 	Key string `json:"key"`
 	// Share is GPUSeconds over all GPUSeconds, in millionths, so a console can
 	// render a percentage without a float rounding differently from the server.
-	Share      int64          `json:"share"`
-	GPUSeconds int64          `json:"gpuSeconds"`
-	Amount     billing.Amount `json:"amount"`
+	Share      int64 `json:"share"`
+	GPUSeconds int64 `json:"gpuSeconds"`
+	// Amount is this tenant's share of the fleet's own pool. It is not what
+	// they owe: see Direct.
+	Amount billing.Amount `json:"amount"`
 	// Adjustment is the part of Amount that came from a correction to an earlier
 	// period rather than from this period's pool. Reported separately so a
 	// tenant can see why this month's figure does not match their share.
 	Adjustment billing.Amount `json:"adjustment"`
+	// UsageMicro is what the ledger charged this key, which is a weighting, not
+	// a price.
 	UsageMicro billing.Amount `json:"usageMicro"`
+	// Direct is what commercial providers charged this key for the period. Real
+	// money, already spent, and not a share of anything.
+	//
+	// A tenant with Direct but no Amount spent real money and used none of the
+	// operator's GPUs — which is a perfectly ordinary way to use a gateway that
+	// has both, and is why the two are separate columns rather than one total.
+	Direct billing.Amount `json:"direct"`
+}
+
+// ProviderSpend is one commercial provider's charges for a period.
+//
+// Kept per provider rather than summed, because this is the figure an operator
+// reconciles against the vendor's own invoice. A total would answer "did we
+// over-spend" only if you already knew how to split it back out.
+type ProviderSpend struct {
+	Provider string         `json:"provider"`
+	Amount   billing.Amount `json:"amount"`
+	Requests int64          `json:"requests"`
 }
 
 // Deployment is one row of the utilisation report.
@@ -106,7 +127,26 @@ type Report struct {
 	// Amended lists the earlier periods this revision changed, so the trail is
 	// readable from either end of it.
 	Amended []Amendment `json:"amended"`
+
+	// Direct is what commercial providers charged during the period, and
+	// Providers breaks it down.
+	//
+	// Deliberately not added into Allocated. Allocated is the fleet's own pool
+	// split between tenants; this is money that already left the account. A
+	// single "you owe X" figure would have to average two incompatible
+	// quantities, and the tenant reading it would be told their GPU share
+	// absorbed vendor spend it never caused.
+	Direct    billing.Amount  `json:"direct"`
+	Providers []ProviderSpend `json:"providers"`
 }
+
+// Total is what this period cost the operator across both cost centres.
+//
+// A convenience for an operator holding the whole bill, and NOT what a tenant
+// owes. It is the sum of two numbers that mean different things, so nothing
+// downstream should allocate, enforce a budget against, or invoice from it —
+// the two that answer those questions are Allocated and Direct.
+func (r Report) Total() billing.Amount { return r.Allocated + r.Direct }
 
 // Close turns observations into a cost report.
 //
@@ -164,7 +204,10 @@ func Close(in Input) (Report, error) {
 	used, consumption := occupied(in)
 	rep.Deployments = perDeployment(in, used)
 	rep.Tenants, rep.Allocated = allocate(rep.Pool, consumption, in.Spent)
+	rep.Tenants = withDirect(rep.Tenants, in.Direct)
 	rep.Tenants, rep.Allocated = apply(rep.Tenants, in.Adjustments)
+	rep.Providers = providerSpend(in.Providers)
+	rep.Direct = totalDirect(rep.Providers)
 	rep.Adjustments = in.Adjustments
 	rep.Amended = in.Amended
 	for _, adj := range rep.Adjustments {
@@ -179,39 +222,4 @@ func Close(in Input) (Report, error) {
 	rep.Idle = rep.Pool - rep.Busy
 	rep.IdlePct = percent(int64(rep.Idle), int64(rep.Pool))
 	return rep, nil
-}
-
-// occupied sweeps every deployment, returning what each one used and who had it.
-//
-// Both figures come from one sweep so they cannot disagree: a deployment's used
-// time is by definition the sum of the key shares taken out of it.
-func occupied(in Input) (map[string]int64, []Use) {
-	names := deploymentNames(in)
-	used := make(map[string]int64, len(names))
-	totals := make(map[string]int64, len(names))
-
-	for _, name := range names {
-		b := Sweep(in.Reserved[name], in.Spans[name], in.Period.Start, in.Period.End)
-		used[name] = b.Seconds
-		for key, v := range b.ByKey {
-			totals[key] += v
-		}
-	}
-
-	uses := make([]Use, 0, len(totals))
-	for key, v := range totals {
-		if v > 0 {
-			uses = append(uses, Use{Key: key, GPUSeconds: v})
-		}
-	}
-	sort.Slice(uses, func(i, j int) bool { return uses[i].Key < uses[j].Key })
-	return used, uses
-}
-
-func usedSeconds(used map[string]int64) int64 {
-	var sum int64
-	for _, v := range used {
-		sum += v
-	}
-	return sum
 }

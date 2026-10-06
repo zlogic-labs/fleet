@@ -12,6 +12,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/gateway/transport"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
 	"github.com/zlogic-labs/fleet/core/pkg/authn"
+	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/entitlement"
 	"github.com/zlogic-labs/fleet/core/pkg/metrics"
@@ -150,7 +151,16 @@ func staticEndpoints(ups []UpstreamConfig) []engine.Endpoint {
 			Model:    up.Model,
 			BaseURL:  up.BaseURL,
 			Replicas: up.Replicas,
-			Labels:   map[string]string{"engine": up.Engine},
+			Labels: map[string]string{
+				"engine": up.Engine,
+				// Only written when configured. An endpoint with no provider
+				// label is the fleet's own capacity, and that has to be the
+				// default rather than an inferred value: every static upstream
+				// that predates this label is self-hosted, and reading "absent"
+				// as anything else would move its money into a cost centre
+				// nobody can name.
+				"provider": billing.NormalizeProvider(up.Provider),
+			},
 		})
 	}
 	return out

@@ -285,12 +285,20 @@ export interface CostAllocation {
   /** A fraction of the pool in millionths. */
   share: number;
   gpuSeconds: number;
-  /** Allocated cost, micro-units. */
+  /** Share of the GPU-hour pool, micro-units. Zero for direct-only scopes. */
   amount: number;
   /** The part of amount collected on behalf of a corrected earlier period. */
   adjustment: number;
   /** What the token ledger charged for the same traffic. */
   usageMicro: number;
+  /**
+   * Paid to a vendor for the same traffic, micro-units.
+   *
+   * Kept out of `amount` on purpose. A pool share is eight dollars because other
+   * people's money is in the pool; a vendor bill is the invoice. Adding them
+   * produces a number that means neither.
+   */
+  direct: number;
 }
 
 export interface CostDeployment {
@@ -312,6 +320,15 @@ export interface CostReport {
   idle: number;
   idlePercent: number;
   allocated: number;
+  /**
+   * Vendor charges for the same traffic, micro-units.
+   *
+   * Never folded into `allocated`. The two are different cost centres: one is
+   * this fleet's own capacity, already paid for; the other is an invoice from
+   * someone else. `allocated === pool` holds independently of this number.
+   */
+  direct: number;
+  providers: CostProviderSpend[];
   /** 1 unless the period was recomputed after later data arrived. */
   revision: number;
   coveragePercent: number;
@@ -324,6 +341,44 @@ export interface CostReport {
   notes?: string[];
   tenants: CostAllocation[];
   deployments: CostDeployment[];
+}
+
+/**
+ * One price book: what a model costs per million tokens from one provider.
+ *
+ * Keyed by model *and* provider, which is the point. The same weights from this
+ * fleet's own pool are a share of a fixed cost; from a vendor they are billed at
+ * the vendor's list price, three orders of magnitude apart. One book per model
+ * would let whichever was declared last price both.
+ */
+export interface PriceBook {
+  /** Quoted back by the ledger on every row it priced. */
+  id: string;
+  /** The resolved model — what the endpoint serves, not what the client typed. */
+  model: string;
+  /** Lowercased vendor name. Empty means this fleet's own capacity. */
+  provider: string;
+  /** Quota units per million fresh prompt tokens. */
+  input: number;
+  /** Quota units per million generated tokens. */
+  output: number;
+  /** Quota units per million prompt tokens served from the prefix cache. */
+  cached: number;
+  /** Zero means "charge reasoning at the output rate", which is the usual case. */
+  reasoning?: number;
+  /** When this book took force. May be in the future for an announced rise. */
+  effectiveFrom: string;
+}
+
+export type PriceBookInput = Omit<PriceBook, 'id' | 'effectiveFrom'> & {
+  effectiveFrom?: string;
+};
+
+export interface CostProviderSpend {
+  /** Lowercased vendor name, empty for this fleet's own capacity. */
+  provider: string;
+  amount: number;
+  requests: number;
 }
 
 export interface CostAdjustment {
@@ -372,6 +427,8 @@ export interface OpenSpendScope {
   tenant?: string;
   project?: string;
   unitsMicro: number;
+  /** The vendor-charged part of unitsMicro. See OpenSpend.poolMicro. */
+  directMicro: number;
   requests: number;
   promptTokens: number;
   completionTokens: number;
@@ -405,6 +462,12 @@ export interface OpenSpend {
   scopes: OpenSpendScope[];
   models: OpenSpendModel[];
   totalsMicro: number;
+  /** Token charges against this fleet's own capacity. */
+  poolMicro: number;
+  /** Token charges an external vendor billed. */
+  directMicro: number;
+  /** Per vendor, for the line items an operator will reconcile by hand. */
+  providers: CostProviderSpend[];
   requests: number;
   estimated: number;
   priced: boolean;

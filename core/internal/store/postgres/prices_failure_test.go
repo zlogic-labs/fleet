@@ -27,7 +27,7 @@ func TestReadingThePriceStoreDoesNotBlockOnAFailedRefresh(t *testing.T) {
 	if err := store.Refresh(ctx); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
-	if id := store.BookID("m1"); id != "m1-book" {
+	if id := store.BookID("m1", ""); id != "m1-book" {
 		t.Fatalf("premise: BookID(m1) = %q, want m1-book", id)
 	}
 
@@ -38,7 +38,7 @@ func TestReadingThePriceStoreDoesNotBlockOnAFailedRefresh(t *testing.T) {
 	if _, err := store.Pricer(dead); err != nil {
 		t.Fatalf("a failed refresh with books already held must not be fatal, got %v", err)
 	}
-	if id := store.BookID("m1"); id != "m1-book" {
+	if id := store.BookID("m1", ""); id != "m1-book" {
 		t.Errorf("BookID(m1) = %q after a failed refresh, want m1-book", id)
 	}
 
@@ -68,7 +68,7 @@ func TestAFailedRefreshPublishesNothing(t *testing.T) {
 	if err := store.Refresh(dead); err == nil {
 		t.Fatal("Refresh against a dead context reported success")
 	}
-	if id := store.BookID("m1"); id != "" {
+	if id := store.BookID("m1", ""); id != "" {
 		t.Errorf("a failed refresh published BookID(m1) = %q", id)
 	}
 }
@@ -91,7 +91,7 @@ func TestAnUnopenedDatabaseSaysSoInsteadOfPanicking(t *testing.T) {
 	if err := store.Refresh(context.Background()); err == nil {
 		t.Error("Refresh on an unopened database reported success")
 	}
-	if id := store.BookID("m1"); id != "" {
+	if id := store.BookID("m1", ""); id != "" {
 		t.Errorf("BookID on an unopened database = %q, want empty", id)
 	}
 }

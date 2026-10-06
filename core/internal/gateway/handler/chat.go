@@ -154,7 +154,7 @@ func (h *Chat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// pricing the *unresolved* name would estimate zero for anything not
 	// spelled exactly like a price book entry, and reserving zero reserves
 	// nothing.
-	booking, err := h.reserve(r.Context(), tenant, project, ep.Model, promptTokens, maxOut)
+	booking, err := h.reserve(r.Context(), tenant, project, ep, promptTokens, maxOut)
 	if err != nil {
 		// The rate limit reservation is released: nothing was generated, and
 		// holding it would spend a tenant's minute on a request the budget

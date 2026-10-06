@@ -95,10 +95,10 @@ func NewPricer(b *Book) *Pricer { return &Pricer{book: b} }
 //     carved out of the output rather than added to it.
 //
 // Both inclusions are the wire format's, not a Fleet choice.
-func (p *Pricer) Charge(model string, u openai.Usage) (Amount, error) {
-	rate, ok := p.book.Rate(model)
+func (p *Pricer) Charge(model string, provider Provider, u openai.Usage) (Amount, error) {
+	rate, ok := p.book.Rate(model, provider)
 	if !ok {
-		return 0, fmt.Errorf("no price for model %q", model)
+		return 0, fmt.Errorf("no price for model %q from %q", model, centreOf(Price{Provider: provider}))
 	}
 	return charge(rate, u), nil
 }
@@ -155,11 +155,7 @@ func units(tokens int, rate int64) Amount {
 
 // Estimate is a worst-case price for a request that has not run yet.
 //
-// It is what the reservation path uses, so it must be an upper bound: reserving
-// less than the request can cost is the same as not reserving at all. The prompt
-// count passed in is the gateway's own estimate, and maxTokens is the client's
-// ceiling.
-//
 // A model with no price estimates to zero, and the caller decides what that
 // means — silently reserving nothing for an unpriced model would let an unbilled
-// request consume a GPU.
+// request consume a GPU. Callers that reserve should use Predict instead, which
+// falls back within the cost centre and reports whether it knew the price.

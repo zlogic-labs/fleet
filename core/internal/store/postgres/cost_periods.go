@@ -26,7 +26,7 @@ func (s *CostStore) GetPeriod(ctx context.Context, period string) (cost.Report, 
 	}
 
 	rows, err := s.db.pool.Query(ctx,
-		`SELECT scope, gpu_seconds, share, amount_micro, usage_micro, adjustment_micro
+		`SELECT scope, gpu_seconds, share, amount_micro, usage_micro, adjustment_micro, direct_micro
 		 FROM cost_allocations WHERE period = $1 ORDER BY scope`, period)
 	if err != nil {
 		return cost.Report{}, fmt.Errorf("postgres: get allocations: %w", err)
@@ -34,13 +34,22 @@ func (s *CostStore) GetPeriod(ctx context.Context, period string) (cost.Report, 
 	defer rows.Close()
 	for rows.Next() {
 		var t cost.Tenant
-		if err := rows.Scan(&t.Key, &t.GPUSeconds, &t.Share, &t.Amount, &t.UsageMicro, &t.Adjustment); err != nil {
+		if err := rows.Scan(&t.Key, &t.GPUSeconds, &t.Share, &t.Amount, &t.UsageMicro,
+			&t.Adjustment, &t.Direct); err != nil {
 			return cost.Report{}, fmt.Errorf("postgres: scan allocation: %w", err)
 		}
 		rep.Tenants = append(rep.Tenants, t)
 	}
 	if err := rows.Err(); err != nil {
 		return cost.Report{}, fmt.Errorf("postgres: read allocations: %w", err)
+	}
+
+	rep.Providers, err = s.providersOf(ctx, period)
+	if err != nil {
+		return cost.Report{}, err
+	}
+	for _, p := range rep.Providers {
+		rep.Direct += p.Amount
 	}
 
 	rep.Adjustments, err = s.adjustmentsInto(ctx, period)
@@ -87,6 +96,31 @@ func (s *CostStore) ListPeriods(ctx context.Context) ([]cost.Report, error) {
 			return nil, fmt.Errorf("postgres: scan period: %w", err)
 		}
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// providersOf reads one period's vendor charges.
+//
+// Ordered by provider so two reads of the same closed period return the same
+// order, which matters for a stored invoice: a consumer comparing two reads
+// should not see a difference caused by row order alone.
+func (s *CostStore) providersOf(ctx context.Context, period string) ([]cost.ProviderSpend, error) {
+	rows, err := s.db.pool.Query(ctx,
+		`SELECT provider, amount_micro, requests
+		   FROM cost_providers WHERE period = $1 ORDER BY provider`, period)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get provider charges: %w", err)
+	}
+	defer rows.Close()
+
+	out := []cost.ProviderSpend{}
+	for rows.Next() {
+		var p cost.ProviderSpend
+		if err := rows.Scan(&p.Provider, &p.Amount, &p.Requests); err != nil {
+			return nil, fmt.Errorf("postgres: scan provider charge: %w", err)
+		}
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }

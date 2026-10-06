@@ -107,7 +107,7 @@ func (h *Embeddings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	booking, err := h.reserve(r.Context(), tenant, project, ep.Model, promptTokens, 0)
+	booking, err := h.reserve(r.Context(), tenant, project, ep, promptTokens, 0)
 	if err != nil {
 		h.Limiter.Settle(r.Context(), reservation, 0)
 		if h.Observed != nil {

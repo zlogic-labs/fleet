@@ -43,8 +43,31 @@ func (w *Writer) Write(ctx context.Context, records []billing.Record) error {
 	return nil
 }
 
+// insertColumns names every column, in the order appendRecord writes them.
+//
+// Not optional. Without a list, the driver appends positionally against
+// whatever DESC TABLE reports, and a column added with ADD COLUMN lands at the
+// END of the physical table while appendRecord writes it in the middle -- so
+// every value after the mismatch is read into the wrong column. The symptom is
+// a conversion error about a column nobody was thinking about ("converting
+// string to Int64" on prompt_tokens, several fields further down).
+//
+// The leading space is load-bearing. The driver's own parser looks for
+// "INSERT INTO <table>\s(...)" -- a space, then the parenthesis -- so
+// "usage_detail(...)" with no space is read as a table name of
+// "usage_detail(ledger_id," and the whole list is silently discarded. That
+// failure is invisible: no error, just a positional insert against a table the
+// caller believes it named.
+const insertColumns = ` (
+	ledger_id, occurred_at, tenant, project, key_id, model, endpoint, provider, price_book,
+	prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
+	amount_micro, usage_source, usage_known, truncated,
+	ttft_ms, duration_ms, streamed,
+	engine_queue_ms, engine_ttft_ms, engine_decode_ms)`
+
 func (w *Writer) writeChunk(ctx context.Context, records []billing.Record) error {
-	b, err := w.store.conn.PrepareBatch(ctx, "INSERT INTO "+w.store.db+".usage_detail")
+	b, err := w.store.conn.PrepareBatch(ctx,
+		"INSERT INTO "+w.store.db+".usage_detail"+insertColumns)
 	if err != nil {
 		return err
 	}
@@ -72,6 +95,7 @@ func appendRecord(b driver.Batch, r billing.Record) error {
 		r.KeyID,
 		r.Model,
 		r.Endpoint,
+		detailProvider(r.Provider),
 		r.PriceBook,
 		r.Usage.PromptTokens,
 		r.Usage.CompletionTokens,
@@ -89,6 +113,17 @@ func appendRecord(b driver.Batch, r billing.Record) error {
 		engineTiming(r.Engine, func(e *billing.EngineTimings) *float64 { return e.DecodeMS }),
 	)
 }
+
+// detailProvider normalizes the provider name the ledger stored.
+//
+// Repeated here rather than shared with the ledger for the same reason the
+// timing helper is duplicated: this store may be dropped and rebuilt from the
+// ledger, so nothing in it may depend on the ledger's code. The normalization
+// itself is idempotent, so applying it on both sides cannot produce two
+// spellings of one vendor — which would split its spend across two rows and make
+// a report disagree with the vendor's invoice by exactly the amount that split
+// hid.
+func detailProvider(name string) string { return billing.NormalizeProvider(name) }
 
 // engineTiming reads one of an engine's own timing figures, or NULL.
 //

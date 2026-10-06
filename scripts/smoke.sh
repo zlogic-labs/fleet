@@ -826,6 +826,49 @@ else
   check "a declared rate reads back" "3000000" \
     "$(curl -sS "$API/cost-rates" | jqp "[r['gpuHourMicro'] for r in d if r['cluster']=='smoke-cluster'][0]")"
 
+  # Token prices, which is a different resource: keyed by model AND provider, so
+  # the same weights from two sources are two books and neither repricing moves
+  # the other. There was no endpoint for these at all until this, which is why
+  # a vendor upstream had no way to declare what it charges.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/price-books" \
+    -H 'content-type: application/json' -d '{"provider":"openai","input":1,"output":2}')
+  check "a price book needs a model" "400" "$code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/price-books" \
+    -H 'content-type: application/json' -d '{"model":"smoke-model","input":1,"output":0}')
+  check "a price book needs an output rate" "400" "$code"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/price-books" \
+    -H 'content-type: application/json' -d '{"model":"smoke-model","input":1,"output":2,"cached":9}')
+  check "a cache rate cannot exceed the input rate" "400" "$code"
+
+  curl -sS -o /dev/null -X POST "$API/price-books" -H 'content-type: application/json' \
+    -d '{"model":"smoke-model","input":3,"output":7,"cached":1}'
+  curl -sS -o /dev/null -X POST "$API/price-books" -H 'content-type: application/json' \
+    -d '{"model":"smoke-model","provider":" OpenAI ","input":1500,"output":6000,"cached":150}'
+  # Two vendor declarations seconds apart, which is the shape of a retry. The
+  # second must land rather than collide on an id derived from the effective
+  # date to the second — and it usually does land in the same second here,
+  # because the two calls are adjacent lines.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/price-books" -H 'content-type: application/json' \
+    -d '{"model":"smoke-model","provider":"openai","input":3000,"output":9000,"cached":300}')
+  check "redeclaring a vendor seconds later is not a collision" "200" "$code"
+  check "the fleet and a vendor are two books" "2" \
+    "$(curl -sS "$API/price-books" | jqp "len([b for b in d if b['model']=='smoke-model'])")"
+  check "a vendor's capitalisation is not a third book" "3000" \
+    "$(curl -sS "$API/price-books" | jqp "[b['input'] for b in d if b['model']=='smoke-model' and b['provider']=='openai'][0]")"
+  check "repricing a vendor left the fleet's own book alone" "3" \
+    "$(curl -sS "$API/price-books" | jqp "[b['input'] for b in d if b['model']=='smoke-model' and b['provider']==''][0]")"
+  check "a superseded book is not listed beside its replacement" "1" \
+     "$(curl -sS "$API/price-books" | jqp "len([b for b in d if b['model']=='smoke-model' and b['provider']=='openai'])")"
+
+  # Backdating onto a period already in force. It has to be refused, and the
+  # refusal has to name the instant in force — an operator who is told only
+  # "conflict" cannot act on it.
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API/price-books" -H 'content-type: application/json' \
+    -d '{"model":"smoke-model","provider":"openai","input":4000,"output":12000,"effectiveFrom":"2020-01-01T00:00:00Z"}')
+  check "backdating onto a priced period is refused" "409" "$code"
+  check "the refusal says what is in force" "1" \
+     "$(curl -sS "$API/price-books" | jqp "1 if len([b for b in d if b['model']=='smoke-model' and b['provider']=='openai' and b['input']==3000]) else 0")"
+
   code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/cost-periods/January")
   check "a period is YYYY-MM" "400" "$code"
   code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/cost-periods/1999-02")

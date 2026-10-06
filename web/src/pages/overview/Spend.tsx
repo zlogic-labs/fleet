@@ -2,7 +2,7 @@ import { Table, Typography } from 'antd';
 import { Link } from 'react-router-dom';
 
 import { humanMoney } from '../../hooks';
-import type { CostPeriodSummary, OpenSpend } from '../../types';
+import type { CostPeriodSummary, CostProviderSpend, OpenSpend } from '../../types';
 
 const { Text } = Typography;
 
@@ -118,11 +118,23 @@ function Running({ open, currency }: { open: OpenSpend; currency: string }) {
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: 'flex', gap: 28, alignItems: 'baseline' }}>
-        <Figure
-          label="Charged so far"
-          value={humanMoney(open.totalsMicro, currency)}
-          hint="token charges, this calendar month"
-        />
+        {open.directMicro > 0 ? (
+          // Two centres, so two figures. One combined "charged so far" would
+          // read as a single invoice, and it is not one: an eight-dollar pool
+          // share is eight dollars because other tenants are in the pool, while
+          // the vendor line is the vendor's own invoice.
+          <Figure
+            label="Own capacity"
+            value={humanMoney(open.poolMicro, currency)}
+            hint="token charges against this fleet, this calendar month"
+          />
+        ) : (
+          <Figure
+            label="Charged so far"
+            value={humanMoney(open.totalsMicro, currency)}
+            hint="token charges, this calendar month"
+          />
+        )}
         <Figure
           label="Requests"
           value={open.requests}
@@ -133,6 +145,13 @@ function Running({ open, currency }: { open: OpenSpend; currency: string }) {
           value={cached}
           hint="prompt tokens the engine served from its prefix cache"
         />
+        {open.directMicro > 0 && (
+          <Figure
+            label="Billed by a vendor"
+            value={humanMoney(open.directMicro, currency)}
+            hint={providersHint(open.providers)}
+          />
+        )}
         {open.estimated > 0 && (
           <Figure
             label="Billed on an estimate"
@@ -149,6 +168,16 @@ function Running({ open, currency }: { open: OpenSpend; currency: string }) {
       )}
     </div>
   );
+}
+
+// Which vendors, when there is more than one.
+//
+// Named rather than totalled, because the operator's next action is to compare
+// this against the vendor's own invoice, and a single blended number cannot be
+// compared with anything.
+function providersHint(providers: CostProviderSpend[]): string {
+  if (providers.length === 0) return 'paid by an external vendor';
+  return providers.map((p) => p.provider).join(', ');
 }
 
 function Figure({

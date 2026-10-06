@@ -144,6 +144,7 @@ func run() error {
 	var keyStore *sqlstore.KeyStore
 	var quotaStore *sqlstore.Quota
 	var costStore *sqlstore.CostStore
+	var priceStore *sqlstore.PriceStore
 	if db != nil {
 		policySource = sqlstore.NewPolicySource(db, ratelimit.Policy{})
 		// The same TTL the gateway uses, and deliberately so: this process mints and
@@ -155,6 +156,10 @@ func run() error {
 		keyStore = sqlstore.NewKeyStore(db, sqlstore.NewTTLCache(30*time.Second, 0))
 		quotaStore = sqlstore.NewQuota(db)
 		costStore = sqlstore.NewCostStore(db)
+		// This store only declares books; the gateway has its own with a cache
+		// and a refresh cadence. Sharing one would make a price change depend on
+		// which process was asked.
+		priceStore = sqlstore.NewPriceStore(db, time.Minute)
 	}
 
 	srv, err := apiserver.NewServer(apiserver.Config{
@@ -170,6 +175,7 @@ func run() error {
 		Keys:            keyStore,
 		Quota:           quotaStore,
 		Cost:            costStore,
+		Prices:          priceStore,
 	}, registry.NewMemory(), log)
 	if err != nil {
 		return err

@@ -1,12 +1,14 @@
 import { App as AntApp, Col, Form, Row } from 'antd';
 import { useCallback, useState } from 'react';
 
-import { costPeriods, costRates, usageAgreement } from '../api/control';
+import { costPeriods, costRates, priceBooks, usageAgreement } from '../api/control';
 import { usePoll } from '../hooks';
 import { ControlPlaneAlert } from '../parts/control-plane';
-import type { CostRate } from '../types';
+import type { CostRate, PriceBookInput } from '../types';
 import { Agreement } from './cost/Agreement';
 import { PeriodsCard } from './cost/PeriodsCard';
+import { PriceBooksCard } from './cost/PriceBooksCard';
+import type { BookForm } from './cost/PriceBooksCard';
 import { RatesCard } from './cost/RatesCard';
 import { Report } from './cost/Report';
 
@@ -22,11 +24,13 @@ import { Report } from './cost/Report';
 export function Cost() {
   const { message } = AntApp.useApp();
   const rates$ = usePoll((signal) => costRates.list(signal), 30000);
+  const books$ = usePoll((signal) => priceBooks.list(signal), 30000);
   const periods$ = usePoll((signal) => costPeriods.list(signal), 30000);
   const agreement$ = usePoll((signal) => usageAgreement.get(signal), 30000);
   const [open, setOpen] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [rateForm] = Form.useForm<{ cluster: string; gpuHour: number; currency: string }>();
+  const [bookForm] = Form.useForm<BookForm>();
   const [closeForm] = Form.useForm<{ period: string }>();
 
   // Fetched only when a period is picked. Returning undefined rather than
@@ -38,6 +42,7 @@ export function Cost() {
   );
 
   const refreshRates = rates$.refresh;
+  const refreshBooks = books$.refresh;
   const refreshPeriods = periods$.refresh;
 
   const saveRate = useCallback(
@@ -54,6 +59,22 @@ export function Cost() {
       }
     },
     [rateForm, refreshRates, message],
+  );
+
+  const saveBook = useCallback(
+    async (values: PriceBookInput) => {
+      setBusy(true);
+      try {
+        await priceBooks.save(values);
+        bookForm.resetFields();
+        refreshBooks();
+      } catch (err) {
+        message.error(`cannot declare the price: ${err}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [bookForm, refreshBooks, message],
   );
 
   const close = useCallback(
@@ -76,11 +97,11 @@ export function Cost() {
 
   return (
     <>
-      {(rates$.error || periods$.error) && (
+      {(rates$.error || periods$.error || books$.error) && (
         <ControlPlaneAlert
-          error={rates$.error || periods$.error}
+          error={rates$.error || periods$.error || books$.error}
           style={{ marginBottom: 16 }}
-          hint="Rates, periods and allocations come from fleet-apiserver with a database behind it."
+          hint="Rates, prices, periods and allocations come from fleet-apiserver with a database behind it."
         />
       )}
 
@@ -99,6 +120,13 @@ export function Cost() {
           />
         </Col>
       </Row>
+
+      {/* Full width on purpose: five fields beside a half-width card wrapped
+          into two ragged rows with one input stranded on the first, and the
+          third column of the table above it had no room either. */}
+      <div style={{ marginTop: 16 }}>
+        <PriceBooksCard books={books$.data ?? []} form={bookForm} busy={busy} onSubmit={saveBook} />
+      </div>
 
       {open && report$.data && <Report report={report$.data} />}
 

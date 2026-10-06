@@ -120,7 +120,13 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 	s.Limiter.Settle(r.Context(), reservation, actual)
 
 	rec := billing.Record{
-		Model:       ep.Model,
+		Model: ep.Model,
+		// From the endpoint, not from configuration: the endpoint is what
+		// actually served the request, and a route can be repointed at a vendor
+		// between the reservation and the answer. A gateway that recorded the
+		// configured provider would bill a vendor request as fleet capacity —
+		// allocating money that was already spent a second time.
+		Provider:    providerOf(ep),
 		Endpoint:    ep.ID,
 		UsageKnown:  result.UsageKnown,
 		UsageSource: source,
@@ -153,17 +159,23 @@ func (s *settler) settle(r *http.Request, reservation ratelimit.Reservation, boo
 	defer cancel()
 
 	if s.Pricer != nil {
-		if amount, err := s.Pricer.Charge(settleCtx, rec.Model, rec.Usage); err != nil {
+		if amount, err := s.Pricer.Charge(settleCtx, rec.Model, rec.Provider, rec.Usage); err != nil {
 			// An unpriced model is the operator's gap, not the tenant's fault.
 			// The request is still recorded — at zero — so the tokens are not
 			// lost, and the gap is logged loudly, because a model serving
 			// traffic with no price is a customer being given a GPU for free
 			// and nothing else in the system would say so.
+			//
+			// The provider is in the message because "no price for gpt-4o" is
+			// now two different problems: nobody declared the fleet's rate, or
+			// nobody declared the vendor's. They are fixed by editing two
+			// different rows.
 			s.Log.Error("no price for the model this request used",
-				"model", rec.Model, "endpoint", rec.Endpoint, "err", err)
+				"model", rec.Model, "provider", rec.Provider,
+				"endpoint", rec.Endpoint, "err", err)
 		} else {
 			rec.Amount = amount
-			rec.PriceBook = s.Pricer.BookID(rec.Model)
+			rec.PriceBook = s.Pricer.BookID(rec.Model, rec.Provider)
 		}
 	}
 

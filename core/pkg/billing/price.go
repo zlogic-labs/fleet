@@ -62,7 +62,7 @@ func (r Rate) zero() bool {
 	return r.Input == 0 && r.Output == 0 && r.Cached == 0 && r.Reasoning == 0
 }
 
-// Price is one model's rates.
+// Price is one model's rates from one provider.
 //
 // It is a value with no methods beyond validation because a price book entry
 // has no behaviour; anything that looks like behaviour here is arithmetic that
@@ -76,9 +76,25 @@ type Price struct {
 	Model string `json:"model"`
 	Rate  `json:",inline"`
 
+	// Provider names the vendor this rate came from, empty for the fleet's own
+	// engines. It is part of a price's identity rather than a note on it: the
+	// same model served by the fleet and by a commercial API has two different
+	// prices, and the fleet's is not knowable — it is whatever the month's pool
+	// works out to — while the vendor's is on their website. Keying the book by
+	// model alone would let whichever was loaded last price both.
+	Provider Provider `json:"provider,omitempty"`
+
 	// Currency is informational. It is not what the ledger balances in; see the
 	// package comment.
 	Currency string `json:"currency,omitempty"`
+}
+
+// key is the book's index: a model and who served it.
+//
+// The separator is a byte no usable model name contains, so a model crafted to
+// collide with another model from a provider cannot be expressed.
+func (p Price) key() string {
+	return p.Model + "\x00" + NormalizeProvider(p.Provider)
 }
 
 // Validate rejects a price that cannot be used.
@@ -130,25 +146,52 @@ func NewBook(prices []Price) (*Book, error) {
 		if err := p.Validate(); err != nil {
 			return nil, err
 		}
-		if _, dup := b.prices[p.Model]; dup {
-			return nil, fmt.Errorf("price %s: declared twice", p.Model)
+		if _, dup := b.prices[p.key()]; dup {
+			return nil, fmt.Errorf("price %s from %q: declared twice", p.Model, centreOf(p))
 		}
-		b.prices[p.Model] = p.Rate
+		b.prices[p.key()] = p.Rate
 	}
 	return b, nil
 }
 
-// Rate returns the rates for a model.
+// centreOf names a price's source for an error message, preferring the model
+// because that is what the operator typed and the provider is what they may
+// have misspelled.
+func centreOf(p Price) string {
+	if provider := NormalizeProvider(p.Provider); provider != "" {
+		return provider
+	}
+	return "the fleet"
+}
+
+// Rate returns the rates for a model served by a provider.
 //
-// The second return is false for an unknown model rather than a zero Rate. A
+// Empty provider means the fleet's own engines. Normalised on the way in, so a
+// book declared under one spelling of a vendor's name still prices a route
+// configured with another.
+//
+// The second return is false for an unknown pair rather than a zero Rate. A
 // zero rate would price every token at nothing, and a tenant with an unbilled
-// model is a tenant nobody notices is being given a GPU for free.
-func (b *Book) Rate(model string) (Rate, bool) {
+// model is a tenant nobody notices is being given a GPU for free — or, on the
+// other side of the same mistake, being handed a vendor's invoice at no cost.
+func (b *Book) Rate(model string, provider Provider) (Rate, bool) {
 	if b == nil {
 		return Rate{}, false
 	}
-	r, ok := b.prices[model]
+	r, ok := b.prices[Price{Model: model, Provider: provider}.key()]
 	return r, ok
+}
+
+// Has reports whether a model is priced from a given provider.
+//
+// Separate from Rate because the cheapest-rate fallback below must not fall
+// back across a cost centre. A budget for a request that will be sent to a
+// vendor must be reserved at that vendor's rate: falling back to the fleet's
+// would reserve against a number that is not money, and the reserve would be
+// wrong in whichever direction the pool happens to work out this month.
+func (b *Book) Has(model string, provider Provider) bool {
+	_, ok := b.Rate(model, provider)
+	return ok
 }
 
 // Models lists the priced models, for the console.

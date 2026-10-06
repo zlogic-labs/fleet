@@ -94,13 +94,19 @@ build-release: web ## Cross-compile for every supported platform
 		done; \
 	done
 
+# -p 1 because the two database-backed packages take the same PostgreSQL
+# advisory lock in TestMain so they do not delete each other's fixtures. Run
+# in parallel, the second one queues for the whole of the first one's runtime
+# and is then killed by its own timeout, which reads as a hang in a package
+# that is perfectly healthy. The lock is the right design; serialising the run
+# is the cheap way to live with it.
 .PHONY: test
 test: ## Run the unit tests
-	CGO_ENABLED=$(CGO_ENABLED) go test $(PKGS)
+	CGO_ENABLED=$(CGO_ENABLED) go test -p 1 $(PKGS)
 
 .PHONY: test-race
 test-race: ## Run the unit tests under the race detector (needs a C toolchain)
-	CGO_ENABLED=1 go test -race $(PKGS)
+	CGO_ENABLED=1 go test -p 1 -race $(PKGS)
 
 .PHONY: cover
 cover: ## Report coverage per package

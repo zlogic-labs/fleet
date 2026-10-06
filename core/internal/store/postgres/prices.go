@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
@@ -29,11 +27,23 @@ import (
 // pricer with the previous map. That map is the worse half — reading a Go map
 // while another goroutine writes it is a panic, not a stale value, and the
 // gateway panics on a price refresh under load.
+//
+// bookKey identifies one price book: a model and who served it.
+//
+// A struct rather than a joined string so a model called "gpt-4o" from a provider
+// called "4o" cannot collide with a model called "gpt" from "4o@..." — the
+// separator choice would be a decision this package would then have to be right
+// about forever, for no benefit.
+type bookKey struct {
+	model    string
+	provider billing.Provider
+}
+
 type priceSnapshot struct {
 	pricer *billing.Pricer
-	// ids maps model to the id of the effective book, which the ledger records
-	// so a row points at the exact prices that were applied.
-	ids  map[string]string
+	// ids maps a model and provider to the id of the effective book, which the
+	// ledger records so a row points at the exact prices that were applied.
+	ids  map[bookKey]string
 	load time.Time
 }
 
@@ -56,7 +66,7 @@ func NewPriceStore(db *DB, every time.Duration) *PriceStore {
 	return &PriceStore{
 		db:    db,
 		every: every,
-		held:  priceSnapshot{ids: map[string]string{}},
+		held:  priceSnapshot{ids: map[bookKey]string{}},
 	}
 }
 
@@ -83,7 +93,7 @@ func (s *PriceStore) Refresh(ctx context.Context) error {
 	}
 
 	const q = `
-		SELECT id, model, input_rate, output_rate, cached_rate, reasoning_rate
+		SELECT id, model, provider, input_rate, output_rate, cached_rate, reasoning_rate
 		  FROM price_books
 		 WHERE effective_from <= now()
 		   AND (effective_to IS NULL OR effective_to > now())`
@@ -96,7 +106,7 @@ func (s *PriceStore) Refresh(ctx context.Context) error {
 
 	var (
 		prices []billing.Price
-		ids    = map[string]string{}
+		ids    = map[bookKey]string{}
 	)
 	for rows.Next() {
 		var (
@@ -104,7 +114,7 @@ func (s *PriceStore) Refresh(ctx context.Context) error {
 			price  billing.Price
 			reason *int64
 		)
-		if err := rows.Scan(&id, &price.Model, &price.Input, &price.Output,
+		if err := rows.Scan(&id, &price.Model, &price.Provider, &price.Input, &price.Output,
 			&price.Cached, &reason); err != nil {
 			return fmt.Errorf("postgres: scan price book: %w", err)
 		}
@@ -114,8 +124,9 @@ func (s *PriceStore) Refresh(ctx context.Context) error {
 		if reason != nil {
 			price.Reasoning = *reason
 		}
+		price.Provider = billing.NormalizeProvider(price.Provider)
 		prices = append(prices, price)
-		ids[price.Model] = id
+		ids[bookKey{price.Model, price.Provider}] = id
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("postgres: iterate price books: %w", err)
@@ -171,23 +182,25 @@ func (s *PriceStore) stale() bool {
 //
 // A refresh that fails while a pricer already exists is ignored: stale prices
 // beat no prices. See Pricer.
-func (s *PriceStore) Charge(ctx context.Context, model string, u openai.Usage) (billing.Amount, error) {
+func (s *PriceStore) Charge(ctx context.Context, model string, provider billing.Provider, u openai.Usage) (billing.Amount, error) {
 	p, err := s.Pricer(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return p.Charge(model, u)
+	return p.Charge(model, provider, u)
 }
 
-// BookID returns the price book row id recorded on ledger events for a model.
+// BookID returns the price book row id recorded on ledger events for a model
+// from a provider.
 //
-// Empty when the model has no book, which the ledger stores as NULL. It exists
+// Empty when the pair has no book, which the ledger stores as NULL. It exists
 // so a ledger row points at the exact prices applied rather than at a model
-// name whose price may since have changed.
-func (s *PriceStore) BookID(model string) string {
+// name whose price may since have changed — and, now that one model can be
+// priced by several sources, at a model name that no longer says which.
+func (s *PriceStore) BookID(model string, provider billing.Provider) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.held.ids[model]
+	return s.held.ids[bookKey{model, billing.NormalizeProvider(provider)}]
 }
 
 // Predict implements billing.PricerSource.
@@ -196,52 +209,10 @@ func (s *PriceStore) BookID(model string) string {
 // to be against the current book, and a book that failed to load must read as
 // "nothing priced" so the reservation falls through to a zero rather than to a
 // stale rate.
-func (s *PriceStore) Predict(ctx context.Context, model string, promptTokens, maxTokens int) (billing.Prediction, error) {
+func (s *PriceStore) Predict(ctx context.Context, model string, provider billing.Provider, promptTokens, maxTokens int) (billing.Prediction, error) {
 	p, err := s.Pricer(ctx)
 	if err != nil {
 		return billing.Prediction{}, err
 	}
-	return p.Predict(model, promptTokens, maxTokens), nil
-}
-
-// PutPrice inserts a price book, closing the previous open-ended one.
-//
-// The close happens in the same transaction as the insert because the partial
-// unique index would otherwise reject the second open book, and closing first
-// without the insert would leave the model with no price at all if the insert
-// failed.
-func (s *PriceStore) PutPrice(ctx context.Context, p billing.Price, from time.Time) (string, error) {
-	if err := p.Validate(); err != nil {
-		return "", err
-	}
-	var reasoning *int64
-	if p.Reasoning > 0 {
-		v := p.Reasoning
-		reasoning = &v
-	}
-	id := p.Model + "@" + from.UTC().Format("20060102T150405Z")
-
-	err := s.db.inTx(ctx, func(tx pgx.Tx) error {
-		// Close the open book at the moment the new one starts. Without an
-		// explicit boundary the two overlap and a request in the overlap
-		// matches either, which is why the schema forbids two open books.
-		if _, err := tx.Exec(ctx,
-			`UPDATE price_books SET effective_to = $2 WHERE model = $1 AND effective_to IS NULL`,
-			p.Model, from); err != nil {
-			return fmt.Errorf("postgres: close previous book: %w", err)
-		}
-		const ins = `
-			INSERT INTO price_books
-				(id, model, input_rate, output_rate, cached_rate, reasoning_rate, effective_from)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)`
-		if _, err := tx.Exec(ctx, ins, id, p.Model,
-			p.Input, p.Output, p.Cached, reasoning, from); err != nil {
-			return fmt.Errorf("postgres: insert price book: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return id, nil
+	return p.Predict(model, provider, promptTokens, maxTokens), nil
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/zlogic-labs/fleet/core/internal/gateway/quota"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/pkg/billing"
+	"github.com/zlogic-labs/fleet/core/pkg/engine"
 	"github.com/zlogic-labs/fleet/core/pkg/errs"
 	"github.com/zlogic-labs/fleet/core/pkg/openai"
 )
@@ -26,7 +27,7 @@ import (
 // package, which is every gateway with no database, or no tenant to enforce
 // against — so the settle path does not have to branch on whether budgeting is
 // switched on.
-func (h *settler) reserve(ctx context.Context, tenant, project, model string, promptTokens, maxOut int) (quota.Reservation, error) {
+func (h *settler) reserve(ctx context.Context, tenant, project string, ep engine.Endpoint, promptTokens, maxOut int) (quota.Reservation, error) {
 	if h.Budget == nil {
 		return quota.Reservation{}, nil
 	}
@@ -42,7 +43,7 @@ func (h *settler) reserve(ctx context.Context, tenant, project, model string, pr
 	if tenant == "" {
 		return quota.Reservation{}, nil
 	}
-	est, err := h.predict(ctx, model, promptTokens, maxOut)
+	est, err := h.predict(ctx, ep, promptTokens, maxOut)
 	if err != nil {
 		// No price book at all. Not a refusal: with nothing priced, nothing is
 		// being spent in units either, and a token rule is still enforceable
@@ -50,7 +51,7 @@ func (h *settler) reserve(ctx context.Context, tenant, project, model string, pr
 		// reserves nothing, which is correct for units and wrong for tokens —
 		// so the refusal is not silent.
 		h.Log.Warn("no price book loaded; budget will be enforced on tokens only",
-			"model", model, "err", err)
+			"model", ep.Model, "err", err)
 		return h.Budget.Reserve(ctx, quota.Request{
 			Scope:    ratelimit.Scope{Tenant: tenant, Project: project},
 			Estimate: quota.Estimate{Usage: openai.Usage{TotalTokens: promptTokens + maxOut}},
@@ -61,8 +62,13 @@ func (h *settler) reserve(ctx context.Context, tenant, project, model string, pr
 		// The floor-rate fallback is deliberately an over-estimate, so this
 		// stops the tenant sooner than it should rather than later. Logged
 		// because the operator, not the tenant, is the one who has to fix it.
+		// The floor rate comes from the same cost centre as the request, so a
+		// vendor request without a price is reserved against the cheapest
+		// vendor price and never against the fleet's weighting — those are not
+		// on the same scale, and borrowing across that gap under-reserves by
+		// orders of magnitude. See billing.Pricer.Predict.
 		h.Log.Warn("no price for the model; reserving at the floor rate rather than nothing",
-			"model", model, "amount_micro", int64(est.Amount))
+			"model", ep.Model, "provider", providerOf(ep), "amount_micro", int64(est.Amount))
 	}
 	return h.Budget.Reserve(ctx, quota.Request{
 		Scope:    ratelimit.Scope{Tenant: tenant, Project: project},
@@ -73,11 +79,16 @@ func (h *settler) reserve(ctx context.Context, tenant, project, model string, pr
 
 // predict asks the price source for this request's worst case, in tokens and
 // money together.
-func (h *settler) predict(ctx context.Context, model string, promptTokens, maxOut int) (billing.Prediction, error) {
+//
+// The endpoint rather than a model name, because the provider is half of what a
+// price is and only the endpoint knows which one answered. Reserving at the
+// fleet's rate for a request that will go to a vendor under-reserves by the
+// ratio between a pool weighting and a price per token.
+func (h *settler) predict(ctx context.Context, ep engine.Endpoint, promptTokens, maxOut int) (billing.Prediction, error) {
 	if h.Pricer == nil {
 		return billing.Prediction{}, errNoPricer
 	}
-	return h.Pricer.Predict(ctx, model, promptTokens, maxOut)
+	return h.Pricer.Predict(ctx, ep.Model, providerOf(ep), promptTokens, maxOut)
 }
 
 // errNoPricer is the "nothing to price with" case. It is not a tenant's fault

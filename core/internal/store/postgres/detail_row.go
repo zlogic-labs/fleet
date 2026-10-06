@@ -33,7 +33,8 @@ func scanDetailRow(rows pgx.Rows) (billing.Record, error) {
 		engDecode *float64
 	)
 	err := rows.Scan(
-		&r.LedgerID, &r.Tenant, &project, &keyID, &r.Model, &r.Endpoint, &priceBook,
+		&r.LedgerID, &r.Tenant, &project, &keyID, &r.Model, &r.Endpoint, &r.Provider,
+		&priceBook,
 		&r.Usage.PromptTokens, &r.Usage.CompletionTokens, &cached, &reasoning,
 		&amount, &r.UsageKnown, &source, &r.Truncated,
 		&r.TTFT, &r.Duration, &r.Streamed, &r.OccurredAt,
