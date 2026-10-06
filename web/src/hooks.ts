@@ -30,44 +30,70 @@ export function usePoll<T>(
   const stable = useRef(fetcher);
   stable.current = fetcher;
 
+  // What the last attempt did, held in refs rather than read from the state
+  // below.
+  //
+  // This is the difference between a poll and a load generator. Putting `data`
+  // and `error` in the effect's dependencies — which is what this did until the
+  // running console was measured — means every answer changes a dependency, so
+  // the effect tears down and immediately fetches again: the interval is never
+  // reached, because the next request starts as soon as the last one returns.
+  // Four pollers on the cost page produced 1,541 requests each in 40 seconds,
+  // roughly 154 a second against a control plane whose whole job is to be
+  // occasionally asked.
+  const answered = useRef(false);
+  const failed = useRef(false);
+
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
+    let timer = 0;
+
+    const schedule = (delay: number) => {
+      timer = window.setTimeout(run, delay);
+    };
 
     const run = async () => {
       try {
         const next = await stable.current(controller.signal);
         if (cancelled) return;
+        answered.current = true;
+        failed.current = false;
         setData(next);
         setError(null);
       } catch (err) {
         if (cancelled || controller.signal.aborted) return;
+        failed.current = true;
         setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          // Retry quickly while there is still nothing to show.
+          //
+          // A poll whose first attempt fails before the console has been told
+          // where the control plane is — the ordering on a first visit to a
+          // fresh browser — would otherwise show "not answering" for a full
+          // interval after the address has been adopted and the service is in
+          // fact reachable. Thirty seconds of confidently wrong is worse than a
+          // few extra requests.
+          //
+          // Scheduled by hand rather than by an interval, so that the delay can
+          // depend on what just happened without that decision becoming a
+          // dependency of the effect that makes it.
+          if (intervalMs > 0) {
+            schedule(failed.current && !answered.current ? Math.min(intervalMs, 2000) : intervalMs);
+          }
+        }
       }
     };
 
     void run();
-    if (intervalMs <= 0) return () => { cancelled = true; controller.abort(); };
-
-    // Retry quickly while there is still nothing to show.
-    //
-    // A poll whose first attempt fails before the console has been told where
-    // the control plane is — the ordering on a first visit to a fresh browser
-    // — would otherwise show "not answering" for a full interval after the
-    // address has been adopted and the service is in fact reachable. Thirty
-    // seconds of confidently wrong is worse than a few extra requests.
-    const hadData = data !== undefined;
-    const delay = !hadData && error ? Math.min(intervalMs, 2000) : intervalMs;
-
-    const timer = window.setInterval(run, delay);
     return () => {
       cancelled = true;
       controller.abort();
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
-  }, [intervalMs, nonce, data, error]);
+  }, [intervalMs, nonce]);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
   return { data, error, loading, refresh };

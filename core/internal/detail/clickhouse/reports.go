@@ -2,7 +2,6 @@ package clickhouse
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -26,40 +25,44 @@ type DailySpend struct {
 // nowhere, and the day is already the leading column of the ordering key, so the
 // range prunes without it.
 //
-// This is the query the overview and the cost page issue, so its shape is the
-// schema's real requirement rather than a guess.
+// This is the shape a replica-backed report needs, and it is written against a
+// real server rather than composed from what the schema is supposed to say: it
+// once filtered on a `day` column that only existed inside a projection, so the
+// query did not compile against the table at all — and that failed only when run
+// against a server, never in a test that stopped at building a string.
+//
+// Nothing in the console reads it yet. The overview and the cost page read the
+// ledger, which is the authoritative store for money; this exists for the
+// questions that are the wrong shape for a relational table.
 func (s *Store) Daily(ctx context.Context, from, to time.Time, tenant string) ([]DailySpend, error) {
+	// One query with an optional predicate rather than two literals that have to
+	// be kept identical: the two copies this replaces were already the same
+	// twelve lines twice, and a column added to one of them would have made the
+	// scoped and unscoped reports count different things.
+	//
+	// cached_tokens is COALESCEd for the same reason the ledger's spend queries
+	// are: an engine that reports totals without a breakdown has said nothing,
+	// and SUM over a group where every row said nothing is NULL rather than
+	// zero. Scanning NULL into an int fails the report, so a month served
+	// entirely by such an engine would answer with an error where it should
+	// answer with a number.
 	q := `
 		SELECT toDate(occurred_at) AS day,
 		       tenant,
 		       model,
 		       sum(prompt_tokens)      AS prompt_tokens,
 		       sum(completion_tokens) AS completion_tokens,
-		       sum(cached_tokens)     AS cached_tokens,
+		       coalesce(sum(cached_tokens), 0) AS cached_tokens,
 		       sum(amount_micro)      AS amount_micro,
 		       count()                AS requests
 		FROM ` + s.db + `.usage_detail
-		WHERE occurred_at >= $1 AND occurred_at < $2
-		GROUP BY day, tenant, model
-		ORDER BY day, tenant, model`
-
+		WHERE occurred_at >= $1 AND occurred_at < $2`
 	args := []any{from, to}
 	if tenant != "" {
-		q = `
-		SELECT toDate(occurred_at) AS day,
-		       tenant,
-		       model,
-		       sum(prompt_tokens)      AS prompt_tokens,
-		       sum(completion_tokens) AS completion_tokens,
-		       sum(cached_tokens)     AS cached_tokens,
-		       sum(amount_micro)      AS amount_micro,
-		       count()                AS requests
-		FROM ` + s.db + `.usage_detail
-		WHERE occurred_at >= $1 AND occurred_at < $2 AND tenant = $3
-		GROUP BY day, tenant, model
-		ORDER BY day, tenant, model`
+		q += ` AND tenant = $3`
 		args = append(args, tenant)
 	}
+	q += ` GROUP BY day, tenant, model ORDER BY day, tenant, model`
 
 	rows, err := s.Query(ctx, q, args...)
 	if err != nil {
@@ -136,23 +139,8 @@ func (t *endpointTotals) set(source string, n uint64, completion int64, truncate
 	}
 }
 
-// Count reports how many rows the store holds, for a reconciliation to compare
-// against the ledger's own count.
-func (s *Store) Count(ctx context.Context) (uint64, error) {
-	var n uint64
-	if err := s.QueryRow(ctx, "SELECT count() FROM "+s.db+".usage_detail").Scan(&n); err != nil {
-		return 0, fmt.Errorf("clickhouse: %w", err)
-	}
-	return n, nil
-}
-
-// HasLedgerID reports whether a given ledger row is present, which is how a
-// backfill knows where to resume and how a reconciliation names what is missing.
-func (s *Store) HasLedgerID(ctx context.Context, id int64) (bool, error) {
-	var n uint64
-	if err := s.QueryRow(ctx,
-		"SELECT count() FROM "+s.db+".usage_detail WHERE ledger_id = $1", id).Scan(&n); err != nil {
-		return false, fmt.Errorf("clickhouse: %w", err)
-	}
-	return n > 0, nil
-}
+// A count of the whole table and a per-id membership test used to live here,
+// with a comment saying a reconciliation would use them. It does not: the
+// comparison is per window and per group (reconcile.go), and asking after one id
+// at a time would be a full scan of the table per id, because ledger_id is not
+// in the ordering key. Both were removed rather than left as a promise.

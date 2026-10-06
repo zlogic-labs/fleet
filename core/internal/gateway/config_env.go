@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zlogic-labs/fleet/core/internal/detail/clickhouse"
 )
 
 // The environment layer.
@@ -38,8 +40,7 @@ func applyEnv(cfg *Config) {
 	// server, and setting three of them from the environment while the fourth
 	// was defaulted is how a URL points at the wrong database's credentials.
 	if os.Getenv("FLEET_CLICKHOUSE_URL") != "" {
-		d := detailConfigFromEnv()
-		cfg.Detail = d
+		cfg.Detail = clickhouse.FromEnv()
 	}
 
 	if v := os.Getenv("FLEET_DATABASE_MIGRATE"); v != "" {

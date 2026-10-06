@@ -146,34 +146,30 @@ func TestTheEndpointTotalsKeepTheThreeSourcesApart(t *testing.T) {
 	}
 }
 
-func TestCountAndMembershipAreWhatAResyncNeeds(t *testing.T) {
+func TestTheDailyReportCountsARowWhoseBreakdownWasOmitted(t *testing.T) {
 	s := testStore(t)
 	truncate(t, s)
 
 	at := time.Date(2026, 9, 28, 6, 0, 0, 0, time.UTC)
-	seed(t, s, at, 2)
+	r := sample(at, "acme", "qwen-7b")
+	// An engine that reports totals without a breakdown, which the ledger stores
+	// as NULL and the replica copies as NULL. SUM over a group where every row
+	// said nothing is NULL, and scanning NULL into an int fails the whole
+	// report rather than converting -- so a month served entirely by such an
+	// engine would return an error where it should return a number.
+	r.Usage.PromptTokensDetails = nil
+	if err := NewWriter(s).Write(context.Background(), []billing.Record{r}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 
-	n, err := s.Count(context.Background())
+	got, err := s.Daily(context.Background(), at.Add(-time.Hour), at.Add(time.Hour), "")
 	if err != nil {
-		t.Fatalf("count: %v", err)
+		t.Fatalf("daily: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("count got %d, want 2", n)
+	if len(got) != 1 {
+		t.Fatalf("got %d rows, want 1", len(got))
 	}
-
-	id := int64(at.Unix()) + 1
-	present, err := s.HasLedgerID(context.Background(), id)
-	if err != nil {
-		t.Fatalf("has: %v", err)
-	}
-	if !present {
-		t.Errorf("the second seeded row's id %d is not found", id)
-	}
-	present, err = s.HasLedgerID(context.Background(), id+1_000_000)
-	if err != nil {
-		t.Fatalf("has: %v", err)
-	}
-	if present {
-		t.Errorf("an id that was never written is reported as present")
+	if got[0].CachedTokens != 0 {
+		t.Errorf("cached got %d, want 0", got[0].CachedTokens)
 	}
 }

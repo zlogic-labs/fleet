@@ -41,6 +41,18 @@ func NewPeriod(t time.Time) Period {
 // String renders the period as YYYY-MM.
 func (p Period) String() string { return p.Start.Format(periodLayout) }
 
+// Previous returns the calendar month before this one.
+//
+// Written here rather than as AddDate(0, -1, 0) at the call site, because that
+// is wrong for a day of the month that does not exist in the earlier one: Go
+// normalises 31 March minus one month into 3 March, so a "previous month"
+// computed from today lands on the month that is already running. Both ends here
+// are the first of a month, so neither can overflow.
+func (p Period) Previous() Period {
+	start := p.Start.AddDate(0, -1, 0)
+	return Period{Start: start, End: p.Start}
+}
+
 // Valid reports whether the period can be closed.
 func (p Period) Valid() bool {
 	return !p.Start.IsZero() && p.End.After(p.Start)

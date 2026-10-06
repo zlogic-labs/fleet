@@ -15,7 +15,7 @@ export interface FleetStatus {
   version: string;
   /**
    * Where this gateway reaches the control plane, when it was told. Absent
-   * means this gateway discovers deployments some other way — static upstreams,
+   * means this gateway discovers deployments some other way 鈥?static upstreams,
    * or a control plane on the same origin as the console.
    */
   controlPlane?: string;
@@ -46,7 +46,7 @@ export interface RecentSample {
   decodeMs: number;
   /**
    * How long the engine held the request before decoding it, from the engine's
-   * own per-request metrics. Absent — not zero — when the engine publishes none,
+   * own per-request metrics. Absent 鈥?not zero 鈥?when the engine publishes none,
    * which is the ordinary case: vLLM needs `--enable-per-request-metrics` and
    * llama-server does not separate queueing from prompt evaluation at all.
    */
@@ -58,7 +58,7 @@ export interface RecentSample {
   estimated: boolean;
 }
 
-// ── control plane ───────────────────────────────────────────────
+// 鈹€鈹€ control plane 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
  * A model in the registry, as distinct from a Model the gateway serves.
@@ -159,7 +159,7 @@ export interface ClusterNode {
 }
 
 export interface ClusterStatus {
-  /** Empty until the operator reports inventory. See docs/architecture.md §12. */
+  /** Empty until the operator reports inventory. See docs/architecture.md 搂12. */
   clusters: ClusterReport[];
 }
 
@@ -251,7 +251,7 @@ export interface BudgetRule {
   resolutionSeconds?: number;
 }
 
-// ── the cost pool (P8) ─────────────────────────────────────────
+// 鈹€鈹€ the cost pool (P8) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /** What a GPU-hour costs in one cluster. Declared, never inferred. */
 export interface CostRate {
@@ -268,9 +268,9 @@ export interface CostPeriodSummary {
   pool: number;
   idle: number;
   /**
-   * Whole-number percentages, 0–100, rounded half up by the server.
+   * Whole-number percentages, 0鈥?00, rounded half up by the server.
    *
-   * Not fractions in millionths — CostAllocation.share below is, and the two
+   * Not fractions in millionths 鈥?CostAllocation.share below is, and the two
    * being different is a trap. `humanPct` expects the millionths scale; using
    * it here printed 100 as 0.01%.
    */
@@ -354,7 +354,7 @@ export interface CostReport {
 export interface PriceBook {
   /** Quoted back by the ledger on every row it priced. */
   id: string;
-  /** The resolved model — what the endpoint serves, not what the client typed. */
+  /** The resolved model 鈥?what the endpoint serves, not what the client typed. */
   model: string;
   /** Lowercased vendor name. Empty means this fleet's own capacity. */
   provider: string;
@@ -451,7 +451,7 @@ export interface OpenSpendModel {
  *
  * Not a CostReport and deliberately shaped unlike one: there is no pool, no
  * allocation and no idle share, because this month's capacity is not a
- * measurement yet. `priced` says whether a GPU-hour rate is declared — the
+ * measurement yet. `priced` says whether a GPU-hour rate is declared 鈥?the
  * figures below are token charges and exist either way.
  */
 export interface OpenSpend {
@@ -471,4 +471,60 @@ export interface OpenSpend {
   requests: number;
   estimated: number;
   priced: boolean;
+}
+
+/**
+ * What one store says about a window of usage records.
+ *
+ * Records is a count and the rest are sums, which is what lets a comparison
+ * tell "a row is missing" apart from "a row is wrong": the first moves the
+ * count, the second does not.
+ */
+export interface ReconciliationTally {
+  records: number;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+  amountMicro: number;
+}
+
+export interface ReconciliationDifference {
+  field: string;
+  ledger: number;
+  replica: number;
+}
+
+export interface ReconciliationGroup {
+  /** "tenant/model", the same spelling on both sides of the comparison. */
+  key: string;
+  reason: string;
+  ledger: ReconciliationTally;
+  replica: ReconciliationTally;
+  fields: ReconciliationDifference[];
+}
+
+/**
+ * Whether the reporting copy holds what the books hold.
+ *
+ * `available` false is a supported deployment rather than an error: without a
+ * detail store there is nothing to compare against, and `note` says which of the
+ * two reasons it is. The ledger side is still reported, because that is the copy
+ * which cannot be regenerated.
+ */
+export interface UsageReconciliation {
+  period: string;
+  from: string;
+  to: string;
+  asOf: string;
+  /** How far the window stops short of now. Non-zero only for a running month. */
+  lagSeconds: number;
+  available: boolean;
+  note?: string;
+  groupLimit: number;
+  ledger: ReconciliationTally;
+  replica: ReconciliationTally;
+  agreed: boolean;
+  fields: ReconciliationDifference[];
+  groups: ReconciliationGroup[];
+  omitted: number;
 }

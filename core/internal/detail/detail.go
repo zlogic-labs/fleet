@@ -118,8 +118,15 @@ func (q *Queue) Enqueue(r billing.Record) {
 
 // run drains the queue until Close.
 //
-// The select is on both channels rather than ranging over ch, so that a Close
-// arriving mid-batch does not wait for the batch to finish twice.
+// Shutdown is a receive from a closed channel and nothing else. An earlier
+// version also selected on q.done, which this function closes when it returns —
+// so that case could never fire, while a closed q.ch reports ready forever. The
+// result was that Close never returned and this loop received the zero Record
+// from the closed channel in a tight loop, handing 8192-record batches of blank
+// rows to the writer for as long as the process survived. A gateway restart
+// wrote thirteen million empty rows into the replica, which is how the
+// reconciliation report came to be the first thing in the product to notice
+// (§11.14).
 func (q *Queue) run(flush time.Duration) {
 	defer close(q.done)
 	ticker := time.NewTicker(flush)
@@ -128,33 +135,30 @@ func (q *Queue) run(flush time.Duration) {
 	batch := make([]billing.Record, 0, defaultCapacity)
 	for {
 		select {
-		case r := <-q.ch:
+		case r, ok := <-q.ch:
+			if !ok {
+				// A closed channel delivers what is buffered before it reports
+				// the close, so everything queued has already been received and
+				// one last flush is the whole of the drain.
+				q.flush(batch)
+				return
+			}
 			batch = append(batch, r)
 			// Drain whatever else is already queued before writing, so a burst
 			// becomes one batch instead of one batch per record.
 			for len(batch) < cap(batch) {
-				select {
-				case r := <-q.ch:
-					batch = append(batch, r)
-				default:
-					goto flush
+				next, ok := <-q.ch
+				if !ok {
+					q.flush(batch)
+					return
 				}
+				batch = append(batch, next)
 			}
-		flush:
 			q.flush(batch)
 			batch = batch[:0]
 		case <-ticker.C:
 			q.flush(batch)
 			batch = batch[:0]
-		case <-q.done:
-			// Whatever is queued at shutdown is lost, and logged. Shutdown
-			// ordering is the operator's problem, not something to paper over
-			// by blocking Close until a slow store drains.
-			if n := len(q.ch); n > 0 {
-				q.log.Warn("records still queued at shutdown, they are not in the detail store",
-					"records", n)
-			}
-			return
 		}
 	}
 }
@@ -176,9 +180,11 @@ func (q *Queue) flush(batch []billing.Record) {
 
 // Close stops the queue and closes the writer.
 //
-// It drains one batch on the way out rather than nothing at all, because the
-// common case for a restart is "the queue had a little in it" and that little is
-// exactly what a rebuild would have to go back for.
+// It drains what is queued rather than dropping it: closing the channel is the
+// signal, and a closed channel delivers its contents before it reports the
+// close, so the run loop receives every buffered record and flushes once on the
+// way out. The common case for a restart is "the queue had a little in it" and
+// that little is exactly what a rebuild would have to go back for.
 func (q *Queue) Close() error {
 	var err error
 	q.closeOnce.Do(func() {

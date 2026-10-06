@@ -28,12 +28,7 @@ func detailSink(ctx context.Context, cfg Config, log *slog.Logger) (detail.Sink,
 		return detail.Nop{}, nil, nil
 	}
 
-	store, err := clickhouse.Open(ctx, clickhouse.Config{
-		URL:      url,
-		Database: cfg.Detail.Database,
-		User:     cfg.Detail.User,
-		Password: cfg.Detail.Password,
-	})
+	store, err := clickhouse.Open(ctx, cfg.Detail)
 	if err != nil {
 		return nil, nil, err
 	}

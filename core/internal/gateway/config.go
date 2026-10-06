@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zlogic-labs/fleet/core/internal/detail/clickhouse"
 )
 
 // Config is the whole of a single-node deployment's configuration.
@@ -45,7 +47,7 @@ type Config struct {
 	// Detail is the reporting replica. Unlike Database this is never required:
 	// the database is the ledger and a gateway without one cannot bill, but the
 	// replica only answers questions the ledger can also answer more slowly.
-	Detail DetailConfig `yaml:"detail"`
+	Detail clickhouse.Config `yaml:"detail"`
 }
 
 // DatabaseConfig points at Fleet's PostgreSQL.

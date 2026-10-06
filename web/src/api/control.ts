@@ -19,6 +19,7 @@ import type {
   PriceBook,
   PriceBookInput,
   UsageAgreement,
+  UsageReconciliation,
 } from '../types';
 
 const BASE = '/api/v1';
@@ -124,7 +125,7 @@ export const budgetRules = {
 };
 
 /**
- * The cost pool. A rate is what a GPU-hour costs in a cluster — declared by an
+ * The cost pool. A rate is what a GPU-hour costs in a cluster 鈥?declared by an
  * operator because Fleet cannot know it, and applied when a period is closed.
  */
 export const costRates = {
@@ -164,7 +165,7 @@ export const costPeriods = {
  * model.
  *
  * A separate collection, not a period. It has no pool and no idle share, because
- * this month's capacity is not a measurement yet — so do not expect a CostReport
+ * this month's capacity is not a measurement yet 鈥?so do not expect a CostReport
  * shape here even though the two look similar.
  */
 export const spend = {
@@ -180,4 +181,20 @@ export const spend = {
  */
 export const usageAgreement = {
   get: (signal?: AbortSignal) => request<UsageAgreement>(`${BASE}/usage-agreement`, { signal }),
+};
+/**
+ * Whether the reporting copy holds what the books hold.
+ *
+ * A different question from the agreement above, with a different remedy: that
+ * one asks whether the gateway measured a request the way the engine did, and
+ * this asks whether the store a report is read from still has the rows the
+ * ledger has. `period` narrows it to a month; without one the control plane
+ * compares the most recently closed period.
+ */
+export const usageReconciliation = {
+  get: (period?: string, signal?: AbortSignal) =>
+    request<UsageReconciliation>(
+      period ? `${BASE}/usage-reconciliation?period=${encodeURIComponent(period)}` : `${BASE}/usage-reconciliation`,
+      { signal },
+    ),
 };

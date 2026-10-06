@@ -1,7 +1,7 @@
 import { App as AntApp, Col, Form, Row } from 'antd';
 import { useCallback, useState } from 'react';
 
-import { costPeriods, costRates, priceBooks, usageAgreement } from '../api/control';
+import { costPeriods, costRates, priceBooks, usageAgreement, usageReconciliation } from '../api/control';
 import { usePoll } from '../hooks';
 import { ControlPlaneAlert } from '../parts/control-plane';
 import type { CostRate, PriceBookInput } from '../types';
@@ -10,6 +10,7 @@ import { PeriodsCard } from './cost/PeriodsCard';
 import { PriceBooksCard } from './cost/PriceBooksCard';
 import type { BookForm } from './cost/PriceBooksCard';
 import { RatesCard } from './cost/RatesCard';
+import { Reconciliation } from './cost/Reconciliation';
 import { Report } from './cost/Report';
 
 /**
@@ -41,9 +42,31 @@ export function Cost() {
     0,
   );
 
+  // The same period the report above is showing, so the two cards never answer
+  // about different months. Without a picked period the control plane compares
+  // the most recently closed one, which is the invoice somebody has already
+  // been shown.
+  const recon$ = usePoll((signal) => usageReconciliation.get(open, signal), 30000);
+
   const refreshRates = rates$.refresh;
   const refreshBooks = books$.refresh;
   const refreshPeriods = periods$.refresh;
+  const refreshReport = report$.refresh;
+  const refreshRecon = recon$.refresh;
+
+  // Both of the period-scoped cards are fetched on demand, and the hook's timer
+  // does not restart when the id changes — the fetcher is held in a ref so that
+  // an inline arrow function does not restart it on every render. So the change
+  // has to be announced, or picking a row would leave the card below showing
+  // the previous month for as long as the page stayed open.
+  const pick = useCallback(
+    (period: string) => {
+      setOpen(period);
+      refreshReport();
+      refreshRecon();
+    },
+    [refreshReport, refreshRecon],
+  );
 
   const saveRate = useCallback(
     async (values: CostRate) => {
@@ -85,6 +108,8 @@ export function Cost() {
         message.success(`${values.period} is priced and stored.`);
         refreshPeriods();
         setOpen(values.period);
+        refreshReport();
+        refreshRecon();
         closeForm.resetFields();
       } catch (err) {
         message.error(`cannot close ${values.period}: ${err}`);
@@ -92,16 +117,16 @@ export function Cost() {
         setBusy(false);
       }
     },
-    [closeForm, refreshPeriods, message],
+    [closeForm, refreshPeriods, refreshReport, refreshRecon, message],
   );
 
   return (
     <>
-      {(rates$.error || periods$.error || books$.error) && (
+      {(rates$.error || periods$.error || books$.error || recon$.error) && (
         <ControlPlaneAlert
-          error={rates$.error || periods$.error || books$.error}
+          error={rates$.error || periods$.error || books$.error || recon$.error}
           style={{ marginBottom: 16 }}
-          hint="Rates, prices, periods and allocations come from fleet-apiserver with a database behind it."
+          hint="Rates, prices, periods, allocations and the reconciliation come from fleet-apiserver with a database behind it."
         />
       )}
 
@@ -115,7 +140,7 @@ export function Cost() {
             open={open}
             form={closeForm}
             busy={busy}
-            onPick={setOpen}
+            onPick={pick}
             onSubmit={close}
           />
         </Col>
@@ -131,6 +156,8 @@ export function Cost() {
       {open && report$.data && <Report report={report$.data} />}
 
       <Agreement report={agreement$.data} />
+
+      <Reconciliation report={recon$.data} />
     </>
   );
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zlogic-labs/fleet/core/internal/apiserver"
+	"github.com/zlogic-labs/fleet/core/internal/detail/clickhouse"
 	"github.com/zlogic-labs/fleet/core/internal/gateway/ratelimit"
 	"github.com/zlogic-labs/fleet/core/internal/registry"
 	sqlstore "github.com/zlogic-labs/fleet/core/internal/store/postgres"
@@ -176,6 +177,7 @@ func run() error {
 		Quota:           quotaStore,
 		Cost:            costStore,
 		Prices:          priceStore,
+		Detail:          clickhouse.FromEnv(),
 	}, registry.NewMemory(), log)
 	if err != nil {
 		return err
