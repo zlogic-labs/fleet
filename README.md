@@ -112,8 +112,12 @@ That last row is the one to read twice. A `Ready` model that cannot be loaded
 is a claim the platform cannot back up, and the pull is where that claim is
 made.
 
-`make check` runs what CI runs and needs no server. `smoke.sh` is separate
-because it needs both processes up, so it cannot be part of `check`.
+`make check` runs what CI runs and needs no server. It also compiles
+fleet-serving when that repository sits beside this one: each repository's
+own checks pass while the pair does not compile, which is how a deleted core
+interface left the controller broken with both suites green. `smoke.sh` is
+separate because it needs both processes up, so it cannot be part of
+`check`.
 
 ### Turning authentication on
 
@@ -317,7 +321,7 @@ also talks to AWS must not pick up Fleet's bucket by accident.
 ## Development
 
 ```sh
-make check          # gofmt + go vet + no-cgo check + tests + console types
+make check          # gofmt + go vet + no-cgo check + tests + console types + controller
 make smoke          # end-to-end assertions; needs ./scripts/dev.sh running
 make build          # host binaries into ./bin
 make web            # build the console and stage it for embedding

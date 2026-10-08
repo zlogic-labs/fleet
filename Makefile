@@ -15,6 +15,10 @@ CORE_CMDS   := fleet-gateway fleet-apiserver
 MODS        := core
 PKGS        := $(MODS:%=%/...)
 
+# The controller's checkout, used by check-serving. It is optional: a clone of
+# this repository alone still has a meaningful check.
+SERVING_DIR ?= $(CURDIR)/../fleet-serving
+
 # The console is an npm project whose output is embedded into
 # core/internal/gateway/webui/dist. Building it here rather than in a separate
 # repository means `make build` can embed a current console with no second
@@ -142,7 +146,20 @@ tidy: ## Tidy every module
 	done
 
 .PHONY: check
-check: fmt-check vet check-cgo test web-typecheck ## Everything CI runs
+check: fmt-check vet check-cgo test web-typecheck check-serving ## Everything CI runs
+
+# The controller lives in another repository, joined to this one by a
+# gitignored go.work that points core at the sibling checkout. Each repo's own
+# checks therefore pass while the pair does not compile — which is how a core
+# interface deletion left fleet-serving broken with both suites green.
+.PHONY: check-serving
+check-serving: ## Also compile the sibling fleet-serving checkout when present
+	@if [ -f "$(SERVING_DIR)/go.mod" ]; then \
+		echo "  building $(SERVING_DIR)"; \
+		(cd "$(SERVING_DIR)" && go build ./... && go vet ./...) || exit 1; \
+	else \
+		echo "  fleet-serving not checked out at $(SERVING_DIR); skipping"; \
+	fi
 
 .PHONY: web-typecheck
 web-typecheck: ## Typecheck the console
