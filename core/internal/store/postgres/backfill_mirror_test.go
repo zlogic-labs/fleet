@@ -17,7 +17,7 @@ func testClickHouse(t *testing.T) (chURL, chDB, chUser string) {
 	t.Helper()
 	url := os.Getenv("FLEET_TEST_CLICKHOUSE_URL")
 	if url == "" {
-		return "", "", ""
+		t.Skip("FLEET_TEST_CLICKHOUSE_URL is unset; skipping the tests that need a second database")
 	}
 	database := os.Getenv("FLEET_TEST_CLICKHOUSE_DATABASE")
 	if database == "" {

@@ -105,7 +105,12 @@ func TestTheTallyRefusesAnUnusableWindow(t *testing.T) {
 	if _, err := db.UsageTally(ctx, Window{}); err == nil {
 		t.Fatal("a window with no ends was accepted")
 	}
-	if _, err := db.UsageByGroup(ctx, Window{From: time.Now(), To: time.Now()}); err == nil {
+	// Both ends the same instant. Two calls to Now would be separated by
+	// however long the clock takes to advance, which makes the window legal and
+	// the test fail for a reason unrelated to what it is checking — it passed or
+	// failed depending on the machine rather than on the code.
+	instant := time.Now()
+	if _, err := db.UsageByGroup(ctx, Window{From: instant, To: instant}); err == nil {
 		t.Fatal("an empty window was accepted")
 	}
 }
