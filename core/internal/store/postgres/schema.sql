@@ -83,9 +83,6 @@ CREATE INDEX IF NOT EXISTS projects_tenant_idx ON projects (tenant_id);
 -- the lookup errors — so the deployment looks healthy and enforces the wrong
 -- limits. Adding a column with a default does not rewrite existing rows, which
 -- is the line db.go's Migrate draws between this file and a real migration.
-ALTER TABLE price_books ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT '';
-ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT '';
-
 ALTER TABLE tenants  ADD COLUMN IF NOT EXISTS request_limit integer NOT NULL DEFAULT 0;
 ALTER TABLE tenants  ADD COLUMN IF NOT EXISTS token_limit   integer NOT NULL DEFAULT 0;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS request_limit integer NOT NULL DEFAULT 0;
@@ -178,6 +175,11 @@ CREATE TABLE IF NOT EXISTS price_books (
     created_at     timestamptz NOT NULL DEFAULT now(),
     CHECK (effective_to IS NULL OR effective_to > effective_from)
 );
+
+-- For a database created before the column existed. The CREATE above already
+-- names it, but CREATE TABLE IF NOT EXISTS leaves an older table shape alone,
+-- and adding a column with a default rewrites no rows.
+ALTER TABLE price_books ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT '';
 
 -- A model may have several books over time, so uniqueness is on the interval,
 -- not on the model alone. Exclude-in-progress is a standard partial index trick:
@@ -287,6 +289,10 @@ CREATE TABLE IF NOT EXISTS usage_events (
     -- rather than a quiet refund.
     CHECK (amounts_micro >= 0)
 );
+
+-- For a database created before the column existed; the note above the
+-- price_books equivalent says why this side of the CREATE.
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT '';
 
 -- The rollups the product asks for, in the order the product asks for them.
 --

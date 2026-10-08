@@ -85,6 +85,79 @@ func TestTheLimitColumnsReachAnOldDatabase(t *testing.T) {
 	}
 }
 
+// The shipped schema must be able to create a database from nothing.
+//
+// Order is only observable on an empty database: where the tables already
+// exist, CREATE ... IF NOT EXISTS is skipped and an ALTER that runs before its
+// CREATE succeeds by accident. So every test in this package that migrates a
+// database with content passed while the provider columns sat above the
+// price_books CREATE, and the first statement of a real install failed on
+// them. A fresh machine is the only place that shows, which is exactly why
+// it needs one here.
+func TestTheSchemaCreatesAnEmptyDatabase(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	scratch := "fleet_fresh_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if _, err := db.Pool().Exec(ctx, `CREATE SCHEMA `+scratch); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Pool().Exec(context.Background(), `DROP SCHEMA IF EXISTS `+scratch+` CASCADE`)
+	})
+
+	// Same reason as the test above: one connection, and only that one, ever
+	// sees the scratch schema, and it hands it back reset.
+	conn, err := db.Pool().Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(context.Background(), `RESET search_path`)
+		conn.Release()
+	}()
+	if _, err := conn.Exec(ctx, `SET search_path TO `+scratch); err != nil {
+		t.Fatalf("search_path: %v", err)
+	}
+
+	if _, err := conn.Exec(ctx, schema); err != nil {
+		t.Fatalf("schema.sql cannot create an empty database: %v", err)
+	}
+
+	// A statement that ran before its CREATE has already failed above. This
+	// catches the other way to be wrong: a table the file declares that was
+	// never created at all, which no later statement would object to.
+	for _, name := range declaredTables(t) {
+		var one int
+		if err := conn.QueryRow(ctx,
+			`SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
+			scratch, name).Scan(&one); err != nil {
+			t.Errorf("schema.sql declares table %s but it is not in the database: %v", name, err)
+		}
+	}
+}
+
+var declaredTable = regexp.MustCompile(`(?m)^\s*CREATE TABLE (?:IF NOT EXISTS )?(\w+)`)
+
+// declaredTables reads the table names out of the shipped file so this test
+// cannot pass while the file drifts away from it.
+func declaredTables(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	matches := declaredTable.FindAllStringSubmatch(string(raw), -1)
+	if len(matches) == 0 {
+		t.Fatal("schema.sql declares no tables, so this test asserts nothing")
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m[1])
+	}
+	return out
+}
+
 var legacySchema = []string{
 	`CREATE TABLE tenants (
 		id           text PRIMARY KEY,
