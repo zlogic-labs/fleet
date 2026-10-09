@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleet-postgres
+  labels:
+    app: fleet-postgres
+spec:
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  selector:
+    app: fleet-postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fleet-postgres
+spec:
+  serviceName: fleet-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleet-postgres
+  template:
+    metadata:
+      labels:
+        app: fleet-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: POSTGRES_DB
+            # The data directory inside its own subdirectory: the local-path
+            # volume may contain a lost+found, and PostgreSQL refuses to
+            # initialise into a directory that is not empty.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi

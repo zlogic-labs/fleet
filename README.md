@@ -45,6 +45,7 @@ nothing reachable from a gateway process can pull in `client-go`.
 ```
 core/      gateway, control plane, billing, storage        no k8s dependency
 web/       operator console (React + antd)                 builds into core
+deploy/    k3s bootstrap script and the kustomize manifests
 docs/      architecture and ADRs
 ```
 

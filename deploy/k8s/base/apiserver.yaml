@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fleet-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleet-apiserver
+  labels:
+    app: fleet-apiserver
+spec:
+  # LoadBalancer, served by k3s's bundled ServiceLB (klipper-lb). Exposure
+  # lives in the svclb pod, not in this deployment: a hostPort here made every
+  # rolling update deadlock against its own old pod, which still held 8081
+  # while the replacement waited for a port that only the replacement's
+  # readiness could free. The port number stays 8081 either way, so the URL
+  # the console adopts does not change.
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+  selector:
+    app: fleet-apiserver
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-apiserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleet-apiserver
+  template:
+    metadata:
+      labels:
+        app: fleet-apiserver
+    spec:
+      containers:
+        - name: apiserver
+          image: fleet-apiserver:dev
+          args:
+            - --data
+            - /var/lib/fleet/data
+          ports:
+            - containerPort: 8081
+          env:
+            - name: FLEET_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: DATABASE_URL
+            # This process owns the schema. The gateway is not given DDL: a
+            # request path should not need it (see the flag's own help).
+            - name: FLEET_DATABASE_MIGRATE
+              value: "true"
+            - name: FLEET_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: ADMIN_TOKEN
+            - name: FLEET_ALLOWED_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_ALLOWED_ORIGINS
+            - name: FLEET_CLICKHOUSE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CLICKHOUSE_URL
+            - name: FLEET_CLICKHOUSE_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CLICKHOUSE_DATABASE
+            - name: FLEET_CLICKHOUSE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CLICKHOUSE_USER
+            - name: FLEET_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: CLICKHOUSE_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fleet
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fleet-data

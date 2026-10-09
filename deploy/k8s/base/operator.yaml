@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet-operator
+rules:
+  - apiGroups: [fleet.zlogic.com]
+    resources: [fleetmodels, fleetdeployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [fleet.zlogic.com]
+    resources: [fleetmodels/status, fleetdeployments/status]
+    verbs: [get, update, patch]
+  - apiGroups: [fleet.zlogic.com]
+    resources: [fleetmodels/finalizers, fleetdeployments/finalizers]
+    verbs: [update]
+  # The rendered objects, owned by the controller so a deletion cascades.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Pods are read to explain a deployment that will not start; nodes are the
+  # cluster inventory that gets reported to the control plane.
+  - apiGroups: [""]
+    resources: [pods, nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleet-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-operator
+subjects:
+  - kind: ServiceAccount
+    name: fleet-operator
+    namespace: fleet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleet-operator
+  template:
+    metadata:
+      labels:
+        app: fleet-operator
+    spec:
+      serviceAccountName: fleet-operator
+      containers:
+        - name: operator
+          image: fleet-operator:dev
+          args:
+            - --namespace
+            - fleet
+            - --report-to
+            - http://fleet-apiserver:8081
+            - --report-every
+            - 5s
+            # The name the cluster is booked under in usage_events and the
+            # cost pool; it appears on every invoice line this cluster earns.
+            - --cluster-name
+            - k3s-dev
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probe
+              containerPort: 8081
+          env:
+            - name: FLEET_REPORT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: ADMIN_TOKEN
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
