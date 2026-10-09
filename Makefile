@@ -79,6 +79,16 @@ engine-image: ## Stage a real llama.cpp image and a real quantized model into k3
 e2e: ## Pull, deploy to k3s, and infer through the gateway
 	FLEET_SERVING_DIR=$${FLEET_SERVING_DIR:-$$(cd .. && pwd)/fleet-serving} ./scripts/e2e.sh
 
+# The whole stack on Kubernetes, as manifests rather than as systemd units.
+# Both run on the target host, which is why neither is part of `check`.
+.PHONY: k8s-images
+k8s-images: ## Build the three binaries and import them into k3s as images
+	./deploy/k8s/build-images.sh
+
+.PHONY: k8s-deploy
+k8s-deploy: ## Deploy PostgreSQL, ClickHouse and Fleet with kustomize
+	./deploy/k8s/install.sh
+
 .PHONY: build
 build: ## Compile every command for the host platform into ./bin
 	@mkdir -p $(GOBIN)

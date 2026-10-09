@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleet-gateway
+  labels:
+    app: fleet-gateway
+spec:
+  # LoadBalancer via k3s's bundled ServiceLB — same reason as the control
+  # plane: a hostPort in the pod spec deadlocks a rolling update against the
+  # old pod's port, and the exposure belongs to a service, not to a workload.
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: fleet-gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleet-gateway
+  template:
+    metadata:
+      labels:
+        app: fleet-gateway
+    spec:
+      containers:
+        - name: gateway
+          image: fleet-gateway:dev
+          ports:
+            - containerPort: 8080
+          env:
+            - name: FLEET_LISTEN
+              value: ":8080"
+            # The node address, not the Service name: the browser reads this
+            # URL out of /fleet/status and adopts it verbatim, so it has to be
+            # reachable from outside the cluster as well.
+            - name: FLEET_CONTROL_PLANE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CONTROL_PLANE_URL
+            - name: FLEET_CONTROL_PLANE_REFRESH
+              value: 5s
+            - name: FLEET_CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: ADMIN_TOKEN
+            - name: FLEET_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: DATABASE_URL
+            # No FLEET_DATABASE_MIGRATE here: the gateway reads the ledger and
+            # the tenant tables, it does not own them.
+            - name: FLEET_CLICKHOUSE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CLICKHOUSE_URL
+            - name: FLEET_CLICKHOUSE_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CLICKHOUSE_DATABASE
+            - name: FLEET_CLICKHOUSE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: fleet-urls
+                  key: FLEET_CLICKHOUSE_USER
+            - name: FLEET_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-env
+                  key: CLICKHOUSE_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
